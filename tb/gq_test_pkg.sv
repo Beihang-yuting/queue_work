@@ -10,6 +10,7 @@ package gq_test_pkg;
 
     `include "host_mem_manager.sv"
     `include "tests/gq_config_test.svh"
+    `include "tests/mailbox_desc_test.svh"
 
     class gq_smoke_test extends uvm_test;
         `uvm_component_utils(gq_smoke_test)

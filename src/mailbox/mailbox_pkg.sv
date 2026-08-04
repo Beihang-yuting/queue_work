@@ -6,6 +6,9 @@ package mailbox_pkg;
     import host_mem_pkg::*;
     import gq_pkg::*;
     `include "uvm_macros.svh"
+
+    `include "mailbox_tx_desc.svh"
+    `include "mailbox_rx_desc.svh"
 endpackage
 
 `endif
