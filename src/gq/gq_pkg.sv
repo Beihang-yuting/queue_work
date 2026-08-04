@@ -12,6 +12,10 @@ package gq_pkg;
     `include "gq_hw_adapter.svh"
     `include "gq_completion_source.svh"
     `include "gq_queue_cfg.svh"
+    `include "gq_env_cfg.svh"
+    `include "gq_queue_engine.svh"
+    `include "gq_agent.svh"
+    `include "gq_env.svh"
 endpackage
 
 `endif
