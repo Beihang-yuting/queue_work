@@ -9,6 +9,7 @@ package gq_test_pkg;
     `include "uvm_macros.svh"
 
     `include "host_mem_manager.sv"
+    `include "tests/gq_config_test.svh"
 
     class gq_smoke_test extends uvm_test;
         `uvm_component_utils(gq_smoke_test)
