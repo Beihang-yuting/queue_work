@@ -11,13 +11,13 @@ SOURCES := host_mem/src/host_mem_pkg.sv \
            tb/gq_test_pkg.sv \
            tb/tb_top.sv
 
-.PHONY: build run
+.PHONY: build vcs run
 
-build: $(SIMV)
+build: vcs
 
-$(SIMV): $(SOURCES)
+vcs:
 	mkdir -p $(BUILD_DIR)
-	$(VCS) $(VCS_FLAGS) $(INCDIRS) $(SOURCES) -o $@
+	$(VCS) $(VCS_FLAGS) $(INCDIRS) $(SOURCES) -o $(SIMV)
 
-run: build
+run: vcs
 	$(SIMV) +UVM_TESTNAME=$(TEST)
