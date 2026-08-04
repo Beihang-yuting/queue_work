@@ -1,10 +1,15 @@
 `ifndef GQ_DESC_BASE_SVH
 `define GQ_DESC_BASE_SVH
 
+typedef struct {
+    gq_addr_t   addr;
+    host_mem_api allocator;
+} gq_owned_allocation_t;
+
 virtual class gq_desc_base extends uvm_sequence_item;
     host_mem_api mem;
 
-    protected gq_addr_t owned_addrs[$];
+    protected gq_owned_allocation_t owned_allocations[$];
     protected bit released;
 
     function new(string name = "gq_desc_base");
@@ -23,13 +28,18 @@ virtual class gq_desc_base extends uvm_sequence_item;
 
     function gq_addr_t alloc_owned(int unsigned size, int unsigned align = 1);
         gq_addr_t addr;
+        host_mem_api allocator;
+        gq_owned_allocation_t owned;
 
         if (mem == null)
             return '1;
 
-        addr = mem.alloc(size, align, `__FILE__, `__LINE__);
+        allocator = mem;
+        addr = allocator.alloc(size, align, `__FILE__, `__LINE__);
         if (addr != '1) begin
-            owned_addrs.push_back(addr);
+            owned.addr      = addr;
+            owned.allocator = allocator;
+            owned_allocations.push_back(owned);
             released = 0;
         end
         return addr;
@@ -39,9 +49,10 @@ virtual class gq_desc_base extends uvm_sequence_item;
         if (released)
             return;
 
-        foreach (owned_addrs[i])
-            mem.free(owned_addrs[i], `__FILE__, `__LINE__);
-        owned_addrs.delete();
+        foreach (owned_allocations[i])
+            owned_allocations[i].allocator.free(owned_allocations[i].addr,
+                                                `__FILE__, `__LINE__);
+        owned_allocations.delete();
         released = 1;
     endfunction
 

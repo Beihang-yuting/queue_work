@@ -14,21 +14,46 @@ class mailbox_desc_test extends uvm_test;
                                               field_name, actual, expected))
     endfunction
 
+    function void copy_bytes(input byte source[], ref byte destination[]);
+        destination = new[source.size()];
+        foreach (source[i])
+            destination[i] = source[i];
+    endfunction
+
+    function void expect_bytes_equal(string check_name, input byte actual[],
+                                     input byte expected[]);
+        if (actual.size() != expected.size())
+            `uvm_fatal("DESC_STATE", $sformatf("%s size changed", check_name))
+        foreach (expected[i]) begin
+            if (actual[i] !== expected[i])
+                `uvm_fatal("DESC_STATE", $sformatf("%s byte %0d changed", check_name, i))
+        end
+    endfunction
+
     function void build_phase(uvm_phase phase);
         host_mem_manager mem;
+        host_mem_manager owner_mem;
+        host_mem_manager other_mem;
         mailbox_tx_desc tx;
         mailbox_tx_desc tx_copy;
         mailbox_tx_desc tx_zero;
         mailbox_tx_desc tx_invalid;
+        mailbox_tx_desc tx_rebind;
         mailbox_rx_desc rx;
         mailbox_rx_desc rx_copy;
         mailbox_rx_desc rx_zero;
+        mailbox_rx_desc rx_null_rebind;
         byte tx_bytes[];
         byte rx_bytes[];
         byte wrong_tx_bytes[];
         byte wrong_rx_bytes[];
+        byte malformed_tx_bytes[];
+        byte malformed_rx_bytes[];
+        byte state_before[];
+        byte state_after[];
         byte external_read[];
         byte rx_expected[];
+        gq_addr_t prepared_addr;
 
         super.build_phase(phase);
 
@@ -96,6 +121,46 @@ class mailbox_desc_test extends uvm_test;
                 `uvm_fatal("TX_ROUNDTRIP", $sformatf("TX inline byte %0d mismatch", i))
         end
 
+        tx_copy.pack(state_before);
+        copy_bytes(tx_bytes, malformed_tx_bytes);
+        malformed_tx_bytes[18] = 8'd45;
+        malformed_tx_bytes[19] = 8'd0;
+        if (tx_copy.unpack(malformed_tx_bytes))
+            `uvm_fatal("TX_TRANSACTION", "same-size TX with data_len above 44 accepted")
+        tx_copy.pack(state_after);
+        expect_bytes_equal("semantic TX rejection", state_after, state_before);
+
+        tx.pack(state_before);
+        copy_bytes(tx_bytes, malformed_tx_bytes);
+        malformed_tx_bytes[0]  = 8'h03;
+        malformed_tx_bytes[16] = 8'h00;
+        malformed_tx_bytes[17] = 8'h00;
+        if (tx.unpack(malformed_tx_bytes))
+            `uvm_fatal("TX_OWNERSHIP", "TX writeback with changed length accepted")
+        tx.pack(state_after);
+        expect_bytes_equal("owned TX length rejection", state_after, state_before);
+
+        copy_bytes(tx_bytes, malformed_tx_bytes);
+        malformed_tx_bytes[0] = 8'h03;
+        malformed_tx_bytes[8] = malformed_tx_bytes[8] ^ 8'h10;
+        if (tx.unpack(malformed_tx_bytes))
+            `uvm_fatal("TX_OWNERSHIP", "TX writeback with changed address accepted")
+        tx.pack(state_after);
+        expect_bytes_equal("owned TX address rejection", state_after, state_before);
+
+        copy_bytes(tx_bytes, malformed_tx_bytes);
+        malformed_tx_bytes[0] = 8'h03;
+        if (!tx.unpack(malformed_tx_bytes))
+            `uvm_fatal("TX_WRITEBACK", "legitimate TX flag writeback rejected")
+        if (tx.flags != 16'h0003 || tx.buf_addr != 64'h1000_0000 || tx.buf_len != 4)
+            `uvm_fatal("TX_WRITEBACK", "legitimate TX writeback corrupted prepared state")
+
+        prepared_addr = tx.buf_addr;
+        if (tx.prepare())
+            `uvm_fatal("TX_REPEAT", "repeated TX prepare unexpectedly succeeded")
+        if (tx.buf_addr != prepared_addr || tx.external_data.size() != 4)
+            `uvm_fatal("TX_REPEAT", "repeated TX prepare changed owned-buffer state")
+
         if (tx_copy.is_complete(1'b1))
             `uvm_fatal("TX_PHASE", "phase-one descriptor completed before used writeback")
         tx_copy.flags[1] = 1'b1;
@@ -152,10 +217,51 @@ class mailbox_desc_test extends uvm_test;
             expect_byte($sformatf("rx.buf_addr[%0d]", i), rx_bytes[8+i],
                         byte'(rx.buf_addr >> (8*i)));
 
+        rx.pack(state_before);
+        copy_bytes(rx_bytes, malformed_rx_bytes);
+        malformed_rx_bytes[0] = 8'h03;
+        malformed_rx_bytes[4] = 8'h00;
+        malformed_rx_bytes[5] = 8'h00;
+        if (rx.unpack(malformed_rx_bytes))
+            `uvm_fatal("RX_OWNERSHIP", "RX writeback with zero length accepted")
+        rx.pack(state_after);
+        expect_bytes_equal("owned RX zero-length rejection", state_after, state_before);
+
+        copy_bytes(rx_bytes, malformed_rx_bytes);
+        malformed_rx_bytes[0] = 8'h03;
+        malformed_rx_bytes[4] = 8'h80;
+        malformed_rx_bytes[5] = 8'h00;
+        if (rx.unpack(malformed_rx_bytes))
+            `uvm_fatal("RX_OWNERSHIP", "RX writeback with changed length accepted")
+        rx.pack(state_after);
+        expect_bytes_equal("owned RX changed-length rejection", state_after, state_before);
+
+        copy_bytes(rx_bytes, malformed_rx_bytes);
+        malformed_rx_bytes[0] = 8'h03;
+        malformed_rx_bytes[8] = malformed_rx_bytes[8] ^ 8'h10;
+        if (rx.unpack(malformed_rx_bytes))
+            `uvm_fatal("RX_OWNERSHIP", "RX writeback with changed address accepted")
+        rx.pack(state_after);
+        expect_bytes_equal("owned RX address rejection", state_after, state_before);
+
+        copy_bytes(rx_bytes, malformed_rx_bytes);
+        malformed_rx_bytes[0] = 8'h03;
+        if (!rx.unpack(malformed_rx_bytes))
+            `uvm_fatal("RX_WRITEBACK", "legitimate RX flag writeback rejected")
+        if (rx.flags != 16'h0003 || rx.buf_addr != 64'h1000_0010 ||
+            rx.buf_len != 32'h100)
+            `uvm_fatal("RX_WRITEBACK", "legitimate RX writeback corrupted prepared state")
+
+        prepared_addr = rx.buf_addr;
+        if (rx.prepare())
+            `uvm_fatal("RX_REPEAT", "repeated RX prepare unexpectedly succeeded")
+        if (rx.buf_addr != prepared_addr)
+            `uvm_fatal("RX_REPEAT", "repeated RX prepare changed owned-buffer state")
+
         rx_copy = mailbox_rx_desc::type_id::create("rx_copy");
         if (!rx_copy.unpack(rx_bytes))
             `uvm_fatal("RX_UNPACK", "valid RX descriptor rejected")
-        if (rx_copy.flags != rx.flags || rx_copy.buf_len != rx.buf_len ||
+        if (rx_copy.flags != 16'h0001 || rx_copy.buf_len != rx.buf_len ||
             rx_copy.buf_addr != rx.buf_addr)
             `uvm_fatal("RX_ROUNDTRIP", "RX round trip mismatch")
 
@@ -176,6 +282,7 @@ class mailbox_desc_test extends uvm_test;
         foreach (rx_expected[i])
             rx_expected[i] = byte'(i ^ 8'h5a);
         mem.write_mem(rx.buf_addr, rx_expected, `__FILE__, `__LINE__);
+        rx.set_mem(null);
         if (!rx.parse_completion())
             `uvm_fatal("RX_PARSE", "RX completion parse failed")
         if (rx.rx_data.size() != rx_expected.size())
@@ -199,6 +306,35 @@ class mailbox_desc_test extends uvm_test;
             `uvm_fatal("RX_ZERO", "zero-length RX buffer behavior is incorrect")
         if (!rx_zero.parse_completion() || rx_zero.rx_data.size() != 0)
             `uvm_fatal("RX_ZERO", "zero-length RX completion behavior is incorrect")
+
+        owner_mem = new("owner_mem");
+        owner_mem.init_region(64'h3000_0000, 64'h3000_ffff, MODE_LINEAR, 16);
+        other_mem = new("other_mem");
+        other_mem.init_region(64'h4000_0000, 64'h4000_ffff, MODE_LINEAR, 16);
+
+        tx_rebind = mailbox_tx_desc::type_id::create("tx_rebind");
+        tx_rebind.buf_len = 16;
+        tx_rebind.attach_mem(owner_mem);
+        if (!tx_rebind.prepare())
+            `uvm_fatal("OWNER_REBIND", "rebind TX prepare failed")
+        tx_rebind.attach_mem(other_mem);
+        tx_rebind.release_owned();
+        tx_rebind.release_owned();
+        owner_mem.leak_check(`__FILE__, `__LINE__);
+        other_mem.leak_check(`__FILE__, `__LINE__);
+
+        rx_null_rebind = mailbox_rx_desc::type_id::create("rx_null_rebind");
+        rx_null_rebind.buf_len = 16;
+        rx_null_rebind.attach_mem(owner_mem);
+        if (!rx_null_rebind.prepare())
+            `uvm_fatal("OWNER_NULL", "null-rebind RX prepare failed")
+        rx_null_rebind.set_mem(null);
+        if (rx_null_rebind.alloc_owned(16) != '1)
+            `uvm_fatal("OWNER_NULL", "allocation with a null memory handle succeeded")
+        rx_null_rebind.release_owned();
+        rx_null_rebind.release_owned();
+        owner_mem.leak_check(`__FILE__, `__LINE__);
+        other_mem.leak_check(`__FILE__, `__LINE__);
 
         tx.release_owned();
         tx.release_owned();

@@ -9,18 +9,34 @@ class mailbox_rx_desc extends gq_desc_base;
     gq_addr_t  buf_addr;
     byte rx_data[];
 
+    protected bit prepared;
+    protected host_mem_api prepared_mem;
+    protected gq_addr_t prepared_buf_addr;
+    protected bit [31:0] prepared_buf_len;
+
     function new(string name = "mailbox_rx_desc");
         super.new(name);
         flags    = 0;
         buf_len  = 0;
         buf_addr = 0;
         rx_data  = new[0];
+        prepared          = 0;
+        prepared_mem      = null;
+        prepared_buf_addr = 0;
+        prepared_buf_len  = 0;
     endfunction
 
     virtual function bit prepare();
+        if (prepared)
+            return 0;
+
         rx_data = new[0];
         if (buf_len == 0) begin
             buf_addr = 0;
+            prepared_mem      = mem;
+            prepared_buf_addr = 0;
+            prepared_buf_len  = 0;
+            prepared           = 1;
             return 1;
         end
 
@@ -28,7 +44,14 @@ class mailbox_rx_desc extends gq_desc_base;
             return 0;
 
         buf_addr = alloc_owned(buf_len);
-        return buf_addr != '1;
+        if (buf_addr == '1)
+            return 0;
+
+        prepared_mem      = mem;
+        prepared_buf_addr = buf_addr;
+        prepared_buf_len  = buf_len;
+        prepared           = 1;
+        return 1;
     endfunction
 
     virtual function void mark_available(bit phase);
@@ -42,8 +65,8 @@ class mailbox_rx_desc extends gq_desc_base;
         raw = '0;
         raw[15:0]   = flags;
         raw[31:16]  = 16'h0000;
-        raw[63:32]  = buf_len;
-        raw[127:64] = buf_addr;
+        raw[63:32]  = prepared ? prepared_buf_len : buf_len;
+        raw[127:64] = prepared ? prepared_buf_addr : buf_addr;
 
         packed_data = new[16];
         for (int unsigned i = 0; i < 16; i++)
@@ -52,6 +75,10 @@ class mailbox_rx_desc extends gq_desc_base;
 
     virtual function bit unpack(input byte packed_data[]);
         bit [127:0] raw;
+        bit [15:0] decoded_flags;
+        bit [15:0] decoded_reserved;
+        bit [31:0] decoded_buf_len;
+        gq_addr_t decoded_buf_addr;
 
         if (packed_data.size() != 16)
             return 0;
@@ -60,9 +87,22 @@ class mailbox_rx_desc extends gq_desc_base;
         for (int unsigned i = 0; i < 16; i++)
             raw[i*8 +: 8] = packed_data[i];
 
-        flags    = raw[15:0];
-        buf_len  = raw[63:32];
-        buf_addr = raw[127:64];
+        decoded_flags    = raw[15:0];
+        decoded_reserved = raw[31:16];
+        decoded_buf_len  = raw[63:32];
+        decoded_buf_addr = raw[127:64];
+
+        if (prepared) begin
+            if (decoded_reserved != 0 || decoded_buf_len != prepared_buf_len ||
+                decoded_buf_addr != prepared_buf_addr)
+                return 0;
+            flags = decoded_flags;
+            return 1;
+        end
+
+        flags    = decoded_flags;
+        buf_len  = decoded_buf_len;
+        buf_addr = decoded_buf_addr;
         return 1;
     endfunction
 
@@ -72,13 +112,16 @@ class mailbox_rx_desc extends gq_desc_base;
 
     virtual function bit parse_completion();
         rx_data = new[0];
-        if (buf_len == 0)
+        if (!prepared)
+            return 0;
+        if (prepared_buf_len == 0)
             return 1;
-        if (mem == null || buf_addr == '1)
+        if (prepared_mem == null || prepared_buf_addr == '1)
             return 0;
 
-        mem.read_mem(buf_addr, buf_len, rx_data, `__FILE__, `__LINE__);
-        return rx_data.size() == buf_len;
+        prepared_mem.read_mem(prepared_buf_addr, prepared_buf_len, rx_data,
+                              `__FILE__, `__LINE__);
+        return rx_data.size() == prepared_buf_len;
     endfunction
 endclass
 
