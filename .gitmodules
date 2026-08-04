@@ -1,0 +1,4 @@
+[submodule "host_mem"]
+	path = host_mem
+	url = https://github.com/Beihang-yuting/host_mem.git
+	branch = master

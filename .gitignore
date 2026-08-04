@@ -1,2 +1,9 @@
 .worktrees/
 .superpowers/
+build/
+csrc/
+simv*
+*.daidir/
+*.log
+ucli.key
+vc_hdrs.h
