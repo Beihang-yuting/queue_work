@@ -101,6 +101,25 @@ class gq_reset_order_adapter extends mailbox_mock_adapter;
     endtask
 endclass
 
+class gq_reset_irq_adapter extends mailbox_mock_adapter;
+    `uvm_object_utils(gq_reset_irq_adapter)
+
+    time ack_delay;
+    uvm_event ack_entered;
+
+    function new(string name = "gq_reset_irq_adapter");
+        super.new(name);
+        ack_delay   = 0;
+        ack_entered = new({name, "_ack_entered"});
+    endfunction
+
+    virtual task ack_irq(gq_role_e role, int unsigned queue_id);
+        ack_entered.trigger();
+        #(ack_delay);
+        super.ack_irq(role, queue_id);
+    endtask
+endclass
+
 class gq_reset_race_engine extends gq_queue_engine;
     `uvm_component_utils(gq_reset_race_engine)
 
@@ -148,7 +167,7 @@ class gq_reset_test extends uvm_test;
     mailbox_env           disabled_env;
     gq_completion_collector collector;
     host_mem_manager      irq_mem;
-    mailbox_mock_adapter  irq_adapter;
+    gq_reset_irq_adapter  irq_adapter;
     mailbox_mock_dut      irq_dut;
     gq_queue_cfg          irq_cfg;
     gq_queue_engine       irq_engine;
@@ -268,7 +287,7 @@ class gq_reset_test extends uvm_test;
         irq_mem = new("irq_mem");
         irq_mem.init_region(64'h0000_0001_7100_0000,
                             64'h0000_0001_71ff_ffff, MODE_LINEAR, 16);
-        irq_adapter = mailbox_mock_adapter::type_id::create("irq_adapter");
+        irq_adapter = gq_reset_irq_adapter::type_id::create("irq_adapter");
         irq_dut = mailbox_mock_dut::type_id::create("irq_dut");
         irq_dut.mem     = irq_mem;
         irq_dut.adapter = irq_adapter;
@@ -376,6 +395,8 @@ class gq_reset_test extends uvm_test;
         bit blocked_sequence_returned;
         bit refill_publish_seen;
         time irq_reset_start;
+        bit delayed_ack_reset_returned;
+        int unsigned disable_calls_before_delayed_ack;
 
         phase.raise_objection(this);
         env_cfg.wait_ready();
@@ -712,11 +733,69 @@ class gq_reset_test extends uvm_test;
             if (irq_adapter.wait_irq_calls >= 2)
                 break;
         end
+        if (irq_adapter.wait_irq_calls < 2)
+            `uvm_fatal("RESET_IRQ_ACK_GATE",
+                       "IRQ worker did not arm before delayed ACK test")
+
+        // Once ACK ownership wins the completion boundary, reset must publish
+        // its new epoch immediately without disabling/freeing resources until
+        // the external ACK has returned.
+        irq_adapter.ack_delay = 50ns;
+        irq_adapter.ack_entered.reset();
+        irq_desc = make_tx("irq_delayed_ack_desc", 14);
+        irq_request = gq_request::type_id::create("irq_delayed_ack_request");
+        irq_request.add_desc(irq_desc);
+        irq_response = gq_response::type_id::create(
+            "irq_delayed_ack_response");
+        irq_engine.submit_batch(irq_request, irq_response);
+        if (irq_response.status != GQ_OK || irq_response.reset_epoch != 1)
+            `uvm_fatal("RESET_IRQ_ACK_GATE", "delayed ACK submit failed")
+        irq_dut.complete_slot(irq_engine, 1, 32, 64);
+        disable_calls_before_delayed_ack = irq_adapter.disable_calls;
+        irq_adapter.trigger_irq(GQ_TX, 19);
+        for (int unsigned poll = 0; poll < 20; poll++) begin
+            #1ns;
+            if (irq_adapter.ack_entered.is_on())
+                break;
+        end
+        if (!irq_adapter.ack_entered.is_on())
+            `uvm_fatal("RESET_IRQ_ACK_GATE", "IRQ did not enter delayed ACK")
+
+        delayed_ack_reset_returned = 0;
+        fork : delayed_ack_reset
+            begin
+                irq_engine.assert_reset();
+                delayed_ack_reset_returned = 1;
+            end
+        join_none
+        #1ns;
+        if (irq_engine.reset_epoch() != 2 || irq_engine.is_ready())
+            `uvm_fatal("RESET_IRQ_ACK_GATE",
+                       "delayed ACK blocked reset epoch/ready publication")
+        if (delayed_ack_reset_returned ||
+            irq_adapter.disable_calls != disable_calls_before_delayed_ack ||
+            irq_engine.ring_base() == 0)
+            `uvm_fatal("RESET_IRQ_ACK_GATE",
+                       "reset teardown crossed an in-flight ACK")
+        for (int unsigned poll = 0; poll < 100; poll++) begin
+            #1ns;
+            if (delayed_ack_reset_returned)
+                break;
+        end
+        if (!delayed_ack_reset_returned || irq_adapter.ack_irq_calls != 2 ||
+            irq_adapter.disable_calls !=
+                disable_calls_before_delayed_ack + 1 ||
+            irq_engine.outstanding_count() != 0 ||
+            irq_engine.ring_base() != 0 ||
+            irq_collector.retired_srcids.size() != 1)
+            `uvm_fatal("RESET_IRQ_ACK_GATE",
+                       "reset did not quiesce delayed ACK before teardown")
+        irq_adapter.ack_delay = 0;
         irq_engine.cleanup();
         #(irq_cfg.completion_timeout + 5ns);
         if (!irq_worker_returned)
             `uvm_fatal("RESET_IRQ", "blocked IRQ worker survived cleanup")
-        if (irq_adapter.ack_irq_calls != 1)
+        if (irq_adapter.ack_irq_calls != 2)
             `uvm_fatal("RESET_IRQ", "cleanup IRQ timeout was acknowledged")
         irq_mem.leak_check(`__FILE__, `__LINE__);
 
@@ -874,7 +953,7 @@ class gq_reset_test extends uvm_test;
         if (!cleanup_blocked_returned || !cleanup_call_returned ||
             cleanup_blocked_response.status != GQ_ABORTED_BY_RESET ||
             cleanup_blocked_response.committed_count != 0 ||
-            cleanup_blocked_response.reset_epoch != 2 ||
+            cleanup_blocked_response.reset_epoch != 3 ||
             stale_engine.is_ready() || stale_engine.ring_base() != 0)
             `uvm_fatal("RESET_CLEANUP",
                        "cleanup did not abort blocked capacity request")
