@@ -22,6 +22,8 @@ class gq_queue_engine extends uvm_component;
     protected bit outstanding_ids[int];
     protected gq_logical_seq_t logical_head_seq;
     protected gq_logical_seq_t logical_tail_seq;
+    protected gq_refill_profile refill_profile;
+    protected bit rx_started;
     protected uvm_event space_available;
     uvm_analysis_port #(gq_desc_base) completion_ap;
 
@@ -39,6 +41,8 @@ class gq_queue_engine extends uvm_component;
         state_lock        = new(1);
         logical_head_seq  = 0;
         logical_tail_seq  = 0;
+        refill_profile    = null;
+        rx_started        = 0;
         space_available   = new({name, "_space_available"});
         completion_ap     = new("completion_ap", this);
         wait_policy       = null;
@@ -167,12 +171,28 @@ class gq_queue_engine extends uvm_component;
         end
     endtask
 
-    protected function void release_attempted(gq_request request,
-                                              int unsigned attempted_count);
+    protected function void release_attempted(
+        input gq_desc_base descs[$], int unsigned attempted_count);
         for (int unsigned i = 0; i < attempted_count; i++) begin
-            if (request.descs[i] != null)
-                request.descs[i].release_owned();
+            if (descs[i] != null)
+                descs[i].release_owned();
         end
+    endfunction
+
+    protected function void release_generated(input gq_desc_base descs[$]);
+        foreach (descs[i]) begin
+            if (descs[i] != null)
+                descs[i].release_owned();
+        end
+    endfunction
+
+    protected function void initialize_response(ref gq_response response,
+                                                input string response_name);
+        if (response == null)
+            response = gq_response::type_id::create(response_name);
+        response.status          = GQ_RESOURCE_ERROR;
+        response.committed_count = 0;
+        response.reset_epoch     = 0;
     endfunction
 
     protected virtual function bit mark_request_id_seen(
@@ -263,7 +283,7 @@ class gq_queue_engine extends uvm_component;
         gq_logical_seq_t query_head;
         gq_logical_seq_t current_outstanding;
         int unsigned count;
-        bit retired_any;
+        int unsigned retired_count;
         bit protocol_violation;
 
         completion_serialization.get(1);
@@ -296,7 +316,7 @@ class gq_queue_engine extends uvm_component;
             return;
         end
 
-        retired_any = 0;
+        retired_count = 0;
         for (int unsigned i = 0; i < count; i++) begin
             desc = pending[i];
             if (!desc.parse_completion()) begin
@@ -315,11 +335,13 @@ class gq_queue_engine extends uvm_component;
             state_lock.get(1);
             retire_outstanding(query_head + i, desc);
             state_lock.put(1);
-            retired_any = 1;
+            retired_count++;
         end
-        if (retired_any)
+        if (retired_count != 0)
             space_available.trigger();
         completion_serialization.put(1);
+        if (retired_count != 0)
+            refill_after_progress();
     endtask
 
     task wait_and_drain_once();
@@ -345,7 +367,13 @@ class gq_queue_engine extends uvm_component;
         end
     endtask
 
-    task submit_batch(input gq_request request, inout gq_response response);
+    // Caller holds submit_serialization. No caller may hold state_lock or
+    // completion_serialization while this task prepares or publishes.
+    protected task submit_desc_batch_locked(
+        input gq_desc_base descs[$],
+        inout gq_response response,
+        input bit activate_rx,
+        input gq_refill_profile activation_profile);
         int unsigned batch_size;
         int unsigned attempted_count;
         gq_logical_seq_t old_tail;
@@ -356,36 +384,25 @@ class gq_queue_engine extends uvm_component;
         byte packed_data[];
         bit seen_ids[int];
 
-        if (response == null)
-            response = gq_response::type_id::create("submit_response");
-        response.status          = GQ_RESOURCE_ERROR;
-        response.committed_count = 0;
-        response.reset_epoch     = 0;
-
-        if (request == null || request.kind != GQ_SUBMIT)
-            return;
-        batch_size = request.size();
+        batch_size = descs.size();
         if (batch_size == 0 || batch_size > cfg.depth)
             return;
-        foreach (request.descs[i]) begin
-            if (request.descs[i] == null)
+        foreach (descs[i]) begin
+            if (descs[i] == null)
                 return;
-            if (!mark_request_id_seen(request.descs[i], seen_ids))
+            if (!mark_request_id_seen(descs[i], seen_ids))
                 return;
         end
 
-        submit_serialization.get(1);
         forever begin
             state_lock.get(1);
             if (!ready_value) begin
                 state_lock.put(1);
-                submit_serialization.put(1);
                 return;
             end
-            foreach (request.descs[i]) begin
-                if (outstanding_ids.exists(request.descs[i].get_inst_id())) begin
+            foreach (descs[i]) begin
+                if (outstanding_ids.exists(descs[i].get_inst_id())) begin
                     state_lock.put(1);
-                    submit_serialization.put(1);
                     return;
                 end
             end
@@ -404,18 +421,16 @@ class gq_queue_engine extends uvm_component;
         for (int unsigned i = 0; i < batch_size; i++) begin
             seq = old_tail + i;
             attempted_count = i + 1;
-            request.descs[i].attach_mem(mem);
-            if (!request.descs[i].prepare()) begin
-                release_attempted(request, attempted_count);
-                submit_serialization.put(1);
+            descs[i].attach_mem(mem);
+            if (!descs[i].prepare()) begin
+                release_attempted(descs, attempted_count);
                 return;
             end
-            request.descs[i].mark_available(gq_phase(seq, cfg.depth));
+            descs[i].mark_available(gq_phase(seq, cfg.depth));
             packed_data = new[0];
-            request.descs[i].pack(packed_data);
+            descs[i].pack(packed_data);
             if (packed_data.size() != cfg.desc_size) begin
-                release_attempted(request, attempted_count);
-                submit_serialization.put(1);
+                release_attempted(descs, attempted_count);
                 `uvm_fatal("GQ_PACK_SIZE", $sformatf(
                     "role=%s queue_id=%0d logical_seq=%0d expected=%0d actual=%0d",
                     cfg.role == GQ_TX ? "TX" : "RX", cfg.queue_id, seq,
@@ -428,14 +443,156 @@ class gq_queue_engine extends uvm_component;
 
         state_lock.get(1);
         for (int unsigned i = 0; i < batch_size; i++)
-            install_outstanding(old_tail + i, request.descs[i]);
+            install_outstanding(old_tail + i, descs[i]);
         logical_tail_seq = new_tail;
+        if (activate_rx) begin
+            refill_profile = activation_profile;
+            rx_started     = 1;
+        end
         check_state_invariants("submit commit");
         state_lock.put(1);
         raw_tail = cfg.ptr_codec.encode_publish(old_tail, new_tail, cfg.depth);
         adapter.publish(cfg.role, cfg.queue_id, raw_tail);
         response.status          = GQ_OK;
         response.committed_count = int'(batch_size);
+    endtask
+
+    task submit_batch(input gq_request request, inout gq_response response);
+        gq_desc_base request_descs[$];
+
+        initialize_response(response, "submit_response");
+        if (request == null || request.kind != GQ_SUBMIT)
+            return;
+        foreach (request.descs[i])
+            request_descs.push_back(request.descs[i]);
+
+        submit_serialization.get(1);
+        submit_desc_batch_locked(request_descs, response, 0, null);
+        submit_serialization.put(1);
+    endtask
+
+    task start_rx(input gq_request request, inout gq_response response);
+        gq_refill_profile borrowed_profile;
+        gq_refill_profile cloned_profile;
+        gq_desc_base generated_descs[$];
+        gq_desc_base desc;
+        gq_logical_seq_t first_seq;
+        string reason;
+        bit can_start;
+
+        initialize_response(response, "start_rx_response");
+        if (request == null || request.kind != GQ_START_RX ||
+            cfg.role != GQ_RX)
+            return;
+        borrowed_profile = request.get_refill_profile();
+        if (borrowed_profile == null)
+            return;
+
+        submit_serialization.get(1);
+        state_lock.get(1);
+        can_start = ready_value && !rx_started;
+        first_seq = logical_tail_seq;
+        state_lock.put(1);
+        if (!can_start) begin
+            submit_serialization.put(1);
+            return;
+        end
+
+        cloned_profile = borrowed_profile.clone_profile();
+        if (cloned_profile == null ||
+            !cloned_profile.validate(cfg.depth, reason)) begin
+            submit_serialization.put(1);
+            return;
+        end
+
+        for (int unsigned i = 0;
+             i < cloned_profile.initial_post_count; i++) begin
+            desc = cloned_profile.create_desc(cfg.queue_id, first_seq + i);
+            if (desc == null) begin
+                release_generated(generated_descs);
+                submit_serialization.put(1);
+                return;
+            end
+            generated_descs.push_back(desc);
+        end
+
+        // A zero-sized startup is a successful one-shot activation with no
+        // tail publication. Only a later real DUT retirement can trigger refill.
+        if (generated_descs.size() == 0) begin
+            state_lock.get(1);
+            if (!ready_value || rx_started) begin
+                state_lock.put(1);
+                submit_serialization.put(1);
+                return;
+            end
+            refill_profile = cloned_profile;
+            rx_started     = 1;
+            state_lock.put(1);
+            response.status = GQ_OK;
+            submit_serialization.put(1);
+            return;
+        end
+
+        submit_desc_batch_locked(generated_descs, response, 1,
+                                 cloned_profile);
+        if (response.status != GQ_OK)
+            release_generated(generated_descs);
+        submit_serialization.put(1);
+    endtask
+
+    // Called only after at least one descriptor was actually retired. It
+    // deliberately acquires neither completion_serialization nor state_lock
+    // across descriptor creation, preparation, or publication.
+    protected task refill_after_progress();
+        gq_refill_profile active_profile;
+        gq_desc_base generated_descs[$];
+        gq_desc_base desc;
+        gq_response response;
+        gq_logical_seq_t posted;
+        gq_logical_seq_t first_seq;
+        int unsigned refill_count;
+        bit should_refill;
+
+        submit_serialization.get(1);
+        state_lock.get(1);
+        active_profile = refill_profile;
+        posted         = logical_tail_seq - logical_head_seq;
+        first_seq      = logical_tail_seq;
+        should_refill  = ready_value && rx_started &&
+                         active_profile != null &&
+                         posted <= active_profile.low_watermark;
+        if (should_refill)
+            refill_count = int'(active_profile.high_watermark - posted);
+        else
+            refill_count = 0;
+        state_lock.put(1);
+
+        if (!should_refill) begin
+            submit_serialization.put(1);
+            return;
+        end
+
+        for (int unsigned i = 0; i < refill_count; i++) begin
+            desc = active_profile.create_desc(cfg.queue_id, first_seq + i);
+            if (desc == null) begin
+                release_generated(generated_descs);
+                `uvm_error("GQ_REFILL", $sformatf(
+                    "role=RX queue_id=%0d could not create refill descriptor at logical sequence %0d",
+                    cfg.queue_id, first_seq + i))
+                submit_serialization.put(1);
+                return;
+            end
+            generated_descs.push_back(desc);
+        end
+
+        initialize_response(response, "refill_response");
+        submit_desc_batch_locked(generated_descs, response, 0, null);
+        if (response.status != GQ_OK) begin
+            release_generated(generated_descs);
+            `uvm_error("GQ_REFILL", $sformatf(
+                "role=RX queue_id=%0d failed to publish %0d refill descriptors after DUT progress",
+                cfg.queue_id, refill_count))
+        end
         submit_serialization.put(1);
     endtask
 
@@ -456,6 +613,8 @@ class gq_queue_engine extends uvm_component;
         ready_value      = 0;
         logical_head_seq = 0;
         logical_tail_seq = 0;
+        refill_profile   = null;
+        rx_started       = 0;
         check_state_invariants("cleanup");
         state_lock.put(1);
 

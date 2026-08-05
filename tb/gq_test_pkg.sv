@@ -16,6 +16,7 @@ package gq_test_pkg;
     `include "tests/mailbox_desc_test.svh"
     `include "tests/gq_submit_test.svh"
     `include "tests/gq_completion_test.svh"
+    `include "tests/gq_refill_test.svh"
 
     class gq_smoke_test extends uvm_test;
         `uvm_component_utils(gq_smoke_test)

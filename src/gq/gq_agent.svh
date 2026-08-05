@@ -27,7 +27,15 @@ class gq_driver extends uvm_driver #(gq_request, gq_response);
             seq_item_port.get_next_item(request);
             response = gq_response::type_id::create("response");
             response.set_id_info(request);
-            engine.submit_batch(request, response);
+            case (request.kind)
+                GQ_SUBMIT:   engine.submit_batch(request, response);
+                GQ_START_RX: engine.start_rx(request, response);
+                default: begin
+                    response.status          = GQ_RESOURCE_ERROR;
+                    response.committed_count = 0;
+                    response.reset_epoch     = 0;
+                end
+            endcase
             seq_item_port.item_done(response);
         end
     endtask

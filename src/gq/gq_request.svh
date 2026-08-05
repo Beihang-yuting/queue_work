@@ -10,10 +10,12 @@ class gq_request extends uvm_sequence_item;
     // Handles transfer without cloning. After preparation begins, both the
     // request and its descriptor handles are one-shot, including on rollback.
     gq_desc_base descs[$];
+    protected gq_refill_profile refill_profile;
 
     function new(string name = "gq_request");
         super.new(name);
         kind = GQ_SUBMIT;
+        refill_profile = null;
     endfunction
 
     function void add_desc(gq_desc_base desc);
@@ -22,6 +24,16 @@ class gq_request extends uvm_sequence_item;
 
     function int unsigned size();
         return descs.size();
+    endfunction
+
+    // The request borrows this handle. GQ_START_RX clones it synchronously;
+    // neither the request nor the engine retains the caller-owned object.
+    function void set_refill_profile(gq_refill_profile profile);
+        refill_profile = profile;
+    endfunction
+
+    function gq_refill_profile get_refill_profile();
+        return refill_profile;
     endfunction
 endclass
 

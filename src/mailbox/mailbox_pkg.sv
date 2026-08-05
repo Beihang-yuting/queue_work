@@ -10,6 +10,7 @@ package mailbox_pkg;
     `include "mailbox_tx_desc.svh"
     `include "mailbox_rx_desc.svh"
     `include "mailbox_completion.svh"
+    `include "mailbox_refill_profile.svh"
     `include "mailbox_sequences.svh"
     `include "mailbox_env.svh"
 endpackage
