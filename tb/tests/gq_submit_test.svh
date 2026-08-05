@@ -111,10 +111,12 @@ class gq_submit_test_engine extends gq_queue_engine;
     `uvm_component_utils(gq_submit_test_engine)
 
     int unsigned membership_validation_steps;
+    int unsigned outstanding_audit_steps;
 
     function new(string name = "gq_submit_test_engine", uvm_component parent = null);
         super.new(name, parent);
         membership_validation_steps = 0;
+        outstanding_audit_steps = 0;
     endfunction
 
     protected virtual function bit mark_request_id_seen(
@@ -123,9 +125,25 @@ class gq_submit_test_engine extends gq_queue_engine;
         return super.mark_request_id_seen(desc, seen_ids);
     endfunction
 
+    protected virtual function void audit_outstanding_entry(
+        string transition_name, gq_logical_seq_t seq, gq_desc_base desc);
+        outstanding_audit_steps++;
+        super.audit_outstanding_entry(transition_name, seq, desc);
+    endfunction
+
     function void reset_membership_validation_steps();
         membership_validation_steps = 0;
     endfunction
+
+    function void reset_outstanding_audit_steps();
+        outstanding_audit_steps = 0;
+    endfunction
+
+    task audit_state_invariants_for_test(string transition_name);
+        state_lock.get(1);
+        super.audit_state_invariants(transition_name);
+        state_lock.put(1);
+    endtask
 
     task probe_state_lock_for_test();
         super.probe_state_lock();
@@ -293,6 +311,8 @@ class gq_submit_test extends uvm_test;
         byte owned_data[];
         gq_request validation_request;
         gq_response validation_response;
+        gq_request scale_request;
+        gq_response scale_response;
 
         phase.raise_objection(this);
         env_cfg.wait_ready();
@@ -515,6 +535,35 @@ class gq_submit_test extends uvm_test;
             validation_engine.outstanding_count() != 256 ||
             validation_adapter.publish_calls != 1)
             `uvm_fatal("SUBMIT_MEMBERSHIP", "unique batch commit state is incorrect")
+
+        validation_engine.reset_outstanding_audit_steps();
+        for (int unsigned i = 0; i < 64; i++) begin
+            scale_request = gq_request::type_id::create(
+                $sformatf("scale_request_%0d", i));
+            scale_request.add_desc(make_tx($sformatf("scale_desc_%0d", i),
+                                           i + 256));
+            scale_response = gq_response::type_id::create(
+                $sformatf("scale_response_%0d", i));
+            validation_engine.submit_batch(scale_request, scale_response);
+            if (scale_response.status != GQ_OK ||
+                scale_response.committed_count != 1)
+                `uvm_fatal("SUBMIT_INVARIANT_SCALE",
+                           $sformatf("single submit %0d failed", i))
+        end
+        if (validation_engine.outstanding_audit_steps != 0)
+            `uvm_fatal("SUBMIT_INVARIANT_SCALE", $sformatf(
+                "regular submit performed %0d full-audit steps expected 0",
+                validation_engine.outstanding_audit_steps))
+        validation_engine.audit_state_invariants_for_test("explicit test audit");
+        if (validation_engine.outstanding_audit_steps != 320)
+            `uvm_fatal("SUBMIT_INVARIANT_SCALE", $sformatf(
+                "explicit audit used %0d steps expected 320",
+                validation_engine.outstanding_audit_steps))
+        if (validation_engine.tail_seq() != 320 ||
+            validation_engine.outstanding_count() != 320 ||
+            validation_adapter.publish_calls != 65)
+            `uvm_fatal("SUBMIT_INVARIANT_SCALE",
+                       "repeated single-submit state is incorrect")
 
         failure_engine.cleanup();
         validation_engine.cleanup();
