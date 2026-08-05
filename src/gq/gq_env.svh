@@ -6,6 +6,7 @@ class gq_env extends uvm_env;
 
     protected gq_env_cfg cfg;
     protected gq_queue_agent agents[string];
+    protected gq_reset_controller reset_controller;
 
     function new(string name = "gq_env", uvm_component parent = null);
         super.new(name, parent);
@@ -21,6 +22,10 @@ class gq_env extends uvm_env;
         if (!cfg.validate(reason))
             `uvm_fatal("GQ_ENV_CFG", reason)
 
+        reset_controller = gq_reset_controller::type_id::create(
+            "reset_controller", this);
+        reset_controller.cfg = cfg;
+
         if (cfg.queues.first(key)) begin
             do begin
                 uvm_config_db#(gq_queue_cfg)::set(this, key, "cfg", cfg.queues[key]);
@@ -28,6 +33,17 @@ class gq_env extends uvm_env;
                 uvm_config_db#(gq_hw_adapter)::set(this, key, "adapter", cfg.adapter);
                 agents[key] = gq_queue_agent::type_id::create(key, this);
             end while (cfg.queues.next(key));
+        end
+    endfunction
+
+    function void connect_phase(uvm_phase phase);
+        string key;
+
+        super.connect_phase(phase);
+        if (agents.first(key)) begin
+            do begin
+                reset_controller.register_engine(key, agents[key].engine);
+            end while (agents.next(key));
         end
     endfunction
 

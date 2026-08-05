@@ -8,12 +8,42 @@ class gq_env_cfg extends uvm_object;
     gq_hw_adapter adapter;
     gq_queue_cfg queues[string];
     uvm_event env_ready;
+    uvm_event reset_asserted;
+    uvm_event reset_deasserted;
+    protected bit reset_state;
 
     function new(string name = "gq_env_cfg");
         super.new(name);
         mem       = null;
         adapter   = null;
         env_ready = new({name, "_ready"});
+        reset_asserted   = new({name, "_reset_asserted"});
+        reset_deasserted = new({name, "_reset_deasserted"});
+        reset_state      = 0;
+    endfunction
+
+    // Reset requests are persistent until the environment controller consumes
+    // them. A new cycle is not accepted while an earlier edge is pending, so
+    // callers cannot silently collapse multiple reset cycles into one event.
+    function bit trigger_reset_asserted();
+        if (reset_state || reset_asserted.is_on() || reset_deasserted.is_on())
+            return 0;
+        reset_state = 1;
+        reset_asserted.trigger();
+        return 1;
+    endfunction
+
+    function bit trigger_reset_deasserted();
+        if (!reset_state || reset_asserted.is_on() ||
+            reset_deasserted.is_on())
+            return 0;
+        reset_state = 0;
+        reset_deasserted.trigger();
+        return 1;
+    endfunction
+
+    function bit reset_is_asserted();
+        return reset_state;
     endfunction
 
     function bit add_queue(gq_queue_cfg queue_cfg, output string reason);

@@ -7,7 +7,8 @@ virtual class gq_wait_policy extends uvm_object;
     endfunction
 
     pure virtual task wait_for_wakeup(gq_queue_cfg cfg,
-                                      gq_hw_adapter adapter);
+                                      gq_hw_adapter adapter,
+                                      output bit completion_wakeup);
 endclass
 
 class gq_poll_wait_policy extends gq_wait_policy;
@@ -18,8 +19,10 @@ class gq_poll_wait_policy extends gq_wait_policy;
     endfunction
 
     virtual task wait_for_wakeup(gq_queue_cfg cfg,
-                                 gq_hw_adapter adapter);
+                                 gq_hw_adapter adapter,
+                                 output bit completion_wakeup);
         #(cfg.poll_interval);
+        completion_wakeup = 1;
     endtask
 endclass
 
@@ -31,9 +34,21 @@ class gq_irq_wait_policy extends gq_wait_policy;
     endfunction
 
     virtual task wait_for_wakeup(gq_queue_cfg cfg,
-                                 gq_hw_adapter adapter);
-        adapter.wait_irq(cfg.role, cfg.queue_id);
-        adapter.ack_irq(cfg.role, cfg.queue_id);
+                                 gq_hw_adapter adapter,
+                                 output bit completion_wakeup);
+        completion_wakeup = 0;
+        fork : bounded_irq_wait
+            begin
+                adapter.wait_irq(cfg.role, cfg.queue_id);
+                completion_wakeup = 1;
+            end
+            begin
+                #(cfg.completion_timeout);
+            end
+        join_any
+        disable bounded_irq_wait;
+        if (completion_wakeup)
+            adapter.ack_irq(cfg.role, cfg.queue_id);
     endtask
 endclass
 

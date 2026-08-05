@@ -18,6 +18,7 @@ package gq_pkg;
     `include "gq_wait_policy.svh"
     `include "gq_env_cfg.svh"
     `include "gq_queue_engine.svh"
+    `include "gq_reset_controller.svh"
     `include "gq_agent.svh"
     `include "gq_env.svh"
 endpackage
