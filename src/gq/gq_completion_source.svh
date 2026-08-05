@@ -6,6 +6,12 @@ virtual class gq_completion_source extends uvm_object;
         super.new(name);
     endfunction
 
+    virtual function bit validate(int unsigned status_area_size,
+                                  output string reason);
+        reason = "";
+        return 1;
+    endfunction
+
     pure virtual function int unsigned completed_count(
         host_mem_api mem,
         gq_addr_t ring_base,

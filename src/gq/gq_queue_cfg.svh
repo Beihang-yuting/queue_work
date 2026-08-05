@@ -33,6 +33,8 @@ class gq_queue_cfg extends uvm_object;
     endfunction
 
     function bit validate(output string reason);
+        string completion_reason;
+
         if (!gq_is_pow2(depth)) begin
             reason = $sformatf("depth must be a power of two and at least 2 (got %0d)", depth);
             return 0;
@@ -50,6 +52,12 @@ class gq_queue_cfg extends uvm_object;
 
         if (completion_source == null) begin
             reason = "completion source must not be null";
+            return 0;
+        end
+
+        if (!completion_source.validate(status_area_size,
+                                        completion_reason)) begin
+            reason = {"completion source: ", completion_reason};
             return 0;
         end
 

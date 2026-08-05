@@ -18,6 +18,27 @@ class gq_tail_mem_completion extends gq_completion_source;
         byte_order        = order;
     endfunction
 
+    virtual function bit validate(int unsigned status_area_size,
+                                  output string reason);
+        longint unsigned required_bytes;
+
+        if (ptr_codec == null) begin
+            reason = "tail pointer codec must not be null";
+            return 0;
+        end
+        required_bytes = status_byte_offset;
+        required_bytes += 4;
+        if (required_bytes > 32'hffff_ffff ||
+            required_bytes > status_area_size) begin
+            reason = $sformatf(
+                "status area size %0d is shorter than tail read requirement %0d",
+                status_area_size, required_bytes);
+            return 0;
+        end
+        reason = "";
+        return 1;
+    endfunction
+
     virtual function int unsigned completed_count(
         host_mem_api mem,
         gq_addr_t ring_base,
@@ -30,10 +51,25 @@ class gq_tail_mem_completion extends gq_completion_source;
         gq_raw_ptr_t raw;
         gq_logical_seq_t completed_tail;
         gq_logical_seq_t delta;
+        gq_addr_t read_addr;
+        gq_addr_t max_addr;
 
         if (mem == null || ptr_codec == null)
             return 0;
-        mem.read_mem(status_addr + status_byte_offset, 4, raw_bytes,
+        max_addr = '1;
+        if (status_addr > (max_addr - status_byte_offset)) begin
+            `uvm_error("GQ_COMPLETION_ADDR", $sformatf(
+                "status base 0x%016h plus offset %0d overflows",
+                status_addr, status_byte_offset))
+            return 0;
+        end
+        read_addr = status_addr + status_byte_offset;
+        if (read_addr > (max_addr - 3)) begin
+            `uvm_error("GQ_COMPLETION_ADDR", $sformatf(
+                "four-byte status read at 0x%016h overflows", read_addr))
+            return 0;
+        end
+        mem.read_mem(read_addr, 4, raw_bytes,
                      `__FILE__, `__LINE__);
         if (raw_bytes.size() != 4)
             return 0;
