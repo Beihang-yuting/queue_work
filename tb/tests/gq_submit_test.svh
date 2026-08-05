@@ -158,6 +158,7 @@ class gq_submit_test extends uvm_test;
     host_mem_manager     validation_mem;
     gq_test_ptr_codec    ptr_codec;
     gq_delayed_mock_adapter adapter;
+    mailbox_mock_dut     dut;
     mailbox_mock_adapter failure_adapter;
     mailbox_mock_adapter validation_adapter;
     mailbox_env_cfg      env_cfg;
@@ -251,6 +252,9 @@ class gq_submit_test extends uvm_test;
                                    64'h0000_0001_30ff_ffff, MODE_LINEAR, 16);
         ptr_codec      = gq_test_ptr_codec::type_id::create("ptr_codec");
         adapter        = gq_delayed_mock_adapter::type_id::create("adapter");
+        dut            = mailbox_mock_dut::type_id::create("dut");
+        dut.mem        = mem;
+        dut.adapter    = adapter;
         failure_adapter = mailbox_mock_adapter::type_id::create("failure_adapter");
         validation_adapter = mailbox_mock_adapter::type_id::create("validation_adapter");
 
@@ -296,7 +300,9 @@ class gq_submit_test extends uvm_test;
         gq_bad_pack_desc bad_pack;
         gq_counting_tx_desc first_concurrent;
         gq_counting_tx_desc second_concurrent;
-        gq_counting_tx_desc blocked_counting;
+        mailbox_tx_desc capacity_fill_descs[26];
+        gq_counting_tx_desc blocked_pair_descs[2];
+        gq_counting_tx_desc later_small_desc;
         gq_counting_tx_desc duplicate_within_batch;
         gq_host_access_catcher host_access_catcher;
         gq_pack_size_catcher pack_size_catcher;
@@ -304,8 +310,16 @@ class gq_submit_test extends uvm_test;
         gq_request second_request;
         gq_response first_response;
         gq_response second_response;
+        gq_request blocked_pair_request;
+        gq_request later_small_request;
+        gq_response blocked_pair_response;
+        gq_response later_small_response;
         int unsigned publish_before;
-        bit blocked_returned;
+        bit blocked_pair_returned;
+        bit later_small_returned;
+        bit first_progress_seen;
+        bit blocked_pair_committed;
+        bit later_small_committed;
         bit first_returned;
         bit second_returned;
         bit probe_returned;
@@ -497,28 +511,133 @@ class gq_submit_test extends uvm_test;
         failure_engine.submit_batch(request, response);
         expect_resource_error("batch larger than depth", response);
 
-        request = gq_request::type_id::create("blocked_request");
-        blocked_counting = gq_counting_tx_desc::type_id::create("blocked_counting");
-        request.add_desc(blocked_counting);
-        for (int unsigned i = 0; i < 26; i++)
-            request.add_desc(make_tx($sformatf("blocked_%0d", i), i));
-        response = gq_response::type_id::create("blocked_response");
+        request = gq_request::type_id::create("capacity_fill_request");
+        for (int unsigned i = 0; i < 26; i++) begin
+            capacity_fill_descs[i] = make_tx(
+                $sformatf("capacity_fill_%0d", i), i + 20);
+            request.add_desc(capacity_fill_descs[i]);
+        end
+        response = gq_response::type_id::create("capacity_fill_response");
+        engine.submit_batch(request, response);
+        if (response.status != GQ_OK || response.committed_count != 26 ||
+            engine.head_seq() != 0 || engine.tail_seq() != 32 ||
+            engine.outstanding_count() != 32)
+            `uvm_fatal("SUBMIT_CAPACITY", "queue fill did not reach depth")
+
         publish_before = adapter.publish_calls;
-        blocked_returned = 0;
-        fork : bounded_full_submit
+        blocked_pair_request = gq_request::type_id::create(
+            "blocked_pair_request");
+        for (int unsigned i = 0; i < 2; i++) begin
+            blocked_pair_descs[i] = gq_counting_tx_desc::type_id::create(
+                $sformatf("blocked_pair_%0d", i));
+            blocked_pair_descs[i].srcid = 16'h5500 + i;
+            blocked_pair_request.add_desc(blocked_pair_descs[i]);
+        end
+        blocked_pair_response = gq_response::type_id::create(
+            "blocked_pair_response");
+        blocked_pair_returned = 0;
+        fork : blocked_pair_submit
             begin
-                engine.submit_batch(request, response);
-                blocked_returned = 1;
+                engine.submit_batch(blocked_pair_request,
+                                    blocked_pair_response);
+                blocked_pair_returned = 1;
             end
         join_none
         #5ns;
-        if (blocked_returned)
+        if (blocked_pair_returned)
             `uvm_fatal("SUBMIT_CAPACITY", "whole batch did not wait for capacity")
-        if (adapter.publish_calls != publish_before || engine.tail_seq() != 6)
+        if (adapter.publish_calls != publish_before || engine.tail_seq() != 32)
             `uvm_fatal("SUBMIT_CAPACITY", "blocked batch changed queue state")
-        if (blocked_counting.prepare_calls != 0)
+        if (blocked_pair_descs[0].prepare_calls != 0 ||
+            blocked_pair_descs[1].prepare_calls != 0)
             `uvm_fatal("SUBMIT_CAPACITY", "blocked batch prepared a descriptor")
-        disable bounded_full_submit;
+
+        later_small_desc = gq_counting_tx_desc::type_id::create(
+            "later_small_desc");
+        later_small_desc.srcid = 16'h6600;
+        later_small_request = gq_request::type_id::create(
+            "later_small_request");
+        later_small_request.add_desc(later_small_desc);
+        later_small_response = gq_response::type_id::create(
+            "later_small_response");
+        later_small_returned = 0;
+        fork : later_small_submit
+            begin
+                engine.submit_batch(later_small_request,
+                                    later_small_response);
+                later_small_returned = 1;
+            end
+        join_none
+        #5ns;
+        if (later_small_returned || later_small_desc.prepare_calls != 0)
+            `uvm_fatal("SUBMIT_ORDER", "later small batch bypassed a full queue")
+
+        dut.complete_slot(engine, 0, 32, 64);
+        first_progress_seen = 0;
+        for (int unsigned poll = 0;
+             poll < 200 && !first_progress_seen; poll++) begin
+            #1ns;
+            first_progress_seen = engine.head_seq() == 1;
+        end
+        if (!first_progress_seen)
+            `uvm_fatal("SUBMIT_PROGRESS", "completion worker did not retire the first item")
+        #5ns;
+        if (blocked_pair_returned || later_small_returned ||
+            blocked_pair_descs[0].prepare_calls != 0 ||
+            blocked_pair_descs[1].prepare_calls != 0 ||
+            later_small_desc.prepare_calls != 0 ||
+            engine.tail_seq() != 32 || adapter.publish_calls != publish_before)
+            `uvm_fatal("SUBMIT_ORDER",
+                       "one free slot let a waiting request overtake or prepare")
+
+        dut.complete_slot(engine, 1, 32, 64);
+        blocked_pair_committed = 0;
+        for (int unsigned poll = 0;
+             poll < 200 && !blocked_pair_committed; poll++) begin
+            #1ns;
+            blocked_pair_committed = blocked_pair_returned &&
+                                     engine.head_seq() == 2 &&
+                                     engine.tail_seq() == 34;
+        end
+        if (!blocked_pair_committed)
+            `uvm_fatal("SUBMIT_PROGRESS_DEADLOCK",
+                       "second completion could not release the blocked batch")
+        if (blocked_pair_response.status != GQ_OK ||
+            blocked_pair_response.committed_count != 2 ||
+            later_small_returned || later_small_desc.prepare_calls != 0 ||
+            engine.outstanding_count() != 32 ||
+            engine.get_outstanding(32) != blocked_pair_descs[0] ||
+            engine.get_outstanding(33) != blocked_pair_descs[1] ||
+            adapter.publish_calls != publish_before + 1 ||
+            adapter.published_tails["tx_7"][publish_before] !=
+                ptr_codec.encode_publish(32, 34, 32))
+            `uvm_fatal("SUBMIT_PROGRESS",
+                       "blocked pair response/state/publish order is incorrect")
+        check_tx_slot(engine, 32, blocked_pair_descs[0]);
+        check_tx_slot(engine, 33, blocked_pair_descs[1]);
+
+        dut.complete_slot(engine, 2, 32, 64);
+        later_small_committed = 0;
+        for (int unsigned poll = 0;
+             poll < 200 && !later_small_committed; poll++) begin
+            #1ns;
+            later_small_committed = later_small_returned &&
+                                    engine.head_seq() == 3 &&
+                                    engine.tail_seq() == 35;
+        end
+        if (!later_small_committed)
+            `uvm_fatal("SUBMIT_ORDER_TIMEOUT",
+                       "later small batch did not run after the earlier batch")
+        if (later_small_response.status != GQ_OK ||
+            later_small_response.committed_count != 1 ||
+            engine.outstanding_count() != 32 ||
+            engine.get_outstanding(34) != later_small_desc ||
+            adapter.publish_calls != publish_before + 2 ||
+            adapter.published_tails["tx_7"][publish_before + 1] !=
+                ptr_codec.encode_publish(34, 35, 32))
+            `uvm_fatal("SUBMIT_ORDER",
+                       "later small batch response/state/publish is incorrect")
+        check_tx_slot(engine, 34, later_small_desc);
 
         validation_request = gq_request::type_id::create("validation_request");
         for (int unsigned i = 0; i < 256; i++)

@@ -15,6 +15,7 @@ class gq_queue_engine extends uvm_component;
     protected bit configured;
     protected bit ready_value;
     protected uvm_event ready_event;
+    protected semaphore user_request_ordering;
     protected semaphore submit_serialization;
     protected semaphore completion_serialization;
     protected semaphore state_lock;
@@ -36,6 +37,7 @@ class gq_queue_engine extends uvm_component;
         configured        = 0;
         ready_value       = 0;
         ready_event       = new({name, "_ready"});
+        user_request_ordering = new(1);
         submit_serialization = new(1);
         completion_serialization = new(1);
         state_lock        = new(1);
@@ -373,7 +375,8 @@ class gq_queue_engine extends uvm_component;
         input gq_desc_base descs[$],
         inout gq_response response,
         input bit activate_rx,
-        input gq_refill_profile activation_profile);
+        input gq_refill_profile activation_profile,
+        output bit capacity_wait_required);
         int unsigned batch_size;
         int unsigned attempted_count;
         gq_logical_seq_t old_tail;
@@ -384,6 +387,7 @@ class gq_queue_engine extends uvm_component;
         byte packed_data[];
         bit seen_ids[int];
 
+        capacity_wait_required = 0;
         batch_size = descs.size();
         if (batch_size == 0 || batch_size > cfg.depth)
             return;
@@ -394,27 +398,24 @@ class gq_queue_engine extends uvm_component;
                 return;
         end
 
-        forever begin
-            state_lock.get(1);
-            if (!ready_value) begin
+        state_lock.get(1);
+        if (!ready_value) begin
+            state_lock.put(1);
+            return;
+        end
+        foreach (descs[i]) begin
+            if (outstanding_ids.exists(descs[i].get_inst_id())) begin
                 state_lock.put(1);
                 return;
             end
-            foreach (descs[i]) begin
-                if (outstanding_ids.exists(descs[i].get_inst_id())) begin
-                    state_lock.put(1);
-                    return;
-                end
-            end
-            if ((logical_tail_seq - logical_head_seq) + batch_size <= cfg.depth) begin
-                old_tail = logical_tail_seq;
-                state_lock.put(1);
-                break;
-            end
-            state_lock.put(1);
-            space_available.wait_on();
-            space_available.reset();
         end
+        if ((logical_tail_seq - logical_head_seq) + batch_size > cfg.depth) begin
+            capacity_wait_required = 1;
+            state_lock.put(1);
+            return;
+        end
+        old_tail = logical_tail_seq;
+        state_lock.put(1);
 
         new_tail        = old_tail + batch_size;
         attempted_count = 0;
@@ -457,6 +458,30 @@ class gq_queue_engine extends uvm_component;
         response.committed_count = int'(batch_size);
     endtask
 
+    // Caller holds user_request_ordering. Capacity waits retain that FIFO
+    // position but release submit_serialization so completion-triggered refill
+    // and later completion drains can make progress. Each retry revalidates
+    // readiness, descriptor identity, capacity, and the current logical tail.
+    protected task submit_desc_batch_ordered(
+        input gq_desc_base descs[$],
+        inout gq_response response,
+        input bit activate_rx,
+        input gq_refill_profile activation_profile);
+        bit capacity_wait_required;
+
+        forever begin
+            submit_serialization.get(1);
+            submit_desc_batch_locked(descs, response, activate_rx,
+                                     activation_profile,
+                                     capacity_wait_required);
+            submit_serialization.put(1);
+            if (!capacity_wait_required)
+                return;
+            space_available.wait_on();
+            space_available.reset();
+        end
+    endtask
+
     task submit_batch(input gq_request request, inout gq_response response);
         gq_desc_base request_descs[$];
 
@@ -466,9 +491,9 @@ class gq_queue_engine extends uvm_component;
         foreach (request.descs[i])
             request_descs.push_back(request.descs[i]);
 
-        submit_serialization.get(1);
-        submit_desc_batch_locked(request_descs, response, 0, null);
-        submit_serialization.put(1);
+        user_request_ordering.get(1);
+        submit_desc_batch_ordered(request_descs, response, 0, null);
+        user_request_ordering.put(1);
     endtask
 
     task start_rx(input gq_request request, inout gq_response response);
@@ -488,6 +513,7 @@ class gq_queue_engine extends uvm_component;
         if (borrowed_profile == null)
             return;
 
+        user_request_ordering.get(1);
         submit_serialization.get(1);
         state_lock.get(1);
         can_start = ready_value && !rx_started;
@@ -495,6 +521,7 @@ class gq_queue_engine extends uvm_component;
         state_lock.put(1);
         if (!can_start) begin
             submit_serialization.put(1);
+            user_request_ordering.put(1);
             return;
         end
 
@@ -502,6 +529,7 @@ class gq_queue_engine extends uvm_component;
         if (cloned_profile == null ||
             !cloned_profile.validate(cfg.depth, reason)) begin
             submit_serialization.put(1);
+            user_request_ordering.put(1);
             return;
         end
 
@@ -511,6 +539,7 @@ class gq_queue_engine extends uvm_component;
             if (desc == null) begin
                 release_generated(generated_descs);
                 submit_serialization.put(1);
+                user_request_ordering.put(1);
                 return;
             end
             generated_descs.push_back(desc);
@@ -523,6 +552,7 @@ class gq_queue_engine extends uvm_component;
             if (!ready_value || rx_started) begin
                 state_lock.put(1);
                 submit_serialization.put(1);
+                user_request_ordering.put(1);
                 return;
             end
             refill_profile = cloned_profile;
@@ -530,14 +560,16 @@ class gq_queue_engine extends uvm_component;
             state_lock.put(1);
             response.status = GQ_OK;
             submit_serialization.put(1);
+            user_request_ordering.put(1);
             return;
         end
 
-        submit_desc_batch_locked(generated_descs, response, 1,
-                                 cloned_profile);
+        submit_serialization.put(1);
+        submit_desc_batch_ordered(generated_descs, response, 1,
+                                  cloned_profile);
         if (response.status != GQ_OK)
             release_generated(generated_descs);
-        submit_serialization.put(1);
+        user_request_ordering.put(1);
     endtask
 
     // Called only after at least one descriptor was actually retired. It
@@ -551,14 +583,23 @@ class gq_queue_engine extends uvm_component;
         gq_logical_seq_t posted;
         gq_logical_seq_t first_seq;
         int unsigned refill_count;
+        bit capacity_wait_required;
+        bit refill_active;
         bit should_refill;
+
+        state_lock.get(1);
+        refill_active = cfg.role == GQ_RX && ready_value && rx_started &&
+                        refill_profile != null;
+        state_lock.put(1);
+        if (!refill_active)
+            return;
 
         submit_serialization.get(1);
         state_lock.get(1);
         active_profile = refill_profile;
         posted         = logical_tail_seq - logical_head_seq;
         first_seq      = logical_tail_seq;
-        should_refill  = ready_value && rx_started &&
+        should_refill  = cfg.role == GQ_RX && ready_value && rx_started &&
                          active_profile != null &&
                          posted <= active_profile.low_watermark;
         if (should_refill)
@@ -586,7 +627,8 @@ class gq_queue_engine extends uvm_component;
         end
 
         initialize_response(response, "refill_response");
-        submit_desc_batch_locked(generated_descs, response, 0, null);
+        submit_desc_batch_locked(generated_descs, response, 0, null,
+                                 capacity_wait_required);
         if (response.status != GQ_OK) begin
             release_generated(generated_descs);
             `uvm_error("GQ_REFILL", $sformatf(
