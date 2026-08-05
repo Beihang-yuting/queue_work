@@ -17,6 +17,7 @@ class gq_queue_engine extends uvm_component;
     protected semaphore submit_serialization;
     protected semaphore state_lock;
     protected gq_desc_base outstanding[gq_logical_seq_t];
+    protected bit outstanding_ids[int];
     protected gq_logical_seq_t logical_head_seq;
     protected gq_logical_seq_t logical_tail_seq;
     protected uvm_event space_available;
@@ -161,42 +162,47 @@ class gq_queue_engine extends uvm_component;
         end
     endfunction
 
-    protected function bit request_has_duplicate(gq_request request);
-        for (int unsigned i = 0; i < request.size(); i++) begin
-            for (int unsigned j = 0; j < i; j++) begin
-                if (request.descs[i] == request.descs[j])
-                    return 1;
-            end
-        end
-        return 0;
-    endfunction
+    protected virtual function bit mark_request_id_seen(
+        gq_desc_base desc, ref bit seen_ids[int]);
+        int id;
 
-    // Caller holds state_lock.
-    protected function bit handle_is_outstanding(gq_desc_base desc);
-        gq_logical_seq_t seq;
-
-        if (outstanding.first(seq)) begin
-            do begin
-                if (outstanding[seq] == desc)
-                    return 1;
-            end while (outstanding.next(seq));
-        end
-        return 0;
+        id = desc.get_inst_id();
+        if (seen_ids.exists(id))
+            return 0;
+        seen_ids[id] = 1;
+        return 1;
     endfunction
 
     // Caller holds state_lock after any head/tail/outstanding transition.
     protected function void check_state_invariants(string transition_name);
         gq_logical_seq_t count;
+        gq_logical_seq_t seq;
+        int id;
 
         if (logical_tail_seq < logical_head_seq)
             `uvm_fatal("GQ_STATE", $sformatf("%s: tail %0d precedes head %0d",
                                                transition_name, logical_tail_seq,
                                                logical_head_seq))
         count = logical_tail_seq - logical_head_seq;
-        if (count > cfg.depth || outstanding.num() != count)
+        if (count > cfg.depth || outstanding.num() != count ||
+            outstanding_ids.num() != outstanding.num())
             `uvm_fatal("GQ_STATE", $sformatf(
-                "%s: outstanding handles=%0d logical count=%0d depth=%0d",
-                transition_name, outstanding.num(), count, cfg.depth))
+                "%s: outstanding handles=%0d ids=%0d logical count=%0d depth=%0d",
+                transition_name, outstanding.num(), outstanding_ids.num(),
+                count, cfg.depth))
+        if (outstanding.first(seq)) begin
+            do begin
+                if (outstanding[seq] == null)
+                    `uvm_fatal("GQ_STATE", $sformatf(
+                        "%s: null outstanding handle at logical sequence %0d",
+                        transition_name, seq))
+                id = outstanding[seq].get_inst_id();
+                if (!outstanding_ids.exists(id))
+                    `uvm_fatal("GQ_STATE", $sformatf(
+                        "%s: outstanding handle id %0d is not indexed",
+                        transition_name, id))
+            end while (outstanding.next(seq));
+        end
     endfunction
 
     task submit_batch(input gq_request request, inout gq_response response);
@@ -208,6 +214,7 @@ class gq_queue_engine extends uvm_component;
         gq_raw_ptr_t raw_tail;
         gq_addr_t slot_addr;
         byte packed_data[];
+        bit seen_ids[int];
 
         if (response == null)
             response = gq_response::type_id::create("submit_response");
@@ -223,9 +230,9 @@ class gq_queue_engine extends uvm_component;
         foreach (request.descs[i]) begin
             if (request.descs[i] == null)
                 return;
+            if (!mark_request_id_seen(request.descs[i], seen_ids))
+                return;
         end
-        if (request_has_duplicate(request))
-            return;
 
         submit_serialization.get(1);
         forever begin
@@ -236,7 +243,7 @@ class gq_queue_engine extends uvm_component;
                 return;
             end
             foreach (request.descs[i]) begin
-                if (handle_is_outstanding(request.descs[i])) begin
+                if (outstanding_ids.exists(request.descs[i].get_inst_id())) begin
                     state_lock.put(1);
                     submit_serialization.put(1);
                     return;
@@ -280,8 +287,10 @@ class gq_queue_engine extends uvm_component;
         end
 
         state_lock.get(1);
-        for (int unsigned i = 0; i < batch_size; i++)
+        for (int unsigned i = 0; i < batch_size; i++) begin
             outstanding[old_tail + i] = request.descs[i];
+            outstanding_ids[request.descs[i].get_inst_id()] = 1;
+        end
         logical_tail_seq = new_tail;
         check_state_invariants("submit commit");
         state_lock.put(1);
@@ -304,6 +313,7 @@ class gq_queue_engine extends uvm_component;
             end while (outstanding.next(seq));
         end
         outstanding.delete();
+        outstanding_ids.delete();
         ready_value      = 0;
         logical_head_seq = 0;
         logical_tail_seq = 0;
@@ -345,7 +355,7 @@ class gq_queue_engine extends uvm_component;
 
     // Verification hook: acquires no mutable access and proves that timed
     // adapter operations never retain the engine state lock.
-    task probe_state_lock();
+    protected task probe_state_lock();
         state_lock.get(1);
         state_lock.put(1);
     endtask

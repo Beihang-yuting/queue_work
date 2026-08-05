@@ -107,18 +107,47 @@ class gq_pack_size_catcher extends uvm_report_catcher;
     endfunction
 endclass
 
+class gq_submit_test_engine extends gq_queue_engine;
+    `uvm_component_utils(gq_submit_test_engine)
+
+    int unsigned membership_validation_steps;
+
+    function new(string name = "gq_submit_test_engine", uvm_component parent = null);
+        super.new(name, parent);
+        membership_validation_steps = 0;
+    endfunction
+
+    protected virtual function bit mark_request_id_seen(
+        gq_desc_base desc, ref bit seen_ids[int]);
+        membership_validation_steps++;
+        return super.mark_request_id_seen(desc, seen_ids);
+    endfunction
+
+    function void reset_membership_validation_steps();
+        membership_validation_steps = 0;
+    endfunction
+
+    task probe_state_lock_for_test();
+        super.probe_state_lock();
+    endtask
+endclass
+
 class gq_submit_test extends uvm_test;
     `uvm_component_utils(gq_submit_test)
 
     host_mem_manager     mem;
     host_mem_manager     failure_mem;
+    host_mem_manager     validation_mem;
     gq_test_ptr_codec    ptr_codec;
     gq_delayed_mock_adapter adapter;
     mailbox_mock_adapter failure_adapter;
+    mailbox_mock_adapter validation_adapter;
     mailbox_env_cfg      env_cfg;
     mailbox_env          env;
     gq_queue_cfg         failure_cfg;
     gq_queue_engine      failure_engine;
+    gq_queue_cfg         validation_cfg;
+    gq_submit_test_engine validation_engine;
 
     function new(string name = "gq_submit_test", uvm_component parent = null);
         super.new(name, parent);
@@ -191,15 +220,20 @@ class gq_submit_test extends uvm_test;
         string reason;
 
         super.build_phase(phase);
+        gq_queue_engine::type_id::set_type_override(gq_submit_test_engine::get_type());
         mem = new("mem");
         mem.init_region(64'h0000_0001_1000_0000,
                         64'h0000_0001_10ff_ffff, MODE_LINEAR, 16);
         failure_mem = new("failure_mem");
         failure_mem.init_region(64'h0000_0001_2000_0000,
                                 64'h0000_0001_20ff_ffff, MODE_LINEAR, 16);
+        validation_mem = new("validation_mem");
+        validation_mem.init_region(64'h0000_0001_3000_0000,
+                                   64'h0000_0001_30ff_ffff, MODE_LINEAR, 16);
         ptr_codec      = gq_test_ptr_codec::type_id::create("ptr_codec");
         adapter        = gq_delayed_mock_adapter::type_id::create("adapter");
         failure_adapter = mailbox_mock_adapter::type_id::create("failure_adapter");
+        validation_adapter = mailbox_mock_adapter::type_id::create("validation_adapter");
 
         env_cfg = mailbox_env_cfg::type_id::create("env_cfg");
         env_cfg.mem       = mem;
@@ -216,12 +250,23 @@ class gq_submit_test extends uvm_test;
         uvm_config_db#(gq_hw_adapter)::set(this, "failure_engine", "adapter",
                                            failure_adapter);
         failure_engine = gq_queue_engine::type_id::create("failure_engine", this);
+
+        validation_cfg = make_queue_cfg("validation_cfg", 9);
+        validation_cfg.depth = 1024;
+        uvm_config_db#(gq_queue_cfg)::set(this, "validation_engine", "cfg",
+                                          validation_cfg);
+        uvm_config_db#(host_mem_api)::set(this, "validation_engine", "mem",
+                                          validation_mem);
+        uvm_config_db#(gq_hw_adapter)::set(this, "validation_engine", "adapter",
+                                           validation_adapter);
+        validation_engine =
+            gq_submit_test_engine::type_id::create("validation_engine", this);
     endfunction
 
     task run_phase(uvm_phase phase);
         uvm_component component_handle;
         gq_sequencer sequencer;
-        gq_queue_engine engine;
+        gq_submit_test_engine engine;
         mailbox_tx_sequence tx_sequence;
         mailbox_tx_desc single_desc;
         mailbox_tx_desc batch_descs[3];
@@ -246,10 +291,13 @@ class gq_submit_test extends uvm_test;
         bit second_returned;
         bit probe_returned;
         byte owned_data[];
+        gq_request validation_request;
+        gq_response validation_response;
 
         phase.raise_objection(this);
         env_cfg.wait_ready();
         failure_engine.initialize();
+        validation_engine.initialize();
 
         component_handle = uvm_root::get().find("uvm_test_top.env.tx_7.sequencer");
         if (!$cast(sequencer, component_handle))
@@ -355,7 +403,7 @@ class gq_submit_test extends uvm_test;
             `uvm_fatal("SUBMIT_DELAY", "state/response timing during publish is incorrect")
         fork : state_lock_probe
             begin
-                engine.probe_state_lock();
+                engine.probe_state_lock_for_test();
                 probe_returned = 1;
             end
         join_none
@@ -451,9 +499,28 @@ class gq_submit_test extends uvm_test;
             `uvm_fatal("SUBMIT_CAPACITY", "blocked batch prepared a descriptor")
         disable bounded_full_submit;
 
+        validation_request = gq_request::type_id::create("validation_request");
+        for (int unsigned i = 0; i < 256; i++)
+            validation_request.add_desc(make_tx($sformatf("validation_%0d", i), i));
+        validation_response = gq_response::type_id::create("validation_response");
+        validation_engine.reset_membership_validation_steps();
+        validation_engine.submit_batch(validation_request, validation_response);
+        if (validation_response.status != GQ_OK ||
+            validation_response.committed_count != 256 ||
+            validation_engine.membership_validation_steps != 256)
+            `uvm_fatal("SUBMIT_MEMBERSHIP", $sformatf(
+                "unique batch used %0d membership steps expected 256",
+                validation_engine.membership_validation_steps))
+        if (validation_engine.tail_seq() != 256 ||
+            validation_engine.outstanding_count() != 256 ||
+            validation_adapter.publish_calls != 1)
+            `uvm_fatal("SUBMIT_MEMBERSHIP", "unique batch commit state is incorrect")
+
         failure_engine.cleanup();
+        validation_engine.cleanup();
         env.cleanup();
         failure_mem.leak_check(`__FILE__, `__LINE__);
+        validation_mem.leak_check(`__FILE__, `__LINE__);
         mem.leak_check(`__FILE__, `__LINE__);
         phase.drop_objection(this);
     endtask
