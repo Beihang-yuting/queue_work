@@ -19,9 +19,11 @@ class gq_queue_engine extends uvm_component;
     protected longint unsigned reset_epoch_value;
     protected uvm_event ready_event;
     protected uvm_event worker_state_event;
+    protected uvm_event active_completion_wait_cancel;
     protected semaphore user_request_ordering;
     protected semaphore submit_serialization;
     protected semaphore completion_serialization;
+    protected semaphore completion_wait_serialization;
     protected semaphore completion_commit_boundary;
     protected semaphore state_lock;
     protected gq_desc_base outstanding[gq_logical_seq_t];
@@ -46,9 +48,11 @@ class gq_queue_engine extends uvm_component;
         reset_epoch_value     = 0;
         ready_event       = new({name, "_ready"});
         worker_state_event = new({name, "_worker_state"});
+        active_completion_wait_cancel = null;
         user_request_ordering = new(1);
         submit_serialization = new(1);
         completion_serialization = new(1);
+        completion_wait_serialization = new(1);
         completion_commit_boundary = new(1);
         state_lock        = new(1);
         logical_head_seq  = 0;
@@ -424,25 +428,67 @@ class gq_queue_engine extends uvm_component;
         bit ready_snapshot;
         bit completion_wakeup;
         longint unsigned wait_epoch;
+        uvm_event wait_cancel;
 
         if (wait_policy == null)
             `uvm_fatal("GQ_WAIT_POLICY", "completion wait policy is not initialized")
+        completion_wait_serialization.get(1);
+        wait_cancel = new({get_name(), "_active_wait_cancel"});
         state_lock.get(1);
         ready_snapshot = ready_value && !reset_requested_value &&
                          !shutdown_requested;
         wait_epoch = reset_epoch_value;
+        if (ready_snapshot)
+            active_completion_wait_cancel = wait_cancel;
         state_lock.put(1);
-        if (!ready_snapshot)
+        if (!ready_snapshot) begin
+            completion_wait_serialization.put(1);
             return;
-        wait_policy.wait_for_wakeup(cfg, adapter, completion_wakeup);
+        end
+        completion_wakeup = 0;
+        // Run the race from an isolated child process so disable fork cannot
+        // terminate waits belonging to another engine invocation.
+        fork
+            begin
+                fork
+                    begin
+                        wait_policy.wait_for_wakeup(cfg, adapter,
+                                                    completion_wakeup);
+                    end
+                    begin
+                        wait_cancel.wait_on();
+                    end
+                join_any
+                disable fork;
+            end
+        join
+        completion_commit_boundary.get(1);
         state_lock.get(1);
+        if (active_completion_wait_cancel == wait_cancel)
+            active_completion_wait_cancel = null;
         ready_snapshot = ready_value && !reset_requested_value &&
                          !shutdown_requested &&
                          reset_epoch_value == wait_epoch;
         state_lock.put(1);
+        if (ready_snapshot && completion_wakeup &&
+            cfg.wait_mode == GQ_IRQ)
+            adapter.ack_irq(cfg.role, cfg.queue_id);
+        completion_commit_boundary.put(1);
+        completion_wait_serialization.put(1);
         if (!ready_snapshot || !completion_wakeup)
             return;
         drain_completed();
+    endtask
+
+    // Lifecycle control triggers the exact event registered by the active
+    // waiter, then crosses its serialization boundary. A per-wait persistent
+    // event closes the registration/arming race without leaking cancellation
+    // state into a later epoch.
+    protected task cancel_completion_wait(input uvm_event wait_cancel);
+        if (wait_cancel != null)
+            wait_cancel.trigger();
+        completion_wait_serialization.get(1);
+        completion_wait_serialization.put(1);
     endtask
 
     task run_completion_worker();
@@ -870,6 +916,7 @@ class gq_queue_engine extends uvm_component;
 
     task assert_reset();
         bit accept_reset;
+        uvm_event wait_cancel;
 
         completion_commit_boundary.get(1);
         state_lock.get(1);
@@ -880,6 +927,7 @@ class gq_queue_engine extends uvm_component;
             ready_value           = 0;
             reset_epoch_value++;
             ready_event.reset();
+            wait_cancel = active_completion_wait_cancel;
         end
         state_lock.put(1);
         completion_commit_boundary.put(1);
@@ -890,6 +938,7 @@ class gq_queue_engine extends uvm_component;
         // persistent wake makes it retry, observe the new epoch, and abort.
         space_available.trigger();
         worker_state_event.trigger();
+        cancel_completion_wait(wait_cancel);
         release_queue_resources(1);
     endtask
 
@@ -985,6 +1034,7 @@ class gq_queue_engine extends uvm_component;
 
     task cleanup();
         bit cleanup_required;
+        uvm_event wait_cancel;
 
         completion_commit_boundary.get(1);
         state_lock.get(1);
@@ -995,10 +1045,12 @@ class gq_queue_engine extends uvm_component;
         reset_requested_value = 1;
         ready_value           = 0;
         ready_event.reset();
+        wait_cancel = active_completion_wait_cancel;
         state_lock.put(1);
         completion_commit_boundary.put(1);
         space_available.trigger();
         worker_state_event.trigger();
+        cancel_completion_wait(wait_cancel);
         if (cleanup_required)
             release_queue_resources(0);
         space_available.reset();

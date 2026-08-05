@@ -375,6 +375,7 @@ class gq_reset_test extends uvm_test;
         gq_response cleanup_blocked_response;
         bit blocked_sequence_returned;
         bit refill_publish_seen;
+        time irq_reset_start;
 
         phase.raise_objection(this);
         env_cfg.wait_ready();
@@ -667,13 +668,20 @@ class gq_reset_test extends uvm_test;
         end
         if (irq_adapter.wait_irq_calls != 1)
             `uvm_fatal("RESET_IRQ", "IRQ worker did not enter wait_irq")
+        irq_reset_start = $time;
         irq_engine.assert_reset();
-        #(irq_cfg.completion_timeout + 5ns);
+        if (($time - irq_reset_start) >= (irq_cfg.completion_timeout / 2))
+            `uvm_fatal("RESET_IRQ_CANCEL",
+                       "reset waited for the old IRQ timeout instead of cancelling it")
         if (irq_worker_returned || irq_engine.is_ready() ||
             irq_engine.reset_epoch() != 1)
             `uvm_fatal("RESET_IRQ", "IRQ worker did not wait across reset")
         if (irq_adapter.ack_irq_calls != 0)
-            `uvm_fatal("RESET_IRQ", "reset IRQ timeout was acknowledged")
+            `uvm_fatal("RESET_IRQ", "reset IRQ cancellation was acknowledged")
+
+        // Release before the old epoch's bounded wait can time out. A new
+        // completion/IRQ must be consumed only by a new-epoch waiter; an old
+        // waiter that survives reset will otherwise ack without draining.
         irq_engine.release_reset();
         irq_desc = make_tx("irq_recovered_desc", 13);
         irq_request = gq_request::type_id::create("irq_recovered_request");
@@ -689,10 +697,16 @@ class gq_reset_test extends uvm_test;
             if (irq_collector.retired_srcids.size() == 1)
                 break;
         end
-        if (irq_collector.retired_srcids.size() != 1 ||
-            irq_collector.retired_srcids[0] != 16'h700d ||
-            irq_adapter.ack_irq_calls != 1)
+        if (irq_collector.retired_srcids.size() != 1) begin
+            if (irq_adapter.ack_irq_calls == 1 &&
+                irq_engine.outstanding_count() == 1)
+                `uvm_fatal("RESET_IRQ_STALE",
+                           "old epoch waiter acknowledged the new epoch IRQ without draining")
             `uvm_fatal("RESET_IRQ", "IRQ worker did not drain after reset")
+        end
+        if (irq_collector.retired_srcids[0] != 16'h700d ||
+            irq_adapter.ack_irq_calls != 1)
+            `uvm_fatal("RESET_IRQ", "post-reset IRQ was not acknowledged exactly once")
         for (int unsigned poll = 0; poll < 40; poll++) begin
             #1ns;
             if (irq_adapter.wait_irq_calls >= 2)

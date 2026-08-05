@@ -37,18 +37,21 @@ class gq_irq_wait_policy extends gq_wait_policy;
                                  gq_hw_adapter adapter,
                                  output bit completion_wakeup);
         completion_wakeup = 0;
-        fork : bounded_irq_wait
+        // Isolate disable fork from other concurrent policy invocations.
+        fork
             begin
-                adapter.wait_irq(cfg.role, cfg.queue_id);
-                completion_wakeup = 1;
+                fork
+                    begin
+                        adapter.wait_irq(cfg.role, cfg.queue_id);
+                        completion_wakeup = 1;
+                    end
+                    begin
+                        #(cfg.completion_timeout);
+                    end
+                join_any
+                disable fork;
             end
-            begin
-                #(cfg.completion_timeout);
-            end
-        join_any
-        disable bounded_irq_wait;
-        if (completion_wakeup)
-            adapter.ack_irq(cfg.role, cfg.queue_id);
+        join
     endtask
 endclass
 
