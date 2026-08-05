@@ -14,6 +14,12 @@ class gq_queue_engine extends uvm_component;
     protected bit configured;
     protected bit ready_value;
     protected uvm_event ready_event;
+    protected semaphore submit_lock;
+    protected gq_desc_base outstanding[gq_logical_seq_t];
+
+    gq_logical_seq_t logical_head_seq;
+    gq_logical_seq_t logical_tail_seq;
+    uvm_event space_available;
 
     function new(string name = "gq_queue_engine", uvm_component parent = null);
         super.new(name, parent);
@@ -24,6 +30,10 @@ class gq_queue_engine extends uvm_component;
         configured        = 0;
         ready_value       = 0;
         ready_event       = new({name, "_ready"});
+        submit_lock       = new(1);
+        logical_head_seq  = 0;
+        logical_tail_seq  = 0;
+        space_available   = new({name, "_space_available"});
     endfunction
 
     static function bit checked_ring_size(
@@ -127,7 +137,93 @@ class gq_queue_engine extends uvm_component;
             ready_event.wait_trigger();
     endtask
 
+    protected function void release_attempted(gq_request request,
+                                              int unsigned attempted_count);
+        for (int unsigned i = 0; i < attempted_count; i++) begin
+            if (request.descs[i] != null)
+                request.descs[i].release_owned();
+        end
+    endfunction
+
+    task submit_batch(input gq_request request, inout gq_response response);
+        int unsigned batch_size;
+        int unsigned attempted_count;
+        gq_logical_seq_t old_tail;
+        gq_logical_seq_t new_tail;
+        gq_logical_seq_t seq;
+        gq_raw_ptr_t raw_tail;
+        gq_addr_t slot_addr;
+        byte packed_data[];
+
+        if (response == null)
+            response = gq_response::type_id::create("submit_response");
+        response.status          = GQ_RESOURCE_ERROR;
+        response.committed_count = 0;
+        response.reset_epoch     = 0;
+
+        if (!ready_value || request == null || request.kind != GQ_SUBMIT)
+            return;
+        batch_size = request.size();
+        if (batch_size == 0 || batch_size > cfg.depth)
+            return;
+        foreach (request.descs[i]) begin
+            if (request.descs[i] == null)
+                return;
+        end
+
+        forever begin
+            submit_lock.get(1);
+            if ((logical_tail_seq - logical_head_seq) + batch_size <= cfg.depth)
+                break;
+            submit_lock.put(1);
+            space_available.wait_on();
+            space_available.reset();
+        end
+
+        old_tail        = logical_tail_seq;
+        new_tail        = old_tail + batch_size;
+        attempted_count = 0;
+        for (int unsigned i = 0; i < batch_size; i++) begin
+            seq = old_tail + i;
+            attempted_count = i + 1;
+            request.descs[i].attach_mem(mem);
+            if (!request.descs[i].prepare()) begin
+                release_attempted(request, attempted_count);
+                submit_lock.put(1);
+                return;
+            end
+            request.descs[i].mark_available(gq_phase(seq, cfg.depth));
+            packed_data = new[0];
+            request.descs[i].pack(packed_data);
+            if (packed_data.size() != cfg.desc_size) begin
+                release_attempted(request, attempted_count);
+                submit_lock.put(1);
+                return;
+            end
+            slot_addr = ring_base_value + ((seq % cfg.depth) * cfg.desc_size);
+            mem.write_mem(slot_addr, packed_data, `__FILE__, `__LINE__);
+        end
+
+        for (int unsigned i = 0; i < batch_size; i++)
+            outstanding[old_tail + i] = request.descs[i];
+        logical_tail_seq = new_tail;
+        response.status          = GQ_OK;
+        response.committed_count = int'(batch_size);
+        raw_tail = cfg.ptr_codec.encode_publish(old_tail, new_tail, cfg.depth);
+        adapter.publish(cfg.role, cfg.queue_id, raw_tail);
+        submit_lock.put(1);
+    endtask
+
     task cleanup();
+        gq_logical_seq_t seq;
+
+        if (outstanding.first(seq)) begin
+            do begin
+                if (outstanding[seq] != null)
+                    outstanding[seq].release_owned();
+            end while (outstanding.next(seq));
+        end
+        outstanding.delete();
         if (configured) begin
             adapter.disable_queue(cfg.role, cfg.queue_id);
             configured = 0;
@@ -140,7 +236,10 @@ class gq_queue_engine extends uvm_component;
         status_addr_value = 0;
         ring_bytes_value  = 0;
         ready_value       = 0;
+        logical_head_seq  = 0;
+        logical_tail_seq  = 0;
         ready_event.reset();
+        space_available.reset();
     endtask
 
     function gq_addr_t ring_base();
@@ -157,6 +256,24 @@ class gq_queue_engine extends uvm_component;
 
     function bit is_ready();
         return ready_value;
+    endfunction
+
+    function gq_logical_seq_t head_seq();
+        return logical_head_seq;
+    endfunction
+
+    function gq_logical_seq_t tail_seq();
+        return logical_tail_seq;
+    endfunction
+
+    function int unsigned outstanding_count();
+        return int'(logical_tail_seq - logical_head_seq);
+    endfunction
+
+    function gq_desc_base get_outstanding(gq_logical_seq_t seq);
+        if (!outstanding.exists(seq))
+            return null;
+        return outstanding[seq];
     endfunction
 endclass
 

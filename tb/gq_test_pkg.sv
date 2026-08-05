@@ -13,6 +13,7 @@ package gq_test_pkg;
     `include "mocks/mailbox_mock_adapter.svh"
     `include "tests/gq_config_test.svh"
     `include "tests/mailbox_desc_test.svh"
+    `include "tests/gq_submit_test.svh"
 
     class gq_smoke_test extends uvm_test;
         `uvm_component_utils(gq_smoke_test)

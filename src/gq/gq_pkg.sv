@@ -8,6 +8,7 @@ package gq_pkg;
 
     `include "gq_types.svh"
     `include "gq_desc_base.svh"
+    `include "gq_request.svh"
     `include "gq_ptr_codec.svh"
     `include "gq_hw_adapter.svh"
     `include "gq_completion_source.svh"
