@@ -7,9 +7,19 @@ class gq_env extends uvm_env;
     protected gq_env_cfg cfg;
     protected gq_queue_agent agents[string];
     protected gq_reset_controller reset_controller;
+    protected semaphore cleanup_lock;
+    protected bit cleanup_started;
+    protected uvm_event cleanup_done;
+    protected bit finalization_started;
+    protected uvm_event finalization_done;
 
     function new(string name = "gq_env", uvm_component parent = null);
         super.new(name, parent);
+        cleanup_lock = new(1);
+        cleanup_started = 0;
+        cleanup_done = new({name, "_cleanup_done"});
+        finalization_started = 0;
+        finalization_done = new({name, "_finalization_done"});
     endfunction
 
     function void build_phase(uvm_phase phase);
@@ -62,12 +72,51 @@ class gq_env extends uvm_env;
 
     task cleanup();
         string key;
+        bit cleanup_owner;
+
+        cleanup_owner = 0;
+        cleanup_lock.get(1);
+        if (!cleanup_started) begin
+            cleanup_started = 1;
+            cleanup_owner = 1;
+        end
+        cleanup_lock.put(1);
+        if (!cleanup_owner) begin
+            if (!cleanup_done.is_on())
+                cleanup_done.wait_on();
+            return;
+        end
 
         if (agents.first(key)) begin
             do begin
                 agents[key].engine.cleanup();
             end while (agents.next(key));
         end
+        cleanup_done.trigger();
+    endtask
+
+    // The environment, rather than any individual engine, owns the shared
+    // memory leak check. This guarantees every sparse queue has disabled its
+    // hardware and released descriptors/rings before the one global check.
+    task cleanup_and_check_leaks();
+        bit finalization_owner;
+
+        finalization_owner = 0;
+        cleanup_lock.get(1);
+        if (!finalization_started) begin
+            finalization_started = 1;
+            finalization_owner = 1;
+        end
+        cleanup_lock.put(1);
+        if (!finalization_owner) begin
+            if (!finalization_done.is_on())
+                finalization_done.wait_on();
+            return;
+        end
+
+        cleanup();
+        cfg.mem.leak_check(`__FILE__, `__LINE__);
+        finalization_done.trigger();
     endtask
 
     function int unsigned agent_count();

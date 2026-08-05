@@ -38,6 +38,9 @@ class gq_queue_engine extends uvm_component;
     protected semaphore state_lock;
     protected gq_desc_base outstanding[gq_logical_seq_t];
     protected bit outstanding_ids[int];
+    protected time outstanding_since[gq_logical_seq_t];
+    protected bit outstanding_published[gq_logical_seq_t];
+    protected bit oldest_timeout_reported;
     protected gq_logical_seq_t logical_head_seq;
     protected gq_logical_seq_t logical_tail_seq;
     protected gq_refill_profile refill_profile;
@@ -77,6 +80,7 @@ class gq_queue_engine extends uvm_component;
         state_lock        = new(1);
         logical_head_seq  = 0;
         logical_tail_seq  = 0;
+        oldest_timeout_reported = 0;
         refill_profile    = null;
         rx_started        = 0;
         space_available   = new({name, "_space_available"});
@@ -350,8 +354,12 @@ class gq_queue_engine extends uvm_component;
     // completion retirement must remove both before advancing the logical head.
     protected function void install_outstanding(gq_logical_seq_t seq,
                                                 gq_desc_base desc);
+        if (outstanding.num() == 0)
+            oldest_timeout_reported = 0;
         outstanding[seq] = desc;
         outstanding_ids[desc.get_inst_id()] = 1;
+        outstanding_since[seq] = $time;
+        outstanding_published[seq] = 0;
     endfunction
 
     // Caller holds state_lock. Handle and ID-index deletion, then head
@@ -366,8 +374,44 @@ class gq_queue_engine extends uvm_component;
 
         outstanding.delete(seq);
         outstanding_ids.delete(desc.get_inst_id());
+        outstanding_since.delete(seq);
+        outstanding_published.delete(seq);
         logical_head_seq++;
+        oldest_timeout_reported = 0;
         check_state_invariants("completion retire");
+    endfunction
+
+    // Caller holds state_lock and has established that the ring remains
+    // allocated. Diagnostics deliberately use only the public host-memory API
+    // so alternative memory implementations need no manager debug hooks.
+    protected function string completion_diagnostic_state(
+        gq_logical_seq_t head, gq_logical_seq_t tail);
+        int unsigned slot;
+        gq_addr_t slot_addr;
+        byte descriptor_bytes[];
+        string descriptor_hex;
+        bit [7:0] value;
+
+        slot = int'(head % cfg.depth);
+        slot_addr = ring_base_value + (slot * cfg.desc_size);
+        descriptor_bytes = new[0];
+        if (tail > head)
+            mem.read_mem(slot_addr, cfg.desc_size, descriptor_bytes,
+                         `__FILE__, `__LINE__);
+        descriptor_hex = "";
+        foreach (descriptor_bytes[i]) begin
+            if (i != 0)
+                descriptor_hex = {descriptor_hex, " "};
+            value = descriptor_bytes[i];
+            descriptor_hex = {descriptor_hex, $sformatf("%02x", value)};
+        end
+        if (descriptor_bytes.size() == 0)
+            descriptor_hex = "<none>";
+        return $sformatf(
+            "role=%s queue_id=%0d head=%0d tail=%0d slot=%0d phase=%0d ring_addr=0x%016h slot_addr=0x%016h descriptor=%s",
+            cfg.role == GQ_TX ? "TX" : "RX", cfg.queue_id, head, tail,
+            slot, gq_phase(head, cfg.depth), ring_base_value, slot_addr,
+            descriptor_hex);
     endfunction
 
     task drain_completed();
@@ -378,8 +422,10 @@ class gq_queue_engine extends uvm_component;
         int unsigned count;
         int unsigned retired_count;
         bit protocol_violation;
+        bit timeout_violation;
         bit stale_completion;
         longint unsigned query_epoch;
+        string diagnostic_state;
 
         completion_serialization.get(1);
         state_lock.get(1);
@@ -400,42 +446,66 @@ class gq_queue_engine extends uvm_component;
             query_head, pending);
         completion_query_returned();
         state_lock.get(1);
-        current_outstanding = logical_tail_seq - logical_head_seq;
         stale_completion = !ready_value || reset_requested_value ||
                            shutdown_requested ||
                            reset_epoch_value != query_epoch;
-        protocol_violation = query_head != logical_head_seq ||
-                             count > pending.size() ||
-                             count > current_outstanding;
         state_lock.put(1);
         if (stale_completion) begin
             completion_serialization.put(1);
             return;
         end
-        if (protocol_violation) begin
-            `uvm_error("GQ_COMPLETION_PROTOCOL", $sformatf(
-                "completion count %0d exceeds pending=%0d/outstanding=%0d or query head changed",
-                count, pending.size(), current_outstanding))
-            completion_serialization.put(1);
-            return;
-        end
 
-        // The first validation may be followed by external lifecycle work.
-        // Revalidate after the protected seam while holding the boundary that
-        // reset assertion uses to define which side owns this completion.
+        // Diagnostics and retirement share the lifecycle commit boundary.
+        // Reset or cleanup may win while the external completion query is in
+        // flight or while a verification seam is paused; revalidate and
+        // reserve any one-shot timeout only after that boundary is acquired.
         completion_commit_entered();
         completion_commit_boundary.get(1);
         state_lock.get(1);
+        current_outstanding = logical_tail_seq - logical_head_seq;
         stale_completion = !ready_value || reset_requested_value ||
                            shutdown_requested ||
-                           reset_epoch_value != query_epoch ||
-                           query_head != logical_head_seq;
+                           reset_epoch_value != query_epoch;
+        protocol_violation = !stale_completion &&
+                             (query_head != logical_head_seq ||
+                              count > pending.size() ||
+                              count > current_outstanding);
+        diagnostic_state = "";
+        timeout_violation = !stale_completion && !protocol_violation &&
+                            count == 0 && current_outstanding != 0 &&
+                            outstanding_since.exists(logical_head_seq) &&
+                            outstanding_published.exists(logical_head_seq) &&
+                            outstanding_published[logical_head_seq] &&
+                            !oldest_timeout_reported &&
+                            ($time - outstanding_since[logical_head_seq]) >=
+                                cfg.completion_timeout;
+        if (timeout_violation) begin
+            oldest_timeout_reported = 1;
+            diagnostic_state = completion_diagnostic_state(
+                logical_head_seq, logical_tail_seq);
+        end else if (protocol_violation) begin
+            diagnostic_state = completion_diagnostic_state(
+                logical_head_seq, logical_tail_seq);
+        end
         state_lock.put(1);
         if (stale_completion) begin
             completion_commit_boundary.put(1);
             completion_serialization.put(1);
             return;
         end
+        if (protocol_violation) begin
+            `uvm_error("GQ_COMPLETION_PROTOCOL", $sformatf(
+                "completion count %0d exceeds pending=%0d/outstanding=%0d or query head changed; %s",
+                count, pending.size(), current_outstanding,
+                diagnostic_state))
+            completion_commit_boundary.put(1);
+            completion_serialization.put(1);
+            return;
+        end
+        if (timeout_violation)
+            `uvm_error("GQ_COMPLETION_TIMEOUT", $sformatf(
+                "oldest outstanding completion exceeded timeout=%0t; %s",
+                cfg.completion_timeout, diagnostic_state))
 
         retired_count = 0;
         for (int unsigned i = 0; i < count; i++) begin
@@ -554,8 +624,17 @@ class gq_queue_engine extends uvm_component;
         state_lock.put(1);
         completion_commit_boundary.put(1);
         wait_done.trigger();
-        if (!ready_snapshot || !completion_wakeup)
+        if (!ready_snapshot)
             return;
+        if (!completion_wakeup) begin
+            // An IRQ watchdog expiry still checks ordered completion state so
+            // the shared oldest-outstanding timeout diagnostic is not starved
+            // by a missing interrupt. Reset/cleanup cancellation is excluded
+            // by the epoch/readiness check above and never reaches this drain.
+            if (cfg.wait_mode == GQ_IRQ)
+                drain_completed();
+            return;
+        end
 
         if (ack_required) begin
             // ACK ownership was committed under the reset boundary, but the
@@ -733,6 +812,17 @@ class gq_queue_engine extends uvm_component;
         raw_tail = cfg.ptr_codec.encode_publish(old_tail, new_tail, cfg.depth);
         adapter.publish(cfg.role, cfg.queue_id, raw_tail);
         state_lock.get(1);
+        // A completion cannot time out before the hardware has observed its
+        // published tail. Entries retired while a timed publish was in flight
+        // are intentionally skipped instead of recreating stale metadata.
+        for (seq = old_tail; seq < new_tail; seq++) begin
+            if (outstanding.exists(seq)) begin
+                outstanding_since[seq] = $time;
+                outstanding_published[seq] = 1;
+            end
+        end
+        if (logical_head_seq >= old_tail && logical_head_seq < new_tail)
+            oldest_timeout_reported = 0;
         stale_request = shutdown_requested ||
                         reset_epoch_value != request_epoch ||
                         (reset_requested_value && !allow_during_reset);
@@ -987,6 +1077,9 @@ class gq_queue_engine extends uvm_component;
         end
         outstanding.delete();
         outstanding_ids.delete();
+        outstanding_since.delete();
+        outstanding_published.delete();
+        oldest_timeout_reported = 0;
         logical_head_seq = 0;
         logical_tail_seq = 0;
         if (preserve_restart_profile && cfg.role == GQ_RX &&
