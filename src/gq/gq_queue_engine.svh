@@ -26,6 +26,46 @@ class gq_queue_engine extends uvm_component;
         ready_event       = new({name, "_ready"});
     endfunction
 
+    static function bit checked_ring_size(
+        input int unsigned depth,
+        input int unsigned desc_size,
+        input int unsigned status_area_size,
+        output longint unsigned descriptor_bytes,
+        output longint unsigned ring_bytes,
+        output string reason);
+        longint unsigned max_value;
+
+        descriptor_bytes = 0;
+        ring_bytes       = 0;
+        max_value        = '1;
+
+        if (depth == 0 || desc_size == 0) begin
+            reason = "ring depth and descriptor size must be non-zero";
+            return 0;
+        end
+
+        descriptor_bytes = depth;
+        if (descriptor_bytes > (max_value / desc_size)) begin
+            reason = "descriptor ring size overflows 64 bits";
+            return 0;
+        end
+        descriptor_bytes = descriptor_bytes * desc_size;
+
+        if (status_area_size > (max_value - descriptor_bytes)) begin
+            reason = "ring plus status area overflows 64 bits";
+            return 0;
+        end
+        ring_bytes = descriptor_bytes + status_area_size;
+
+        if (ring_bytes > 64'h0000_0000_ffff_ffff) begin
+            reason = $sformatf("ring size %0d is outside allocator range", ring_bytes);
+            return 0;
+        end
+
+        reason = "";
+        return 1;
+    endfunction
+
     function void build_phase(uvm_phase phase);
         super.build_phase(phase);
 
@@ -56,18 +96,9 @@ class gq_queue_engine extends uvm_component;
             `uvm_fatal("GQ_ENGINE_CFG", "pointer codec must not be null")
 
         max_value = '1;
-        desc_bytes = cfg.depth;
-        if (cfg.desc_size != 0 && desc_bytes > (max_value / cfg.desc_size))
-            `uvm_fatal("GQ_RING_SIZE", "descriptor ring size overflows 64 bits")
-
-        desc_bytes = desc_bytes * cfg.desc_size;
-        if (cfg.status_area_size > (max_value - desc_bytes))
-            `uvm_fatal("GQ_RING_SIZE", "ring plus status area overflows 64 bits")
-
-        ring_bytes_value = desc_bytes + cfg.status_area_size;
-        if (ring_bytes_value == 0 || ring_bytes_value > 64'h0000_0000_ffff_ffff)
-            `uvm_fatal("GQ_RING_SIZE", $sformatf("ring size %0d is outside allocator range",
-                                                 ring_bytes_value))
+        if (!checked_ring_size(cfg.depth, cfg.desc_size, cfg.status_area_size,
+                               desc_bytes, ring_bytes_value, reason))
+            `uvm_fatal("GQ_RING_SIZE", reason)
 
         ring_base_value = mem.alloc(int'(ring_bytes_value), cfg.alignment,
                                     `__FILE__, `__LINE__);

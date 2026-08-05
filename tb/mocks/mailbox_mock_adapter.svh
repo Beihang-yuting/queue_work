@@ -47,6 +47,8 @@ class mailbox_mock_adapter extends gq_hw_adapter;
         key = gq_queue_key(role, queue_id);
         disable_calls++;
         disable_count[key]++;
+        if (irq_events.exists(key))
+            irq_events[key].reset();
     endtask
 
     virtual task publish(
@@ -67,10 +69,15 @@ class mailbox_mock_adapter extends gq_hw_adapter;
         key = gq_queue_key(role, queue_id);
         if (!irq_events.exists(key))
             irq_events[key] = new({key, "_irq"});
-        irq_events[key].wait_trigger();
+        irq_events[key].wait_on();
     endtask
 
     virtual task ack_irq(gq_role_e role, int unsigned queue_id);
+        string key;
+
+        key = gq_queue_key(role, queue_id);
+        if (irq_events.exists(key))
+            irq_events[key].reset();
     endtask
 
     function void trigger_irq(gq_role_e role, int unsigned queue_id);

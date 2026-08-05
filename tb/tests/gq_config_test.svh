@@ -11,6 +11,9 @@ class gq_config_test extends uvm_test;
     mailbox_env_cfg     disabled_cfg;
     mailbox_env         env;
     mailbox_env         disabled_env;
+    gq_queue_cfg        lifecycle_cfg;
+    mailbox_mock_adapter lifecycle_adapter;
+    gq_queue_engine     lifecycle_engine;
 
     function new(string name = "gq_config_test", uvm_component parent = null);
         super.new(name, parent);
@@ -30,8 +33,60 @@ class gq_config_test extends uvm_test;
         return base_a < (base_b + size_b) && base_b < (base_a + size_a);
     endfunction
 
+    function gq_queue_cfg make_queue_cfg(string name, gq_role_e role,
+                                         int unsigned queue_id,
+                                         int unsigned depth,
+                                         int unsigned desc_size);
+        gq_queue_cfg queue_cfg;
+
+        queue_cfg = gq_queue_cfg::type_id::create(name);
+        queue_cfg.queue_id           = queue_id;
+        queue_cfg.role               = role;
+        queue_cfg.depth              = depth;
+        queue_cfg.desc_size          = desc_size;
+        queue_cfg.alignment          = 64;
+        queue_cfg.status_area_size   = 0;
+        queue_cfg.wait_mode          = GQ_POLL;
+        queue_cfg.poll_interval      = 10ns;
+        queue_cfg.completion_timeout = 1us;
+        queue_cfg.ptr_codec          = ptr_codec;
+        queue_cfg.completion_source  = null;
+        return queue_cfg;
+    endfunction
+
+    function mailbox_env_cfg make_mailbox_cfg(string name);
+        mailbox_env_cfg candidate;
+
+        candidate           = mailbox_env_cfg::type_id::create(name);
+        candidate.mem       = mem;
+        candidate.adapter   = adapter;
+        candidate.ptr_codec = ptr_codec;
+        return candidate;
+    endfunction
+
+    function void append_failure(ref string failures, input string message);
+        failures = {failures, failures == "" ? "" : "; ", message};
+    endfunction
+
+    function void expect_env_invalid(gq_env_cfg candidate, string check_name,
+                                     ref string failures);
+        string reason;
+
+        if (candidate.validate(reason))
+            append_failure(failures, {check_name, " was accepted"});
+        else if (reason == "")
+            append_failure(failures, {check_name, " had no failure reason"});
+    endfunction
+
     function void build_phase(uvm_phase phase);
         gq_queue_cfg cfg;
+        gq_queue_cfg malformed_queue;
+        mailbox_env_cfg invalid_mailbox_cfg;
+        mailbox_env_cfg boundary_mailbox_cfg;
+        gq_env_cfg mutated_env_cfg;
+        longint unsigned descriptor_bytes;
+        longint unsigned checked_ring_bytes;
+        string validation_failures;
         string reason;
 
         super.build_phase(phase);
@@ -96,6 +151,83 @@ class gq_config_test extends uvm_test;
         ptr_codec = gq_test_ptr_codec::type_id::create("ptr_codec");
         adapter   = mailbox_mock_adapter::type_id::create("adapter");
 
+        invalid_mailbox_cfg = make_mailbox_cfg("bad_id_cfg");
+        malformed_queue = make_queue_cfg("bad_id_queue", GQ_TX, 4096, 32, 64);
+        if (!invalid_mailbox_cfg.add_queue(malformed_queue, reason))
+            append_failure(validation_failures, "generic add unexpectedly rejected bad mailbox ID");
+        expect_env_invalid(invalid_mailbox_cfg, "mailbox ID above 4095", validation_failures);
+
+        invalid_mailbox_cfg = make_mailbox_cfg("bad_depth_cfg");
+        malformed_queue = make_queue_cfg("bad_depth_queue", GQ_RX, 1, 16, 16);
+        if (!invalid_mailbox_cfg.add_queue(malformed_queue, reason))
+            append_failure(validation_failures, "generic add unexpectedly rejected mailbox depth 16");
+        expect_env_invalid(invalid_mailbox_cfg, "mailbox depth below 32", validation_failures);
+
+        invalid_mailbox_cfg = make_mailbox_cfg("bad_tx_size_cfg");
+        malformed_queue = make_queue_cfg("bad_tx_size_queue", GQ_TX, 2, 32, 16);
+        if (!invalid_mailbox_cfg.add_queue(malformed_queue, reason))
+            append_failure(validation_failures, "generic add unexpectedly rejected bad TX size");
+        expect_env_invalid(invalid_mailbox_cfg, "mailbox TX descriptor size", validation_failures);
+
+        invalid_mailbox_cfg = make_mailbox_cfg("bad_rx_size_cfg");
+        malformed_queue = make_queue_cfg("bad_rx_size_queue", GQ_RX, 3, 32, 64);
+        if (!invalid_mailbox_cfg.add_queue(malformed_queue, reason))
+            append_failure(validation_failures, "generic add unexpectedly rejected bad RX size");
+        expect_env_invalid(invalid_mailbox_cfg, "mailbox RX descriptor size", validation_failures);
+
+        invalid_mailbox_cfg = make_mailbox_cfg("null_add_cfg");
+        if (invalid_mailbox_cfg.add_queue(null, reason) || reason == "")
+            append_failure(validation_failures, "null add was not rejected with a reason");
+
+        mutated_env_cfg         = gq_env_cfg::type_id::create("mutated_env_cfg");
+        mutated_env_cfg.mem     = mem;
+        mutated_env_cfg.adapter = adapter;
+        malformed_queue = make_queue_cfg("mutated_queue", GQ_TX, 20, 32, 64);
+        if (!mutated_env_cfg.add_queue(malformed_queue, reason))
+            append_failure(validation_failures, "initial mutable queue add failed");
+        malformed_queue.queue_id = 21;
+        if (!mutated_env_cfg.add_queue(malformed_queue, reason))
+            append_failure(validation_failures, "reused mutable queue add failed before validation");
+        expect_env_invalid(mutated_env_cfg, "mutated/reused queue handle", validation_failures);
+
+        invalid_mailbox_cfg = make_mailbox_cfg("null_entry_cfg");
+        invalid_mailbox_cfg.queues["tx_4"] = null;
+        expect_env_invalid(invalid_mailbox_cfg, "null mailbox queue entry", validation_failures);
+
+        boundary_mailbox_cfg = make_mailbox_cfg("boundary_mailbox_cfg");
+        if (!boundary_mailbox_cfg.add_tx(0, 32, reason))
+            append_failure(validation_failures, {"valid TX boundary rejected: ", reason});
+        if (!boundary_mailbox_cfg.add_rx(4095, 65536, reason))
+            append_failure(validation_failures, {"valid RX boundary rejected: ", reason});
+        if (!boundary_mailbox_cfg.validate(reason))
+            append_failure(validation_failures, {"valid mailbox boundaries failed validation: ",
+                                                   reason});
+
+        if (!gq_queue_engine::checked_ring_size(32, 64, 128,
+                                                descriptor_bytes,
+                                                checked_ring_bytes, reason))
+            append_failure(validation_failures, {"valid checked ring size rejected: ", reason});
+        else if (descriptor_bytes != 2048 || checked_ring_bytes != 2176)
+            append_failure(validation_failures, "checked ring size returned incorrect byte counts");
+        if (gq_queue_engine::checked_ring_size(65536, 65536, 0,
+                                               descriptor_bytes,
+                                               checked_ring_bytes, reason))
+            append_failure(validation_failures, "checked ring size accepted a 2^32-byte block");
+        else if (reason == "")
+            append_failure(validation_failures, "oversized checked ring had no failure reason");
+
+        if (validation_failures != "")
+            `uvm_fatal("ENV_VALIDATE", validation_failures)
+
+        lifecycle_adapter = mailbox_mock_adapter::type_id::create("lifecycle_adapter");
+        lifecycle_cfg = make_queue_cfg("lifecycle_cfg", GQ_TX, 77, 32, 64);
+        lifecycle_cfg.status_area_size = 128;
+        uvm_config_db#(gq_queue_cfg)::set(this, "lifecycle_engine", "cfg", lifecycle_cfg);
+        uvm_config_db#(host_mem_api)::set(this, "lifecycle_engine", "mem", mem);
+        uvm_config_db#(gq_hw_adapter)::set(this, "lifecycle_engine", "adapter",
+                                           lifecycle_adapter);
+        lifecycle_engine = gq_queue_engine::type_id::create("lifecycle_engine", this);
+
         env_cfg = mailbox_env_cfg::type_id::create("env_cfg");
         env_cfg.mem       = mem;
         env_cfg.adapter   = adapter;
@@ -133,6 +265,7 @@ class gq_config_test extends uvm_test;
         gq_addr_t tx3_base;
         gq_addr_t tx100_base;
         gq_addr_t rx9_base;
+        bit irq_wait_returned;
 
         phase.raise_objection(this);
         env_cfg.wait_ready();
@@ -183,6 +316,54 @@ class gq_config_test extends uvm_test;
             adapter.configured_desc_size["tx_100"] != 64 ||
             adapter.configured_desc_size["rx_9"] != 16)
             `uvm_fatal("ADAPTER", "mailbox descriptor sizes are incorrect")
+
+        adapter.trigger_irq(GQ_TX, 3);
+        irq_wait_returned = 0;
+        fork : irq_wait_or_timeout
+            begin
+                adapter.wait_irq(GQ_TX, 3);
+                irq_wait_returned = 1;
+            end
+            begin
+                #1ns;
+            end
+        join_any
+        disable irq_wait_or_timeout;
+        if (!irq_wait_returned)
+            `uvm_fatal("IRQ", "wait_irq missed an interrupt triggered before the wait")
+
+        adapter.ack_irq(GQ_TX, 3);
+        if (adapter.irq_events["tx_3"].is_on())
+            `uvm_fatal("IRQ", "ack_irq did not clear the persistent interrupt")
+        adapter.trigger_irq(GQ_TX, 3);
+        adapter.disable_queue(GQ_TX, 3);
+        if (adapter.irq_events["tx_3"].is_on())
+            `uvm_fatal("IRQ", "disable_queue did not clear the persistent interrupt")
+
+        lifecycle_engine.initialize();
+        if (lifecycle_engine.ring_size() != 2176)
+            `uvm_fatal("LIFECYCLE", "status-area ring allocation size is incorrect")
+        if (lifecycle_engine.status_addr() != lifecycle_engine.ring_base() + 2048)
+            `uvm_fatal("LIFECYCLE", "status address does not follow the descriptor ring")
+        if (lifecycle_adapter.configure_calls != 1)
+            `uvm_fatal("LIFECYCLE", "first initialize did not configure exactly once")
+        lifecycle_engine.initialize();
+        if (lifecycle_adapter.configure_calls != 1)
+            `uvm_fatal("LIFECYCLE", "idempotent initialize configured the queue again")
+        lifecycle_engine.cleanup();
+        lifecycle_engine.cleanup();
+        if (lifecycle_adapter.disable_calls != 1)
+            `uvm_fatal("LIFECYCLE", "idempotent cleanup disabled the queue more than once")
+
+        lifecycle_engine.initialize();
+        if (lifecycle_engine.ring_size() != 2176 ||
+            lifecycle_engine.status_addr() != lifecycle_engine.ring_base() + 2048 ||
+            lifecycle_adapter.configure_calls != 2)
+            `uvm_fatal("LIFECYCLE", "sequential reinitialize did not recreate the ring")
+        lifecycle_engine.cleanup();
+        lifecycle_engine.cleanup();
+        if (lifecycle_adapter.disable_calls != 2)
+            `uvm_fatal("LIFECYCLE", "second idempotent cleanup count is incorrect")
 
         env.cleanup();
         disabled_env.cleanup();

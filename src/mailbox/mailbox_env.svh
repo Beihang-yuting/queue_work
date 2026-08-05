@@ -14,6 +14,35 @@ class mailbox_env_cfg extends gq_env_cfg;
     virtual function bit validate(output string reason);
         string key;
 
+        if (queues.first(key)) begin
+            do begin
+                if (queues[key] == null) begin
+                    reason = $sformatf("mailbox queue %s configuration must not be null", key);
+                    return 0;
+                end
+                if (queues[key].queue_id > 4095) begin
+                    reason = $sformatf("mailbox queue %s ID %0d is outside 0..4095",
+                                       key, queues[key].queue_id);
+                    return 0;
+                end
+                if (queues[key].depth < 32 || queues[key].depth > 65536 ||
+                    !gq_is_pow2(queues[key].depth)) begin
+                    reason = $sformatf(
+                        "mailbox queue %s depth %0d must be a power of two in 32..65536",
+                        key, queues[key].depth);
+                    return 0;
+                end
+                if (queues[key].role == GQ_TX && queues[key].desc_size != 64) begin
+                    reason = $sformatf("mailbox TX queue %s descriptor size must be 64", key);
+                    return 0;
+                end
+                if (queues[key].role == GQ_RX && queues[key].desc_size != 16) begin
+                    reason = $sformatf("mailbox RX queue %s descriptor size must be 16", key);
+                    return 0;
+                end
+            end while (queues.next(key));
+        end
+
         if (ptr_codec == null) begin
             reason = "mailbox pointer codec must not be null";
             return 0;

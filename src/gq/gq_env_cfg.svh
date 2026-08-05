@@ -30,6 +30,8 @@ class gq_env_cfg extends uvm_object;
             return 0;
         end
 
+        // Ownership transfers to the environment. Callers must treat the
+        // configuration as immutable after a successful add_queue call.
         queues[key] = queue_cfg;
         reason = "";
         return 1;
@@ -37,6 +39,7 @@ class gq_env_cfg extends uvm_object;
 
     virtual function bit validate(output string reason);
         string key;
+        string expected_key;
         string queue_reason;
 
         if (mem == null) begin
@@ -52,6 +55,13 @@ class gq_env_cfg extends uvm_object;
             do begin
                 if (queues[key] == null) begin
                     reason = $sformatf("queue %s configuration must not be null", key);
+                    return 0;
+                end
+                expected_key = gq_queue_key(queues[key].role, queues[key].queue_id);
+                if (key != expected_key) begin
+                    reason = $sformatf(
+                        "queue key %s does not match current role/ID key %s; added configurations are immutable",
+                        key, expected_key);
                     return 0;
                 end
                 if (!queues[key].validate(queue_reason)) begin
