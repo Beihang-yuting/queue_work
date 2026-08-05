@@ -129,6 +129,10 @@ class gq_regression_counting_mem extends host_mem_manager;
         leak_check_calls++;
         super.leak_check(file, line);
     endfunction
+
+    function int unsigned outstanding_blocks();
+        return alloc_count;
+    endfunction
 endclass
 
 class gq_regression_lifecycle_engine extends gq_queue_engine;
@@ -174,11 +178,13 @@ class gq_regression_test extends uvm_test;
     mailbox_env_cfg      env_cfg;
     mailbox_env          env;
     bit                  manual_finalization_joiner_returned;
+    uvm_event            regression_complete;
 
     function new(string name = "gq_regression_test",
                  uvm_component parent = null);
         super.new(name, parent);
         manual_finalization_joiner_returned = 0;
+        regression_complete = new({name, "_complete"});
     endfunction
 
     function gq_queue_cfg make_env_queue_cfg(
@@ -632,6 +638,7 @@ class gq_regression_test extends uvm_test;
         gq_queue_engine tx_4095;
         gq_queue_engine rx_2;
         gq_queue_engine rx_3000;
+        int unsigned outstanding_blocks;
 
         super.phase_ended(phase);
         if (phase.get_name() != "run")
@@ -640,6 +647,7 @@ class gq_regression_test extends uvm_test;
         tx_4095 = find_engine("tx_4095");
         rx_2    = find_engine("rx_2");
         rx_3000 = find_engine("rx_3000");
+        outstanding_blocks = regression_mem.outstanding_blocks();
         if (tx_1.is_ready() || tx_4095.is_ready() ||
             rx_2.is_ready() || rx_3000.is_ready() ||
             tx_1.ring_base() != 0 || tx_4095.ring_base() != 0 ||
@@ -650,12 +658,15 @@ class gq_regression_test extends uvm_test;
             rx_3000.outstanding_count() != 0 ||
             regression_adapter.disable_calls != 8 ||
             regression_mem.leak_check_calls != 1 ||
+            outstanding_blocks != 0 ||
             !manual_finalization_joiner_returned)
             `uvm_fatal("REG_AUTO_FINALIZE", $sformatf(
-                "automatic run-end cleanup incomplete disable=%0d leak_checks=%0d manual_join=%0b",
+                "automatic run-end cleanup incomplete disable=%0d leak_checks=%0d outstanding=%0d manual_join=%0b",
                 regression_adapter.disable_calls,
                 regression_mem.leak_check_calls,
+                outstanding_blocks,
                 manual_finalization_joiner_returned))
+        regression_complete.trigger();
     endfunction
 
     task run_phase(uvm_phase phase);
@@ -680,6 +691,22 @@ class gq_regression_test extends uvm_test;
         bit cleanup_wait_returned;
 
         phase.raise_objection(this);
+        regression_complete.reset();
+        fork : regression_watchdog
+            begin
+                fork : watchdog_race
+                    begin
+                        #10us;
+                        `uvm_fatal("REG_WATCHDOG",
+                                   "integrated regression exceeded 10us")
+                    end
+                    begin
+                        regression_complete.wait_on();
+                    end
+                join_any
+                disable watchdog_race;
+            end
+        join_none
         failed = 0;
         timeout_engine.initialize();
         protocol_engine.initialize();
