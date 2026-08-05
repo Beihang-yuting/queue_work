@@ -85,12 +85,16 @@ class gq_regression_delayed_adapter extends mailbox_mock_adapter;
     `uvm_object_utils(gq_regression_delayed_adapter)
 
     time publish_delay;
+    time disable_delay;
     uvm_event publish_entered;
+    uvm_event disable_entered;
 
     function new(string name = "gq_regression_delayed_adapter");
         super.new(name);
         publish_delay = 0;
+        disable_delay = 0;
         publish_entered = new({name, "_publish_entered"});
+        disable_entered = new({name, "_disable_entered"});
     endfunction
 
     virtual task publish(
@@ -98,9 +102,33 @@ class gq_regression_delayed_adapter extends mailbox_mock_adapter;
         int unsigned queue_id,
         gq_raw_ptr_t raw_tail);
         publish_entered.trigger();
-        #(publish_delay);
+        if (publish_delay != 0)
+            #(publish_delay);
         super.publish(role, queue_id, raw_tail);
     endtask
+
+    virtual task disable_queue(gq_role_e role, int unsigned queue_id);
+        disable_entered.trigger();
+        if (disable_delay != 0)
+            #(disable_delay);
+        super.disable_queue(role, queue_id);
+    endtask
+endclass
+
+class gq_regression_counting_mem extends host_mem_manager;
+    `uvm_object_utils(gq_regression_counting_mem)
+
+    int unsigned leak_check_calls;
+
+    function new(string name = "gq_regression_counting_mem");
+        super.new(name);
+        leak_check_calls = 0;
+    endfunction
+
+    virtual function void leak_check(string file = "", int line = 0);
+        leak_check_calls++;
+        super.leak_check(file, line);
+    endfunction
 endclass
 
 class gq_regression_lifecycle_engine extends gq_queue_engine;
@@ -140,15 +168,40 @@ class gq_regression_test extends uvm_test;
     gq_regression_lifecycle_engine protocol_engine;
     gq_queue_cfg         irq_timeout_cfg;
     gq_queue_engine      irq_timeout_engine;
-    host_mem_manager     regression_mem;
-    mailbox_mock_adapter regression_adapter;
+    gq_regression_counting_mem regression_mem;
+    gq_regression_delayed_adapter regression_adapter;
     mailbox_mock_dut     regression_dut;
     mailbox_env_cfg      env_cfg;
     mailbox_env          env;
+    bit                  manual_finalization_joiner_returned;
 
     function new(string name = "gq_regression_test",
                  uvm_component parent = null);
         super.new(name, parent);
+        manual_finalization_joiner_returned = 0;
+    endfunction
+
+    function gq_queue_cfg make_env_queue_cfg(
+        string name,
+        gq_role_e role,
+        int unsigned queue_id,
+        gq_wait_mode_e wait_mode);
+        gq_queue_cfg queue_cfg;
+
+        queue_cfg = gq_queue_cfg::type_id::create(name);
+        queue_cfg.queue_id           = queue_id;
+        queue_cfg.role               = role;
+        queue_cfg.depth              = 32;
+        queue_cfg.desc_size          = role == GQ_TX ? 64 : 16;
+        queue_cfg.alignment          = 64;
+        queue_cfg.status_area_size   = 0;
+        queue_cfg.wait_mode          = wait_mode;
+        queue_cfg.poll_interval      = 10ns;
+        queue_cfg.completion_timeout = 100us;
+        queue_cfg.ptr_codec          = ptr_codec;
+        queue_cfg.completion_source  = mailbox_completion::type_id::create(
+            {name, "_completion"});
+        return queue_cfg;
     endfunction
 
     function string bytes_to_hex(input byte data[]);
@@ -357,7 +410,7 @@ class gq_regression_test extends uvm_test;
         regression_mem.init_region(64'h0000_0001_7100_0000,
                                    64'h0000_0001_71ff_ffff,
                                    MODE_LINEAR, 16);
-        regression_adapter = mailbox_mock_adapter::type_id::create(
+        regression_adapter = gq_regression_delayed_adapter::type_id::create(
             "regression_adapter");
         regression_dut = mailbox_mock_dut::type_id::create(
             "regression_dut");
@@ -368,21 +421,25 @@ class gq_regression_test extends uvm_test;
         env_cfg.adapter   = regression_adapter;
         env_cfg.ptr_codec = ptr_codec;
         begin
+            gq_queue_cfg tx_1_cfg;
+            gq_queue_cfg tx_4095_cfg;
+            gq_queue_cfg rx_2_cfg;
+            gq_queue_cfg rx_3000_cfg;
             string reason;
 
-            if (!env_cfg.add_tx(1, 32, reason) ||
-                !env_cfg.add_tx(4095, 32, reason) ||
-                !env_cfg.add_rx(2, 32, reason) ||
-                !env_cfg.add_rx(3000, 32, reason))
+            tx_1_cfg = make_env_queue_cfg(
+                "tx_1_cfg", GQ_TX, 1, GQ_POLL);
+            tx_4095_cfg = make_env_queue_cfg(
+                "tx_4095_cfg", GQ_TX, 4095, GQ_IRQ);
+            rx_2_cfg = make_env_queue_cfg(
+                "rx_2_cfg", GQ_RX, 2, GQ_POLL);
+            rx_3000_cfg = make_env_queue_cfg(
+                "rx_3000_cfg", GQ_RX, 3000, GQ_IRQ);
+            if (!env_cfg.add_queue(tx_1_cfg, reason) ||
+                !env_cfg.add_queue(tx_4095_cfg, reason) ||
+                !env_cfg.add_queue(rx_2_cfg, reason) ||
+                !env_cfg.add_queue(rx_3000_cfg, reason))
                 `uvm_fatal("REG_CFG", reason)
-        end
-        env_cfg.queues["tx_1"].wait_mode = GQ_POLL;
-        env_cfg.queues["tx_4095"].wait_mode = GQ_IRQ;
-        env_cfg.queues["rx_2"].wait_mode = GQ_POLL;
-        env_cfg.queues["rx_3000"].wait_mode = GQ_IRQ;
-        foreach (env_cfg.queues[key]) begin
-            env_cfg.queues[key].poll_interval = 10ns;
-            env_cfg.queues[key].completion_timeout = 100us;
         end
         uvm_config_db#(gq_env_cfg)::set(this, "env", "cfg", env_cfg);
         env = mailbox_env::type_id::create("env", this);
@@ -562,8 +619,27 @@ class gq_regression_test extends uvm_test;
         regression_dut.trigger_irq(GQ_TX, 4095);
         wait_for_state(tx_4095, 1, 1, "post-reset IRQ completion");
 
-        env.cleanup_and_check_leaks();
-        env.cleanup_and_check_leaks();
+        // The test deliberately leaves live RX descriptors and allocated rings.
+        // Dropping the final run objection must make the environment own timed
+        // finalization. A delayed first disable gives manual concurrent callers
+        // a deterministic window in which to join that automatic owner.
+        regression_adapter.disable_delay = 20ns;
+        regression_adapter.disable_entered.reset();
+    endtask
+
+    function void phase_ended(uvm_phase phase);
+        gq_queue_engine tx_1;
+        gq_queue_engine tx_4095;
+        gq_queue_engine rx_2;
+        gq_queue_engine rx_3000;
+
+        super.phase_ended(phase);
+        if (phase.get_name() != "run")
+            return;
+        tx_1    = find_engine("tx_1");
+        tx_4095 = find_engine("tx_4095");
+        rx_2    = find_engine("rx_2");
+        rx_3000 = find_engine("rx_3000");
         if (tx_1.is_ready() || tx_4095.is_ready() ||
             rx_2.is_ready() || rx_3000.is_ready() ||
             tx_1.ring_base() != 0 || tx_4095.ring_base() != 0 ||
@@ -572,10 +648,15 @@ class gq_regression_test extends uvm_test;
             tx_4095.outstanding_count() != 0 ||
             rx_2.outstanding_count() != 0 ||
             rx_3000.outstanding_count() != 0 ||
-            regression_adapter.disable_calls != 8)
-            `uvm_fatal("REG_CLEANUP",
-                       "idempotent final cleanup left queue resources")
-    endtask
+            regression_adapter.disable_calls != 8 ||
+            regression_mem.leak_check_calls != 1 ||
+            !manual_finalization_joiner_returned)
+            `uvm_fatal("REG_AUTO_FINALIZE", $sformatf(
+                "automatic run-end cleanup incomplete disable=%0d leak_checks=%0d manual_join=%0b",
+                regression_adapter.disable_calls,
+                regression_mem.leak_check_calls,
+                manual_finalization_joiner_returned))
+    endfunction
 
     task run_phase(uvm_phase phase);
         gq_regression_diagnostic_catcher catcher;
@@ -810,6 +891,18 @@ class gq_regression_test extends uvm_test;
             `uvm_fatal("REG_DIAG_FIELDS",
                        "completion diagnostics were missing, repeated, or incomplete")
         run_integrated_checks();
+        fork : concurrent_finalization_joiner
+            begin
+                regression_adapter.disable_entered.wait_on();
+                phase.raise_objection(this,
+                    "join automatic queue finalization");
+                env.cleanup_and_check_leaks();
+                env.cleanup_and_check_leaks();
+                manual_finalization_joiner_returned = 1;
+                phase.drop_objection(this,
+                    "joined automatic queue finalization");
+            end
+        join_none
         phase.drop_objection(this);
     endtask
 endclass

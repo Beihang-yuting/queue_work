@@ -12,6 +12,8 @@ class gq_env extends uvm_env;
     protected uvm_event cleanup_done;
     protected bit finalization_started;
     protected uvm_event finalization_done;
+    protected bit run_finalization_scheduled;
+    protected uvm_phase run_finalization_phase;
 
     function new(string name = "gq_env", uvm_component parent = null);
         super.new(name, parent);
@@ -20,6 +22,8 @@ class gq_env extends uvm_env;
         cleanup_done = new({name, "_cleanup_done"});
         finalization_started = 0;
         finalization_done = new({name, "_finalization_done"});
+        run_finalization_scheduled = 0;
+        run_finalization_phase = null;
     endfunction
 
     function void build_phase(uvm_phase phase);
@@ -69,6 +73,29 @@ class gq_env extends uvm_env;
         cfg.env_ready.trigger();
         phase.drop_objection(this, "sparse queue rings initialized");
     endtask
+
+    // UVM runtime subphases named "shutdown" may execute at time zero, so
+    // queue teardown cannot be attached to shutdown_phase. Instead, claim one
+    // objection only when the top-level run phase is ready to end, launch the
+    // timed idempotent finalizer in a child process, and release the objection
+    // after every engine and the shared leak check have completed.
+    function void phase_ready_to_end(uvm_phase phase);
+        super.phase_ready_to_end(phase);
+        if (phase.get_name() != "run" || run_finalization_scheduled)
+            return;
+
+        run_finalization_scheduled = 1;
+        run_finalization_phase = phase;
+        run_finalization_phase.raise_objection(
+            this, "finalize sparse queue resources");
+        fork
+            begin
+                cleanup_and_check_leaks();
+                run_finalization_phase.drop_objection(
+                    this, "sparse queue resources finalized");
+            end
+        join_none
+    endfunction
 
     task cleanup();
         string key;
