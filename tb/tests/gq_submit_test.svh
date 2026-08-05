@@ -30,13 +30,90 @@ class gq_bad_pack_desc extends gq_desc_base;
     endfunction
 endclass
 
+class gq_counting_tx_desc extends mailbox_tx_desc;
+    `uvm_object_utils(gq_counting_tx_desc)
+
+    int unsigned prepare_calls;
+
+    function new(string name = "gq_counting_tx_desc");
+        super.new(name);
+        prepare_calls = 0;
+    endfunction
+
+    virtual function bit prepare();
+        prepare_calls++;
+        return super.prepare();
+    endfunction
+endclass
+
+class gq_delayed_mock_adapter extends mailbox_mock_adapter;
+    `uvm_object_utils(gq_delayed_mock_adapter)
+
+    time publish_delay;
+    uvm_event publish_entered;
+
+    function new(string name = "gq_delayed_mock_adapter");
+        super.new(name);
+        publish_delay   = 0;
+        publish_entered = new({name, "_publish_entered"});
+    endfunction
+
+    virtual task publish(gq_role_e role, int unsigned queue_id,
+                         gq_raw_ptr_t raw_tail);
+        publish_entered.trigger();
+        #(publish_delay);
+        super.publish(role, queue_id, raw_tail);
+    endtask
+endclass
+
+class gq_host_access_catcher extends uvm_report_catcher;
+    `uvm_object_utils(gq_host_access_catcher)
+
+    bit caught_host_fatal;
+
+    function new(string name = "gq_host_access_catcher");
+        super.new(name);
+        caught_host_fatal = 0;
+    endfunction
+
+    virtual function action_e catch();
+        if (get_severity() == UVM_FATAL && get_id() == "HOST_MEM") begin
+            caught_host_fatal = 1;
+            return CAUGHT;
+        end
+        return THROW;
+    endfunction
+endclass
+
+class gq_pack_size_catcher extends uvm_report_catcher;
+    `uvm_object_utils(gq_pack_size_catcher)
+
+    bit caught_pack_fatal;
+    string caught_message;
+
+    function new(string name = "gq_pack_size_catcher");
+        super.new(name);
+        caught_pack_fatal = 0;
+        caught_message    = "";
+    endfunction
+
+    virtual function action_e catch();
+        if (get_severity() == UVM_FATAL && get_id() == "GQ_PACK_SIZE") begin
+            caught_pack_fatal = 1;
+            caught_message    = get_message();
+            set_severity(UVM_INFO);
+        end
+        return THROW;
+    endfunction
+endclass
+
 class gq_submit_test extends uvm_test;
     `uvm_component_utils(gq_submit_test)
 
     host_mem_manager     mem;
     host_mem_manager     failure_mem;
     gq_test_ptr_codec    ptr_codec;
-    mailbox_mock_adapter adapter;
+    gq_delayed_mock_adapter adapter;
     mailbox_mock_adapter failure_adapter;
     mailbox_env_cfg      env_cfg;
     mailbox_env          env;
@@ -121,7 +198,7 @@ class gq_submit_test extends uvm_test;
         failure_mem.init_region(64'h0000_0001_2000_0000,
                                 64'h0000_0001_20ff_ffff, MODE_LINEAR, 16);
         ptr_codec      = gq_test_ptr_codec::type_id::create("ptr_codec");
-        adapter        = mailbox_mock_adapter::type_id::create("adapter");
+        adapter        = gq_delayed_mock_adapter::type_id::create("adapter");
         failure_adapter = mailbox_mock_adapter::type_id::create("failure_adapter");
 
         env_cfg = mailbox_env_cfg::type_id::create("env_cfg");
@@ -153,8 +230,22 @@ class gq_submit_test extends uvm_test;
         mailbox_tx_desc rollback_first;
         gq_prepare_fail_desc rollback_second;
         gq_bad_pack_desc bad_pack;
+        gq_counting_tx_desc first_concurrent;
+        gq_counting_tx_desc second_concurrent;
+        gq_counting_tx_desc blocked_counting;
+        gq_counting_tx_desc duplicate_within_batch;
+        gq_host_access_catcher host_access_catcher;
+        gq_pack_size_catcher pack_size_catcher;
+        gq_request first_request;
+        gq_request second_request;
+        gq_response first_response;
+        gq_response second_response;
         int unsigned publish_before;
         bit blocked_returned;
+        bit first_returned;
+        bit second_returned;
+        bit probe_returned;
+        byte owned_data[];
 
         phase.raise_objection(this);
         env_cfg.wait_ready();
@@ -168,6 +259,7 @@ class gq_submit_test extends uvm_test;
             `uvm_fatal("SUBMIT_PATH", "could not find TX engine")
 
         single_desc = make_tx("single_desc", 0);
+        single_desc.buf_len = 16;
         tx_sequence = mailbox_tx_sequence::type_id::create("single_sequence");
         tx_sequence.add_desc(single_desc);
         tx_sequence.start(sequencer);
@@ -181,6 +273,41 @@ class gq_submit_test extends uvm_test;
             adapter.published_tails["tx_7"][0] != ptr_codec.encode_publish(0, 1, 32))
             `uvm_fatal("SUBMIT_SINGLE", "single submit publish is incorrect")
         check_tx_slot(engine, 0, single_desc);
+
+        request = gq_request::type_id::create("already_outstanding_request");
+        request.add_desc(single_desc);
+        response = gq_response::type_id::create("already_outstanding_response");
+        publish_before = adapter.publish_calls;
+        engine.submit_batch(request, response);
+        expect_resource_error("already outstanding descriptor", response);
+        host_access_catcher = new("host_access_catcher");
+        uvm_report_cb::add(null, host_access_catcher);
+        mem.read_mem(single_desc.buf_addr, single_desc.buf_len, owned_data,
+                     `__FILE__, `__LINE__);
+        uvm_report_cb::delete(null, host_access_catcher);
+        if (host_access_catcher.caught_host_fatal || owned_data.size() != single_desc.buf_len)
+            `uvm_fatal("SUBMIT_DUP_OWNER", "duplicate rejection released outstanding ownership")
+        foreach (owned_data[i]) begin
+            if (owned_data[i] !== single_desc.external_data[i])
+                `uvm_fatal("SUBMIT_DUP_OWNER", "outstanding buffer contents changed")
+        end
+        if (engine.tail_seq() != 1 || engine.outstanding_count() != 1 ||
+            engine.get_outstanding(0) != single_desc || adapter.publish_calls != publish_before)
+            `uvm_fatal("SUBMIT_DUP_OWNER", "already-outstanding rejection changed state")
+
+        duplicate_within_batch =
+            gq_counting_tx_desc::type_id::create("duplicate_within_batch");
+        duplicate_within_batch.buf_len = 16;
+        request = gq_request::type_id::create("duplicate_within_request");
+        request.add_desc(duplicate_within_batch);
+        request.add_desc(duplicate_within_batch);
+        response = gq_response::type_id::create("duplicate_within_response");
+        failure_engine.submit_batch(request, response);
+        expect_resource_error("duplicate within batch", response);
+        if (duplicate_within_batch.prepare_calls != 0 ||
+            failure_engine.tail_seq() != 0 || failure_engine.outstanding_count() != 0 ||
+            failure_adapter.publish_calls != 0)
+            `uvm_fatal("SUBMIT_DUP_BATCH", "within-batch duplicate was prepared or committed")
 
         for (int unsigned i = 0; i < 3; i++)
             batch_descs[i] = make_tx($sformatf("batch_desc_%0d", i), i + 1);
@@ -202,6 +329,58 @@ class gq_submit_test extends uvm_test;
             check_tx_slot(engine, i + 1, batch_descs[i]);
         end
 
+        first_concurrent = gq_counting_tx_desc::type_id::create("first_concurrent");
+        first_concurrent.srcid = 16'h4401;
+        second_concurrent = gq_counting_tx_desc::type_id::create("second_concurrent");
+        second_concurrent.srcid = 16'h4402;
+        first_request = gq_request::type_id::create("first_concurrent_request");
+        first_request.add_desc(first_concurrent);
+        second_request = gq_request::type_id::create("second_concurrent_request");
+        second_request.add_desc(second_concurrent);
+        first_response = gq_response::type_id::create("first_concurrent_response");
+        second_response = gq_response::type_id::create("second_concurrent_response");
+        adapter.publish_delay = 10ns;
+        adapter.publish_entered.reset();
+        first_returned = 0;
+        second_returned = 0;
+        probe_returned = 0;
+        fork : delayed_first_submit
+            begin
+                engine.submit_batch(first_request, first_response);
+                first_returned = 1;
+            end
+        join_none
+        adapter.publish_entered.wait_on();
+        if (engine.tail_seq() != 5 || first_response.status == GQ_OK)
+            `uvm_fatal("SUBMIT_DELAY", "state/response timing during publish is incorrect")
+        fork : state_lock_probe
+            begin
+                engine.probe_state_lock();
+                probe_returned = 1;
+            end
+        join_none
+        fork : delayed_second_submit
+            begin
+                engine.submit_batch(second_request, second_response);
+                second_returned = 1;
+            end
+        join_none
+        #1ns;
+        if (!probe_returned)
+            `uvm_fatal("SUBMIT_LOCK", "state lock was held across delayed publish")
+        if (second_concurrent.prepare_calls != 0 || second_returned)
+            `uvm_fatal("SUBMIT_SERIAL", "second submit was not serialized behind publish")
+        wait (first_returned && second_returned);
+        if (first_response.status != GQ_OK || second_response.status != GQ_OK ||
+            engine.tail_seq() != 6 || engine.outstanding_count() != 6)
+            `uvm_fatal("SUBMIT_SERIAL", "concurrent submit responses/state are incorrect")
+        if (first_concurrent.prepare_calls != 1 || second_concurrent.prepare_calls != 1 ||
+            adapter.publish_calls != 4 ||
+            adapter.published_tails["tx_7"][2] != ptr_codec.encode_publish(4, 5, 32) ||
+            adapter.published_tails["tx_7"][3] != ptr_codec.encode_publish(5, 6, 32))
+            `uvm_fatal("SUBMIT_SERIAL", "concurrent publish order is incorrect")
+        adapter.publish_delay = 0;
+
         rollback_first = make_tx("rollback_first", 10);
         rollback_first.buf_len = 16;
         rollback_second = gq_prepare_fail_desc::type_id::create("rollback_second");
@@ -219,8 +398,14 @@ class gq_submit_test extends uvm_test;
         request = gq_request::type_id::create("bad_pack_request");
         request.add_desc(bad_pack);
         response = gq_response::type_id::create("bad_pack_response");
+        pack_size_catcher = new("pack_size_catcher");
+        uvm_report_cb::add(null, pack_size_catcher);
         failure_engine.submit_batch(request, response);
-        expect_resource_error("bad packed size", response);
+        uvm_report_cb::delete(null, pack_size_catcher);
+        if (!pack_size_catcher.caught_pack_fatal ||
+            !uvm_is_match("*role=TX*queue_id=8*logical_seq=0*expected=64*actual=63*",
+                          pack_size_catcher.caught_message))
+            `uvm_fatal("SUBMIT_PACK", "pack-size fatal or diagnostic context is missing")
         if (failure_engine.tail_seq() != 0 || failure_engine.outstanding_count() != 0 ||
             failure_adapter.publish_calls != 0)
             `uvm_fatal("SUBMIT_PACK", "bad pack changed committed state")
@@ -244,7 +429,9 @@ class gq_submit_test extends uvm_test;
         expect_resource_error("batch larger than depth", response);
 
         request = gq_request::type_id::create("blocked_request");
-        for (int unsigned i = 0; i < 29; i++)
+        blocked_counting = gq_counting_tx_desc::type_id::create("blocked_counting");
+        request.add_desc(blocked_counting);
+        for (int unsigned i = 0; i < 26; i++)
             request.add_desc(make_tx($sformatf("blocked_%0d", i), i));
         response = gq_response::type_id::create("blocked_response");
         publish_before = adapter.publish_calls;
@@ -258,8 +445,10 @@ class gq_submit_test extends uvm_test;
         #5ns;
         if (blocked_returned)
             `uvm_fatal("SUBMIT_CAPACITY", "whole batch did not wait for capacity")
-        if (adapter.publish_calls != publish_before || engine.tail_seq() != 4)
+        if (adapter.publish_calls != publish_before || engine.tail_seq() != 6)
             `uvm_fatal("SUBMIT_CAPACITY", "blocked batch changed queue state")
+        if (blocked_counting.prepare_calls != 0)
+            `uvm_fatal("SUBMIT_CAPACITY", "blocked batch prepared a descriptor")
         disable bounded_full_submit;
 
         failure_engine.cleanup();

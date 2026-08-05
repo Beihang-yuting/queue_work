@@ -60,6 +60,10 @@ virtual class gq_desc_base extends uvm_sequence_item;
         return 1;
     endfunction
 
+    // Once an engine calls prepare(), this descriptor is one-shot even if a
+    // later member makes the atomic batch roll back. Rollback releases owned
+    // allocations; callers create a fresh descriptor instead of rearming it.
+
     virtual function void mark_available(bit phase);
     endfunction
 

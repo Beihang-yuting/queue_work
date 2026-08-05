@@ -14,12 +14,12 @@ class gq_queue_engine extends uvm_component;
     protected bit configured;
     protected bit ready_value;
     protected uvm_event ready_event;
-    protected semaphore submit_lock;
+    protected semaphore submit_serialization;
+    protected semaphore state_lock;
     protected gq_desc_base outstanding[gq_logical_seq_t];
-
-    gq_logical_seq_t logical_head_seq;
-    gq_logical_seq_t logical_tail_seq;
-    uvm_event space_available;
+    protected gq_logical_seq_t logical_head_seq;
+    protected gq_logical_seq_t logical_tail_seq;
+    protected uvm_event space_available;
 
     function new(string name = "gq_queue_engine", uvm_component parent = null);
         super.new(name, parent);
@@ -30,7 +30,8 @@ class gq_queue_engine extends uvm_component;
         configured        = 0;
         ready_value       = 0;
         ready_event       = new({name, "_ready"});
-        submit_lock       = new(1);
+        submit_serialization = new(1);
+        state_lock        = new(1);
         logical_head_seq  = 0;
         logical_tail_seq  = 0;
         space_available   = new({name, "_space_available"});
@@ -92,8 +93,12 @@ class gq_queue_engine extends uvm_component;
         longint unsigned max_value;
         longint unsigned desc_bytes;
 
-        if (ready_value)
+        state_lock.get(1);
+        if (ready_value) begin
+            state_lock.put(1);
             return;
+        end
+        state_lock.put(1);
         if (cfg == null)
             `uvm_fatal("GQ_ENGINE_CFG", "queue configuration must not be null")
         if (!cfg.validate(reason))
@@ -127,14 +132,25 @@ class gq_queue_engine extends uvm_component;
 
         adapter.configure_queue(cfg.role, cfg.queue_id, ring_base_value,
                                 cfg.depth, cfg.desc_size);
+        state_lock.get(1);
         configured  = 1;
         ready_value = 1;
+        check_state_invariants("initialize");
+        state_lock.put(1);
         ready_event.trigger();
     endtask
 
     task wait_ready();
-        if (!ready_value)
-            ready_event.wait_trigger();
+        bit ready_snapshot;
+
+        forever begin
+            state_lock.get(1);
+            ready_snapshot = ready_value;
+            state_lock.put(1);
+            if (ready_snapshot)
+                return;
+            ready_event.wait_on();
+        end
     endtask
 
     protected function void release_attempted(gq_request request,
@@ -143,6 +159,44 @@ class gq_queue_engine extends uvm_component;
             if (request.descs[i] != null)
                 request.descs[i].release_owned();
         end
+    endfunction
+
+    protected function bit request_has_duplicate(gq_request request);
+        for (int unsigned i = 0; i < request.size(); i++) begin
+            for (int unsigned j = 0; j < i; j++) begin
+                if (request.descs[i] == request.descs[j])
+                    return 1;
+            end
+        end
+        return 0;
+    endfunction
+
+    // Caller holds state_lock.
+    protected function bit handle_is_outstanding(gq_desc_base desc);
+        gq_logical_seq_t seq;
+
+        if (outstanding.first(seq)) begin
+            do begin
+                if (outstanding[seq] == desc)
+                    return 1;
+            end while (outstanding.next(seq));
+        end
+        return 0;
+    endfunction
+
+    // Caller holds state_lock after any head/tail/outstanding transition.
+    protected function void check_state_invariants(string transition_name);
+        gq_logical_seq_t count;
+
+        if (logical_tail_seq < logical_head_seq)
+            `uvm_fatal("GQ_STATE", $sformatf("%s: tail %0d precedes head %0d",
+                                               transition_name, logical_tail_seq,
+                                               logical_head_seq))
+        count = logical_tail_seq - logical_head_seq;
+        if (count > cfg.depth || outstanding.num() != count)
+            `uvm_fatal("GQ_STATE", $sformatf(
+                "%s: outstanding handles=%0d logical count=%0d depth=%0d",
+                transition_name, outstanding.num(), count, cfg.depth))
     endfunction
 
     task submit_batch(input gq_request request, inout gq_response response);
@@ -161,7 +215,7 @@ class gq_queue_engine extends uvm_component;
         response.committed_count = 0;
         response.reset_epoch     = 0;
 
-        if (!ready_value || request == null || request.kind != GQ_SUBMIT)
+        if (request == null || request.kind != GQ_SUBMIT)
             return;
         batch_size = request.size();
         if (batch_size == 0 || batch_size > cfg.depth)
@@ -170,17 +224,34 @@ class gq_queue_engine extends uvm_component;
             if (request.descs[i] == null)
                 return;
         end
+        if (request_has_duplicate(request))
+            return;
 
+        submit_serialization.get(1);
         forever begin
-            submit_lock.get(1);
-            if ((logical_tail_seq - logical_head_seq) + batch_size <= cfg.depth)
+            state_lock.get(1);
+            if (!ready_value) begin
+                state_lock.put(1);
+                submit_serialization.put(1);
+                return;
+            end
+            foreach (request.descs[i]) begin
+                if (handle_is_outstanding(request.descs[i])) begin
+                    state_lock.put(1);
+                    submit_serialization.put(1);
+                    return;
+                end
+            end
+            if ((logical_tail_seq - logical_head_seq) + batch_size <= cfg.depth) begin
+                old_tail = logical_tail_seq;
+                state_lock.put(1);
                 break;
-            submit_lock.put(1);
+            end
+            state_lock.put(1);
             space_available.wait_on();
             space_available.reset();
         end
 
-        old_tail        = logical_tail_seq;
         new_tail        = old_tail + batch_size;
         attempted_count = 0;
         for (int unsigned i = 0; i < batch_size; i++) begin
@@ -189,7 +260,7 @@ class gq_queue_engine extends uvm_component;
             request.descs[i].attach_mem(mem);
             if (!request.descs[i].prepare()) begin
                 release_attempted(request, attempted_count);
-                submit_lock.put(1);
+                submit_serialization.put(1);
                 return;
             end
             request.descs[i].mark_available(gq_phase(seq, cfg.depth));
@@ -197,33 +268,50 @@ class gq_queue_engine extends uvm_component;
             request.descs[i].pack(packed_data);
             if (packed_data.size() != cfg.desc_size) begin
                 release_attempted(request, attempted_count);
-                submit_lock.put(1);
+                submit_serialization.put(1);
+                `uvm_fatal("GQ_PACK_SIZE", $sformatf(
+                    "role=%s queue_id=%0d logical_seq=%0d expected=%0d actual=%0d",
+                    cfg.role == GQ_TX ? "TX" : "RX", cfg.queue_id, seq,
+                    cfg.desc_size, packed_data.size()))
                 return;
             end
             slot_addr = ring_base_value + ((seq % cfg.depth) * cfg.desc_size);
             mem.write_mem(slot_addr, packed_data, `__FILE__, `__LINE__);
         end
 
+        state_lock.get(1);
         for (int unsigned i = 0; i < batch_size; i++)
             outstanding[old_tail + i] = request.descs[i];
         logical_tail_seq = new_tail;
-        response.status          = GQ_OK;
-        response.committed_count = int'(batch_size);
+        check_state_invariants("submit commit");
+        state_lock.put(1);
         raw_tail = cfg.ptr_codec.encode_publish(old_tail, new_tail, cfg.depth);
         adapter.publish(cfg.role, cfg.queue_id, raw_tail);
-        submit_lock.put(1);
+        response.status          = GQ_OK;
+        response.committed_count = int'(batch_size);
+        submit_serialization.put(1);
     endtask
 
     task cleanup();
         gq_logical_seq_t seq;
+        gq_desc_base cleanup_descs[$];
 
+        state_lock.get(1);
         if (outstanding.first(seq)) begin
             do begin
                 if (outstanding[seq] != null)
-                    outstanding[seq].release_owned();
+                    cleanup_descs.push_back(outstanding[seq]);
             end while (outstanding.next(seq));
         end
         outstanding.delete();
+        ready_value      = 0;
+        logical_head_seq = 0;
+        logical_tail_seq = 0;
+        check_state_invariants("cleanup");
+        state_lock.put(1);
+
+        foreach (cleanup_descs[i])
+            cleanup_descs[i].release_owned();
         if (configured) begin
             adapter.disable_queue(cfg.role, cfg.queue_id);
             configured = 0;
@@ -235,9 +323,6 @@ class gq_queue_engine extends uvm_component;
         ring_base_value   = 0;
         status_addr_value = 0;
         ring_bytes_value  = 0;
-        ready_value       = 0;
-        logical_head_seq  = 0;
-        logical_tail_seq  = 0;
         ready_event.reset();
         space_available.reset();
     endtask
@@ -257,6 +342,13 @@ class gq_queue_engine extends uvm_component;
     function bit is_ready();
         return ready_value;
     endfunction
+
+    // Verification hook: acquires no mutable access and proves that timed
+    // adapter operations never retain the engine state lock.
+    task probe_state_lock();
+        state_lock.get(1);
+        state_lock.put(1);
+    endtask
 
     function gq_logical_seq_t head_seq();
         return logical_head_seq;

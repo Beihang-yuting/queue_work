@@ -7,6 +7,8 @@ class gq_request extends uvm_sequence_item;
     `uvm_object_utils(gq_request)
 
     gq_request_kind_e kind;
+    // Handles transfer without cloning. After preparation begins, both the
+    // request and its descriptor handles are one-shot, including on rollback.
     gq_desc_base descs[$];
 
     function new(string name = "gq_request");
