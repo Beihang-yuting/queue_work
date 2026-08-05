@@ -22,6 +22,15 @@ class gq_queue_engine extends uvm_component;
     protected uvm_event active_completion_wait_cancel;
     protected uvm_event active_completion_wait_done;
     protected uvm_event active_completion_ack_done;
+    protected uvm_event reset_completion_wait_cancel;
+    protected uvm_event reset_completion_wait_done;
+    protected uvm_event reset_completion_ack_done;
+    protected uvm_event reset_finish_done;
+    protected bit reset_finish_started;
+    protected uvm_event configuration_done;
+    protected bit configuration_in_progress;
+    protected uvm_event cleanup_done;
+    protected bit cleanup_in_progress;
     protected semaphore user_request_ordering;
     protected semaphore submit_serialization;
     protected semaphore completion_serialization;
@@ -52,6 +61,15 @@ class gq_queue_engine extends uvm_component;
         active_completion_wait_cancel = null;
         active_completion_wait_done = null;
         active_completion_ack_done = null;
+        reset_completion_wait_cancel = null;
+        reset_completion_wait_done = null;
+        reset_completion_ack_done = null;
+        reset_finish_done = null;
+        reset_finish_started = 0;
+        configuration_done = null;
+        configuration_in_progress = 0;
+        cleanup_done = null;
+        cleanup_in_progress = 0;
         user_request_ordering = new(1);
         submit_serialization = new(1);
         completion_serialization = new(1);
@@ -66,16 +84,16 @@ class gq_queue_engine extends uvm_component;
         wait_policy       = null;
     endfunction
 
-    // No serialization lock is held across allocator or adapter calls. The
-    // caller owns submit_serialization and completion_serialization whenever
-    // this is used after initial construction.
-    protected task allocate_and_configure_ring();
+    // Return newly configured resources as local ownership. The lifecycle
+    // owner publishes them under state_lock after the timed adapter call so a
+    // concurrent cleanup can adopt and tear down the exact configured ring.
+    protected task allocate_and_configure_ring(
+        output gq_addr_t new_ring_base,
+        output gq_addr_t new_status_addr,
+        output longint unsigned new_ring_bytes);
         string reason;
         longint unsigned max_value;
         longint unsigned desc_bytes;
-        longint unsigned new_ring_bytes;
-        gq_addr_t new_ring_base;
-        gq_addr_t new_status_addr;
 
         max_value = '1;
         if (!checked_ring_size(cfg.depth, cfg.desc_size, cfg.status_area_size,
@@ -103,14 +121,6 @@ class gq_queue_engine extends uvm_component;
         end
         adapter.configure_queue(cfg.role, cfg.queue_id, new_ring_base,
                                 cfg.depth, cfg.desc_size);
-
-        state_lock.get(1);
-        ring_base_value   = new_ring_base;
-        status_addr_value = new_status_addr;
-        ring_bytes_value  = new_ring_bytes;
-        allocated         = 1;
-        configured        = 1;
-        state_lock.put(1);
     endtask
 
     static function bit checked_ring_size(
@@ -166,13 +176,42 @@ class gq_queue_engine extends uvm_component;
 
     task initialize();
         string reason;
+        bit initialize_owner;
+        bit initialize_valid;
+        longint unsigned initialize_epoch;
+        gq_addr_t new_ring_base;
+        gq_addr_t new_status_addr;
+        longint unsigned new_ring_bytes;
+        uvm_event initialize_done;
 
+        initialize_owner = 0;
         state_lock.get(1);
         if (ready_value) begin
             state_lock.put(1);
             return;
         end
+        if (cleanup_in_progress) begin
+            // A concurrent initialize joins terminal cleanup instead of
+            // reopening the queue while its old hardware state is disabling.
+            initialize_done = cleanup_done;
+        end else if (configuration_in_progress) begin
+            initialize_done = configuration_done;
+        end else begin
+            configuration_in_progress = 1;
+            configuration_done = new({get_name(), "_configuration_done"});
+            initialize_done = configuration_done;
+            initialize_owner = 1;
+            shutdown_requested = 0;
+            reset_requested_value = 1;
+            ready_value = 0;
+            ready_event.reset();
+            initialize_epoch = reset_epoch_value;
+        end
         state_lock.put(1);
+        if (!initialize_owner) begin
+            initialize_done.wait_on();
+            return;
+        end
         if (cfg == null)
             `uvm_fatal("GQ_ENGINE_CFG", "queue configuration must not be null")
         if (!cfg.validate(reason))
@@ -183,15 +222,27 @@ class gq_queue_engine extends uvm_component;
             `uvm_fatal("GQ_ENGINE_CFG", "hardware adapter must not be null")
         if (cfg.ptr_codec == null)
             `uvm_fatal("GQ_ENGINE_CFG", "pointer codec must not be null")
-        allocate_and_configure_ring();
+        allocate_and_configure_ring(new_ring_base, new_status_addr,
+                                    new_ring_bytes);
         state_lock.get(1);
-        reset_requested_value = 0;
-        shutdown_requested    = 0;
-        ready_value           = 1;
-        check_state_invariants("initialize");
+        ring_base_value   = new_ring_base;
+        status_addr_value = new_status_addr;
+        ring_bytes_value  = new_ring_bytes;
+        allocated         = 1;
+        configured        = 1;
+        initialize_valid = !shutdown_requested &&
+                           reset_epoch_value == initialize_epoch;
+        if (initialize_valid) begin
+            reset_requested_value = 0;
+            ready_value = 1;
+            check_state_invariants("initialize");
+        end
+        configuration_in_progress = 0;
         state_lock.put(1);
-        ready_event.trigger();
+        if (initialize_valid)
+            ready_event.trigger();
         worker_state_event.trigger();
+        initialize_done.trigger();
     endtask
 
     task wait_ready();
@@ -921,6 +972,9 @@ class gq_queue_engine extends uvm_component;
         gq_logical_seq_t seq;
         gq_desc_base cleanup_descs[$];
         gq_refill_profile preserved_profile;
+        bit release_configured;
+        bit release_allocated;
+        gq_addr_t release_ring_base;
 
         submit_serialization.get(1);
         completion_serialization.get(1);
@@ -942,33 +996,35 @@ class gq_queue_engine extends uvm_component;
             preserved_profile = null;
         refill_profile   = preserved_profile;
         rx_started       = 0;
-        check_state_invariants(preserve_restart_profile ?
-                               "reset assert" : "cleanup");
-        state_lock.put(1);
-
-        if (configured) begin
-            adapter.disable_queue(cfg.role, cfg.queue_id);
-            configured = 0;
-        end
-        foreach (cleanup_descs[i])
-            cleanup_descs[i].release_owned();
-        if (allocated) begin
-            mem.free(ring_base_value, `__FILE__, `__LINE__);
-            allocated = 0;
-        end
+        release_configured = configured;
+        release_allocated = allocated;
+        release_ring_base = ring_base_value;
+        configured       = 0;
+        allocated        = 0;
         ring_base_value   = 0;
         status_addr_value = 0;
         ring_bytes_value  = 0;
-        ready_event.reset();
+        check_state_invariants(preserve_restart_profile ?
+                               "reset assert" : "cleanup");
+        state_lock.put(1);
         completion_serialization.put(1);
         submit_serialization.put(1);
+
+        // Timed adapter work retains no engine lock. The queue remains
+        // externally owned until disable completes, so descriptor and ring
+        // release must stay after this call.
+        if (release_configured)
+            adapter.disable_queue(cfg.role, cfg.queue_id);
+        foreach (cleanup_descs[i])
+            cleanup_descs[i].release_owned();
+        if (release_allocated)
+            mem.free(release_ring_base, `__FILE__, `__LINE__);
+        ready_event.reset();
     endtask
 
-    task assert_reset();
+    task begin_reset();
         bit accept_reset;
         uvm_event wait_cancel;
-        uvm_event wait_done;
-        uvm_event ack_done;
 
         completion_commit_boundary.get(1);
         state_lock.get(1);
@@ -980,8 +1036,11 @@ class gq_queue_engine extends uvm_component;
             reset_epoch_value++;
             ready_event.reset();
             wait_cancel = active_completion_wait_cancel;
-            wait_done = active_completion_wait_done;
-            ack_done = active_completion_ack_done;
+            reset_completion_wait_cancel = wait_cancel;
+            reset_completion_wait_done = active_completion_wait_done;
+            reset_completion_ack_done = active_completion_ack_done;
+            reset_finish_done = new({get_name(), "_reset_finish_done"});
+            reset_finish_started = 0;
         end
         state_lock.put(1);
         completion_commit_boundary.put(1);
@@ -992,8 +1051,44 @@ class gq_queue_engine extends uvm_component;
         // persistent wake makes it retry, observe the new epoch, and abort.
         space_available.trigger();
         worker_state_event.trigger();
+        if (wait_cancel != null)
+            wait_cancel.trigger();
+    endtask
+
+    task finish_reset();
+        bit finish_owner;
+        uvm_event finish_done;
+        uvm_event wait_cancel;
+        uvm_event wait_done;
+        uvm_event ack_done;
+
+        finish_owner = 0;
+        state_lock.get(1);
+        finish_done = reset_finish_done;
+        if (finish_done != null && !finish_done.is_on() &&
+            !reset_finish_started) begin
+            reset_finish_started = 1;
+            finish_owner = 1;
+            wait_cancel = reset_completion_wait_cancel;
+            wait_done = reset_completion_wait_done;
+            ack_done = reset_completion_ack_done;
+        end
+        state_lock.put(1);
+
+        if (!finish_owner) begin
+            if (finish_done != null && !finish_done.is_on())
+                finish_done.wait_on();
+            return;
+        end
+
         quiesce_completion_activity(wait_cancel, wait_done, ack_done);
         release_queue_resources(1);
+        finish_done.trigger();
+    endtask
+
+    task assert_reset();
+        begin_reset();
+        finish_reset();
     endtask
 
     task release_reset();
@@ -1002,22 +1097,53 @@ class gq_queue_engine extends uvm_component;
         gq_desc_base desc;
         gq_response response;
         longint unsigned release_epoch;
+        longint unsigned new_ring_bytes;
+        gq_addr_t new_ring_base;
+        gq_addr_t new_status_addr;
         bit capacity_wait_required;
         bit ownership_transferred;
         bit release_allowed;
+        bit release_owner;
+        uvm_event release_done;
 
+        release_owner = 0;
         state_lock.get(1);
-        release_allowed = reset_requested_value && !shutdown_requested &&
-                          !allocated && !configured;
-        release_epoch    = reset_epoch_value;
-        recovery_profile = refill_profile;
+        if (configuration_in_progress) begin
+            release_done = configuration_done;
+        end else begin
+            release_allowed = reset_requested_value && !shutdown_requested &&
+                              !allocated && !configured &&
+                              (reset_finish_done == null ||
+                               reset_finish_done.is_on());
+            if (release_allowed) begin
+                configuration_in_progress = 1;
+                configuration_done = new(
+                    {get_name(), "_reset_release_done"});
+                release_done = configuration_done;
+                release_owner = 1;
+                release_epoch = reset_epoch_value;
+                recovery_profile = refill_profile;
+            end
+        end
         state_lock.put(1);
-        if (!release_allowed)
+        if (!release_owner) begin
+            if (release_done != null && !release_done.is_on())
+                release_done.wait_on();
             return;
+        end
 
-        submit_serialization.get(1);
-        completion_serialization.get(1);
-        allocate_and_configure_ring();
+        allocate_and_configure_ring(new_ring_base, new_status_addr,
+                                    new_ring_bytes);
+        // Publish the configured ring even if shutdown won while the adapter
+        // was running. Cleanup joins release_done and then detaches exactly
+        // these resources; local ownership is never discarded.
+        state_lock.get(1);
+        ring_base_value = new_ring_base;
+        status_addr_value = new_status_addr;
+        ring_bytes_value = new_ring_bytes;
+        allocated = 1;
+        configured = 1;
+        state_lock.put(1);
 
         if (cfg.role == GQ_RX && recovery_profile != null &&
             recovery_profile.restart_after_reset) begin
@@ -1043,7 +1169,7 @@ class gq_queue_engine extends uvm_component;
             if (generated_descs.size() == 0 &&
                 recovery_profile.initial_post_count == 0) begin
                 state_lock.get(1);
-                if (reset_requested_value &&
+                if (!shutdown_requested && reset_requested_value &&
                     reset_epoch_value == release_epoch) begin
                     refill_profile = recovery_profile;
                     rx_started     = 1;
@@ -1052,10 +1178,12 @@ class gq_queue_engine extends uvm_component;
             end else if (generated_descs.size() ==
                          recovery_profile.initial_post_count) begin
                 initialize_response(response, "reset_rx_response");
+                submit_serialization.get(1);
                 submit_desc_batch_locked(generated_descs, response, 1,
                                          recovery_profile, release_epoch, 1,
                                          capacity_wait_required,
                                          ownership_transferred);
+                submit_serialization.put(1);
                 if (response.status != GQ_OK) begin
                     if (!ownership_transferred)
                         release_generated(generated_descs);
@@ -1078,42 +1206,80 @@ class gq_queue_engine extends uvm_component;
             check_state_invariants("reset release");
         end
         release_allowed = ready_value;
+        configuration_in_progress = 0;
         state_lock.put(1);
-        completion_serialization.put(1);
-        submit_serialization.put(1);
         if (release_allowed)
             ready_event.trigger();
         worker_state_event.trigger();
+        release_done.trigger();
     endtask
 
     task cleanup();
         bit cleanup_required;
+        bit cleanup_owner;
         uvm_event wait_cancel;
         uvm_event wait_done;
         uvm_event ack_done;
+        uvm_event reset_teardown_done;
+        uvm_event configure_done;
+        uvm_event operation_done;
 
+        cleanup_owner = 0;
         completion_commit_boundary.get(1);
         state_lock.get(1);
-        cleanup_required = !shutdown_requested &&
-                           (ready_value || allocated || configured ||
-                            reset_requested_value || outstanding.num() != 0);
-        if (!shutdown_requested)
-            reset_epoch_value++;
-        shutdown_requested    = 1;
-        reset_requested_value = 1;
-        ready_value           = 0;
-        ready_event.reset();
-        wait_cancel = active_completion_wait_cancel;
-        wait_done = active_completion_wait_done;
-        ack_done = active_completion_ack_done;
+        if (cleanup_in_progress) begin
+            operation_done = cleanup_done;
+        end else begin
+            cleanup_required = !shutdown_requested || ready_value ||
+                               allocated || configured ||
+                               outstanding.num() != 0 ||
+                               configuration_in_progress ||
+                               (reset_finish_done != null &&
+                                !reset_finish_done.is_on());
+            if (cleanup_required) begin
+                cleanup_in_progress = 1;
+                cleanup_done = new({get_name(), "_cleanup_done"});
+                operation_done = cleanup_done;
+                cleanup_owner = 1;
+                if (!shutdown_requested)
+                    reset_epoch_value++;
+                shutdown_requested    = 1;
+                reset_requested_value = 1;
+                ready_value           = 0;
+                ready_event.reset();
+                wait_cancel = active_completion_wait_cancel;
+                wait_done = active_completion_wait_done;
+                ack_done = active_completion_ack_done;
+                if (reset_finish_done != null &&
+                    !reset_finish_done.is_on())
+                    reset_teardown_done = reset_finish_done;
+                if (configuration_in_progress)
+                    configure_done = configuration_done;
+            end
+        end
         state_lock.put(1);
         completion_commit_boundary.put(1);
+
+        if (!cleanup_owner) begin
+            if (operation_done != null && !operation_done.is_on())
+                operation_done.wait_on();
+            return;
+        end
+
         space_available.trigger();
         worker_state_event.trigger();
         quiesce_completion_activity(wait_cancel, wait_done, ack_done);
+        if (reset_teardown_done != null)
+            reset_teardown_done.wait_on();
+        if (configure_done != null)
+            configure_done.wait_on();
         if (cleanup_required)
             release_queue_resources(0);
         space_available.reset();
+        state_lock.get(1);
+        cleanup_in_progress = 0;
+        state_lock.put(1);
+        operation_done.trigger();
     endtask
 
     function gq_addr_t ring_base();

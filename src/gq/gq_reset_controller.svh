@@ -33,7 +33,12 @@ class gq_reset_controller extends uvm_component;
             cfg.reset_asserted.reset();
             if (engines.first(key)) begin
                 do begin
-                    engines[key].assert_reset();
+                    engines[key].begin_reset();
+                end while (engines.next(key));
+            end
+            if (engines.first(key)) begin
+                do begin
+                    engines[key].finish_reset();
                 end while (engines.next(key));
             end
 

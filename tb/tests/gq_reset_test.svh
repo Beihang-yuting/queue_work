@@ -120,6 +120,40 @@ class gq_reset_irq_adapter extends mailbox_mock_adapter;
     endtask
 endclass
 
+class gq_reset_lifecycle_adapter extends mailbox_mock_adapter;
+    `uvm_object_utils(gq_reset_lifecycle_adapter)
+
+    time configure_delay;
+    time disable_delay;
+    uvm_event configure_entered;
+    uvm_event disable_entered;
+
+    function new(string name = "gq_reset_lifecycle_adapter");
+        super.new(name);
+        configure_delay = 0;
+        disable_delay = 0;
+        configure_entered = new({name, "_configure_entered"});
+        disable_entered = new({name, "_disable_entered"});
+    endfunction
+
+    virtual task configure_queue(
+        gq_role_e role,
+        int unsigned queue_id,
+        gq_addr_t base,
+        int unsigned depth,
+        int unsigned desc_size);
+        configure_entered.trigger();
+        #(configure_delay);
+        super.configure_queue(role, queue_id, base, depth, desc_size);
+    endtask
+
+    virtual task disable_queue(gq_role_e role, int unsigned queue_id);
+        disable_entered.trigger();
+        #(disable_delay);
+        super.disable_queue(role, queue_id);
+    endtask
+endclass
+
 class gq_reset_race_engine extends gq_queue_engine;
     `uvm_component_utils(gq_reset_race_engine)
 
@@ -152,6 +186,13 @@ class gq_reset_race_engine extends gq_queue_engine;
             allow_completion_commit.reset();
         end
     endtask
+
+    task probe_serialization_locks_for_test();
+        submit_serialization.get(1);
+        submit_serialization.put(1);
+        completion_serialization.get(1);
+        completion_serialization.put(1);
+    endtask
 endclass
 
 class gq_reset_test extends uvm_test;
@@ -173,7 +214,7 @@ class gq_reset_test extends uvm_test;
     gq_queue_engine       irq_engine;
     gq_completion_collector irq_collector;
     host_mem_manager      stale_mem;
-    mailbox_mock_adapter  stale_adapter;
+    gq_reset_lifecycle_adapter stale_adapter;
     mailbox_mock_dut      stale_dut;
     gq_queue_cfg          stale_cfg;
     gq_reset_race_engine  stale_engine;
@@ -315,7 +356,8 @@ class gq_reset_test extends uvm_test;
         stale_mem = new("stale_mem");
         stale_mem.init_region(64'h0000_0001_7200_0000,
                               64'h0000_0001_72ff_ffff, MODE_LINEAR, 16);
-        stale_adapter = mailbox_mock_adapter::type_id::create("stale_adapter");
+        stale_adapter = gq_reset_lifecycle_adapter::type_id::create(
+            "stale_adapter");
         stale_dut = mailbox_mock_dut::type_id::create("stale_dut");
         stale_dut.mem     = stale_mem;
         stale_dut.adapter = stale_adapter;
@@ -397,8 +439,29 @@ class gq_reset_test extends uvm_test;
         time irq_reset_start;
         bit delayed_ack_reset_returned;
         int unsigned disable_calls_before_delayed_ack;
+        gq_request global_publish_request;
+        gq_response global_publish_response;
+        bit disable_cleanup_returned;
+        bit disable_drain_returned;
+        bit configure_release_returned;
+        bit configure_cleanup_returned;
+        bit configure_probe_returned;
+        int unsigned configure_calls_before_race;
+        int unsigned disable_calls_before_configure_race;
+        bit cleanup_owner_returned;
+        bit cleanup_joiner_returned;
+        bit cleanup_initialize_returned;
+        int unsigned disable_calls_before_cleanup_join;
+        int unsigned configure_calls_before_cleanup_join;
 
         phase.raise_objection(this);
+        fork : reset_test_watchdog
+            begin
+                #10us;
+                `uvm_fatal("RESET_WATCHDOG",
+                           "gq_reset_test exceeded 10us; probable lifecycle deadlock")
+            end
+        join_none
         env_cfg.wait_ready();
         disabled_cfg.wait_ready();
         tx_engine    = find_engine("tx_7");
@@ -648,6 +711,9 @@ class gq_reset_test extends uvm_test;
         end
         if (!refill_publish_seen)
             `uvm_fatal("RESET_REFILL", "refill did not enter delayed publish")
+        // The in-flight delay was sampled on entry. Keep the later TX probe
+        // zero-time so it observes reset publication, not eventual teardown.
+        adapter.publish_delay = 0;
         mem.enforce_disable_before_desc_free = 1;
         mem.queue_disable_observed            = 0;
         mem.pre_disable_desc_free              = 0;
@@ -660,6 +726,20 @@ class gq_reset_test extends uvm_test;
         end
         if (rx_engine.reset_epoch() != 3)
             `uvm_fatal("RESET_REFILL", "refill reset epoch did not advance")
+        global_publish_request = gq_request::type_id::create(
+            "global_publish_request");
+        global_publish_request.add_desc(make_tx("global_publish_tx", 500));
+        global_publish_response = gq_response::type_id::create(
+            "global_publish_response");
+        tx_engine.submit_batch(global_publish_request,
+                               global_publish_response);
+        if (global_publish_response.status != GQ_ABORTED_BY_RESET ||
+            global_publish_response.committed_count != 0 ||
+            global_publish_response.reset_epoch != 3 ||
+            rx_no_restart_engine.reset_epoch() != 3 ||
+            tx_engine.reset_epoch() != 3)
+            `uvm_fatal("RESET_GLOBAL_PUBLISH",
+                       "later queues stayed ready while the first reset teardown was blocked")
         wait_for_disable_count(9);
         if (mem.pre_disable_desc_free)
             `uvm_fatal("RESET_OWNERSHIP",
@@ -958,6 +1038,171 @@ class gq_reset_test extends uvm_test;
             `uvm_fatal("RESET_CLEANUP",
                        "cleanup did not abort blocked capacity request")
         stale_mem.leak_check(`__FILE__, `__LINE__);
+
+        // External disable may be timed, but shutdown publication must let a
+        // real completion drain observe not-ready without waiting for it.
+        stale_engine.initialize();
+        stale_adapter.disable_delay = 50ns;
+        stale_adapter.disable_entered.reset();
+        disable_cleanup_returned = 0;
+        disable_drain_returned = 0;
+        fork : delayed_disable_cleanup
+            begin
+                stale_engine.cleanup();
+                disable_cleanup_returned = 1;
+            end
+        join_none
+        for (int unsigned poll = 0; poll < 20; poll++) begin
+            #1ns;
+            if (stale_adapter.disable_entered.is_on())
+                break;
+        end
+        if (!stale_adapter.disable_entered.is_on())
+            `uvm_fatal("RESET_DISABLE_LOCK",
+                       "cleanup did not enter delayed disable")
+        fork : drain_during_disable
+            begin
+                stale_engine.drain_completed();
+                disable_drain_returned = 1;
+            end
+        join_none
+        #1ns;
+        if (!disable_drain_returned)
+            `uvm_fatal("RESET_DISABLE_LOCK",
+                       "delayed disable retained completion serialization")
+        if (disable_cleanup_returned)
+            `uvm_fatal("RESET_DISABLE_LOCK",
+                       "cleanup returned before delayed disable completed")
+        for (int unsigned poll = 0; poll < 100; poll++) begin
+            #1ns;
+            if (disable_cleanup_returned)
+                break;
+        end
+        if (!disable_cleanup_returned || stale_engine.ring_base() != 0)
+            `uvm_fatal("RESET_DISABLE_LOCK",
+                       "delayed disable cleanup did not complete")
+        stale_adapter.disable_delay = 0;
+        stale_mem.leak_check(`__FILE__, `__LINE__);
+
+        // Reset release must not retain either serialization lock across a
+        // timed configure. Concurrent cleanup owns shutdown immediately, then
+        // joins release and tears down the ring that configure actually made.
+        stale_engine.initialize();
+        stale_engine.assert_reset();
+        configure_calls_before_race = stale_adapter.configure_calls;
+        disable_calls_before_configure_race = stale_adapter.disable_calls;
+        stale_adapter.configure_delay = 50ns;
+        stale_adapter.configure_entered.reset();
+        configure_release_returned = 0;
+        configure_cleanup_returned = 0;
+        configure_probe_returned = 0;
+        fork : delayed_configure_release
+            begin
+                stale_engine.release_reset();
+                configure_release_returned = 1;
+            end
+        join_none
+        for (int unsigned poll = 0; poll < 20; poll++) begin
+            #1ns;
+            if (stale_adapter.configure_entered.is_on())
+                break;
+        end
+        if (!stale_adapter.configure_entered.is_on())
+            `uvm_fatal("RESET_CONFIG_LOCK",
+                       "reset release did not enter delayed configure")
+        fork : configure_serialization_probe
+            begin
+                stale_engine.probe_serialization_locks_for_test();
+                configure_probe_returned = 1;
+            end
+        join_none
+        fork : cleanup_during_configure
+            begin
+                stale_engine.cleanup();
+                configure_cleanup_returned = 1;
+            end
+        join_none
+        #1ns;
+        if (!configure_probe_returned)
+            `uvm_fatal("RESET_CONFIG_LOCK",
+                       "delayed configure retained engine serialization locks")
+        if (configure_release_returned || configure_cleanup_returned)
+            `uvm_fatal("RESET_CONFIG_JOIN",
+                       "release or cleanup returned before configure completed")
+        for (int unsigned poll = 0; poll < 100; poll++) begin
+            #1ns;
+            if (configure_release_returned && configure_cleanup_returned)
+                break;
+        end
+        if (!configure_release_returned || !configure_cleanup_returned ||
+            stale_engine.is_ready() || stale_engine.ring_base() != 0 ||
+            stale_adapter.configure_calls != configure_calls_before_race + 1 ||
+            stale_adapter.disable_calls !=
+                disable_calls_before_configure_race + 1)
+            `uvm_fatal("RESET_CONFIG_JOIN",
+                       "cleanup did not adopt and tear down the configured ring")
+        stale_adapter.configure_delay = 0;
+        stale_mem.leak_check(`__FILE__, `__LINE__);
+
+        // Every cleanup caller joins the same teardown. A later call must not
+        // return merely because the owner already published shutdown.
+        stale_engine.initialize();
+        stale_adapter.disable_delay = 50ns;
+        stale_adapter.disable_entered.reset();
+        disable_calls_before_cleanup_join = stale_adapter.disable_calls;
+        configure_calls_before_cleanup_join = stale_adapter.configure_calls;
+        cleanup_owner_returned = 0;
+        cleanup_joiner_returned = 0;
+        cleanup_initialize_returned = 0;
+        fork : cleanup_join_owner
+            begin
+                stale_engine.cleanup();
+                cleanup_owner_returned = 1;
+            end
+        join_none
+        for (int unsigned poll = 0; poll < 20; poll++) begin
+            #1ns;
+            if (stale_adapter.disable_entered.is_on())
+                break;
+        end
+        if (!stale_adapter.disable_entered.is_on())
+            `uvm_fatal("RESET_CLEANUP_JOIN",
+                       "cleanup owner did not enter delayed disable")
+        fork : cleanup_join_waiter
+            begin
+                stale_engine.cleanup();
+                cleanup_joiner_returned = 1;
+            end
+        join_none
+        fork : initialize_during_cleanup
+            begin
+                stale_engine.initialize();
+                cleanup_initialize_returned = 1;
+            end
+        join_none
+        #1ns;
+        if (cleanup_owner_returned || cleanup_joiner_returned ||
+            cleanup_initialize_returned)
+            `uvm_fatal("RESET_CLEANUP_JOIN",
+                       "cleanup joiner returned before shared teardown completed")
+        for (int unsigned poll = 0; poll < 100; poll++) begin
+            #1ns;
+            if (cleanup_owner_returned && cleanup_joiner_returned &&
+                cleanup_initialize_returned)
+                break;
+        end
+        if (!cleanup_owner_returned || !cleanup_joiner_returned ||
+            !cleanup_initialize_returned || stale_engine.is_ready() ||
+            stale_engine.ring_base() != 0 ||
+            stale_adapter.disable_calls !=
+                disable_calls_before_cleanup_join + 1 ||
+            stale_adapter.configure_calls !=
+                configure_calls_before_cleanup_join)
+            `uvm_fatal("RESET_CLEANUP_JOIN",
+                       "cleanup joiners did not preserve one terminal teardown")
+        stale_adapter.disable_delay = 0;
+        stale_mem.leak_check(`__FILE__, `__LINE__);
+        disable reset_test_watchdog;
         phase.drop_objection(this);
     endtask
 endclass

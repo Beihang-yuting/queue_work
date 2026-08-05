@@ -743,8 +743,7 @@ class gq_completion_test extends uvm_test;
     task check_parallel_irq_waiters();
         gq_queue_cfg cfg_a;
         gq_queue_cfg cfg_b;
-        mailbox_mock_adapter adapter_a;
-        mailbox_mock_adapter adapter_b;
+        mailbox_mock_adapter shared_adapter;
         gq_irq_wait_policy policy_a;
         gq_irq_wait_policy policy_b;
         bit returned_a;
@@ -760,10 +759,8 @@ class gq_completion_test extends uvm_test;
         cfg_b.role = GQ_TX;
         cfg_a.completion_timeout = 100ns;
         cfg_b.completion_timeout = 100ns;
-        adapter_a = mailbox_mock_adapter::type_id::create(
-            "parallel_irq_adapter_a");
-        adapter_b = mailbox_mock_adapter::type_id::create(
-            "parallel_irq_adapter_b");
+        shared_adapter = mailbox_mock_adapter::type_id::create(
+            "parallel_irq_shared_adapter");
         policy_a = gq_irq_wait_policy::type_id::create(
             "parallel_irq_policy_a");
         policy_b = gq_irq_wait_policy::type_id::create(
@@ -775,24 +772,23 @@ class gq_completion_test extends uvm_test;
 
         fork
             begin
-                policy_a.wait_for_wakeup(cfg_a, adapter_a, wake_a);
+                policy_a.wait_for_wakeup(cfg_a, shared_adapter, wake_a);
                 returned_a = 1;
             end
             begin
-                policy_b.wait_for_wakeup(cfg_b, adapter_b, wake_b);
+                policy_b.wait_for_wakeup(cfg_b, shared_adapter, wake_b);
                 returned_b = 1;
             end
         join_none
         for (int unsigned poll = 0; poll < 20; poll++) begin
             #1ns;
-            if (adapter_a.wait_irq_calls == 1 &&
-                adapter_b.wait_irq_calls == 1)
+            if (shared_adapter.wait_irq_calls == 2)
                 break;
         end
-        if (adapter_a.wait_irq_calls != 1 || adapter_b.wait_irq_calls != 1)
+        if (shared_adapter.wait_irq_calls != 2)
             `uvm_fatal("IRQ_PARALLEL", "parallel IRQ waits did not arm")
 
-        adapter_a.trigger_irq(GQ_TX, cfg_a.queue_id);
+        shared_adapter.trigger_irq(GQ_TX, cfg_a.queue_id);
         #1ns;
         if (!returned_a || !wake_a)
             `uvm_fatal("IRQ_PARALLEL", "first parallel IRQ wait did not wake")
@@ -800,7 +796,7 @@ class gq_completion_test extends uvm_test;
             `uvm_fatal("IRQ_PARALLEL",
                        "first IRQ wake cancelled an unrelated queue wait")
 
-        adapter_b.trigger_irq(GQ_TX, cfg_b.queue_id);
+        shared_adapter.trigger_irq(GQ_TX, cfg_b.queue_id);
         #1ns;
         if (!returned_b || !wake_b)
             `uvm_fatal("IRQ_PARALLEL", "second parallel IRQ wait did not wake")
