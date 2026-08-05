@@ -33,12 +33,30 @@ class gq_driver extends uvm_driver #(gq_request, gq_response);
     endtask
 endclass
 
+class gq_completion_worker extends uvm_component;
+    `uvm_component_utils(gq_completion_worker)
+
+    gq_queue_engine engine;
+
+    function new(string name = "gq_completion_worker",
+                 uvm_component parent = null);
+        super.new(name, parent);
+    endfunction
+
+    task run_phase(uvm_phase phase);
+        if (engine == null)
+            `uvm_fatal("GQ_WORKER_CFG", "completion worker has no queue engine")
+        engine.run_completion_worker();
+    endtask
+endclass
+
 class gq_queue_agent extends uvm_agent;
     `uvm_component_utils(gq_queue_agent)
 
     gq_queue_engine engine;
     gq_sequencer sequencer;
     gq_driver driver;
+    gq_completion_worker completion_worker;
 
     function new(string name = "gq_queue_agent", uvm_component parent = null);
         super.new(name, parent);
@@ -63,11 +81,14 @@ class gq_queue_agent extends uvm_agent;
         engine = gq_queue_engine::type_id::create("engine", this);
         sequencer = gq_sequencer::type_id::create("sequencer", this);
         driver    = gq_driver::type_id::create("driver", this);
+        completion_worker = gq_completion_worker::type_id::create(
+            "completion_worker", this);
     endfunction
 
     function void connect_phase(uvm_phase phase);
         super.connect_phase(phase);
         driver.engine = engine;
+        completion_worker.engine = engine;
         driver.seq_item_port.connect(sequencer.seq_item_export);
     endfunction
 endclass

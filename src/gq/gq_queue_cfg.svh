@@ -48,6 +48,11 @@ class gq_queue_cfg extends uvm_object;
             return 0;
         end
 
+        if (completion_source == null) begin
+            reason = "completion source must not be null";
+            return 0;
+        end
+
         if (wait_mode == GQ_POLL && poll_interval == 0) begin
             reason = "poll interval must be non-zero in poll mode";
             return 0;

@@ -13,6 +13,7 @@ class mailbox_env_cfg extends gq_env_cfg;
 
     virtual function bit validate(output string reason);
         string key;
+        mailbox_completion installed_source;
 
         if (queues.first(key)) begin
             do begin
@@ -50,6 +51,12 @@ class mailbox_env_cfg extends gq_env_cfg;
         if (queues.first(key)) begin
             do begin
                 queues[key].ptr_codec = ptr_codec;
+                if (queues[key].completion_source == null ||
+                    !$cast(installed_source,
+                           queues[key].completion_source))
+                    queues[key].completion_source =
+                        mailbox_completion::type_id::create(
+                            {key, "_completion"});
             end while (queues.next(key));
         end
         return super.validate(reason);
@@ -85,7 +92,8 @@ class mailbox_env_cfg extends gq_env_cfg;
         queue_cfg.poll_interval      = 10ns;
         queue_cfg.completion_timeout = 1us;
         queue_cfg.ptr_codec          = ptr_codec;
-        queue_cfg.completion_source  = null;
+        queue_cfg.completion_source  = mailbox_completion::type_id::create(
+            $sformatf("%s_completion", gq_queue_key(role, queue_id)));
         return add_queue(queue_cfg, reason);
     endfunction
 

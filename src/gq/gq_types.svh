@@ -7,6 +7,7 @@ typedef longint unsigned gq_logical_seq_t;
 
 typedef enum bit { GQ_TX, GQ_RX } gq_role_e;
 typedef enum bit { GQ_POLL, GQ_IRQ } gq_wait_mode_e;
+typedef enum bit { GQ_LITTLE_ENDIAN, GQ_BIG_ENDIAN } gq_byte_order_e;
 typedef enum int { GQ_OK, GQ_RESOURCE_ERROR, GQ_ABORTED_BY_RESET } gq_status_e;
 
 function automatic bit gq_is_pow2(int unsigned value);

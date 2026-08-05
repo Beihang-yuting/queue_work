@@ -50,7 +50,8 @@ class gq_config_test extends uvm_test;
         queue_cfg.poll_interval      = 10ns;
         queue_cfg.completion_timeout = 1us;
         queue_cfg.ptr_codec          = ptr_codec;
-        queue_cfg.completion_source  = null;
+        queue_cfg.completion_source  = mailbox_completion::type_id::create(
+            {name, "_completion"});
         return queue_cfg;
     endfunction
 
@@ -118,6 +119,8 @@ class gq_config_test extends uvm_test;
         cfg.wait_mode          = GQ_POLL;
         cfg.poll_interval      = 10ns;
         cfg.completion_timeout = 1us;
+        cfg.completion_source  = mailbox_completion::type_id::create(
+            "cfg_completion");
         expect_invalid(cfg, "depth 48");
 
         cfg.depth = 32;

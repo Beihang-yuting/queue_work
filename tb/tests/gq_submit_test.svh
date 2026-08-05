@@ -185,7 +185,8 @@ class gq_submit_test extends uvm_test;
         cfg.poll_interval      = 10ns;
         cfg.completion_timeout = 1us;
         cfg.ptr_codec          = ptr_codec;
-        cfg.completion_source  = null;
+        cfg.completion_source  = mailbox_completion::type_id::create(
+            {name, "_completion"});
         return cfg;
     endfunction
 

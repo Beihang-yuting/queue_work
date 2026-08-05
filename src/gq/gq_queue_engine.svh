@@ -7,6 +7,7 @@ class gq_queue_engine extends uvm_component;
     protected gq_queue_cfg cfg;
     protected host_mem_api mem;
     protected gq_hw_adapter adapter;
+    protected gq_wait_policy wait_policy;
     protected gq_addr_t ring_base_value;
     protected gq_addr_t status_addr_value;
     protected longint unsigned ring_bytes_value;
@@ -15,12 +16,14 @@ class gq_queue_engine extends uvm_component;
     protected bit ready_value;
     protected uvm_event ready_event;
     protected semaphore submit_serialization;
+    protected semaphore completion_serialization;
     protected semaphore state_lock;
     protected gq_desc_base outstanding[gq_logical_seq_t];
     protected bit outstanding_ids[int];
     protected gq_logical_seq_t logical_head_seq;
     protected gq_logical_seq_t logical_tail_seq;
     protected uvm_event space_available;
+    uvm_analysis_port #(gq_desc_base) completion_ap;
 
     function new(string name = "gq_queue_engine", uvm_component parent = null);
         super.new(name, parent);
@@ -32,10 +35,13 @@ class gq_queue_engine extends uvm_component;
         ready_value       = 0;
         ready_event       = new({name, "_ready"});
         submit_serialization = new(1);
+        completion_serialization = new(1);
         state_lock        = new(1);
         logical_head_seq  = 0;
         logical_tail_seq  = 0;
         space_available   = new({name, "_space_available"});
+        completion_ap     = new("completion_ap", this);
+        wait_policy       = null;
     endfunction
 
     static function bit checked_ring_size(
@@ -110,6 +116,13 @@ class gq_queue_engine extends uvm_component;
             `uvm_fatal("GQ_ENGINE_CFG", "hardware adapter must not be null")
         if (cfg.ptr_codec == null)
             `uvm_fatal("GQ_ENGINE_CFG", "pointer codec must not be null")
+
+        if (cfg.wait_mode == GQ_POLL)
+            wait_policy = gq_poll_wait_policy::type_id::create(
+                "poll_wait_policy");
+        else
+            wait_policy = gq_irq_wait_policy::type_id::create(
+                "irq_wait_policy");
 
         max_value = '1;
         if (!checked_ring_size(cfg.depth, cfg.desc_size, cfg.status_area_size,
@@ -228,6 +241,110 @@ class gq_queue_engine extends uvm_component;
         outstanding_ids[desc.get_inst_id()] = 1;
     endfunction
 
+    // Caller holds state_lock. Handle and ID-index deletion, then head
+    // advancement, form one atomic retirement transition.
+    protected function void retire_outstanding(gq_logical_seq_t seq,
+                                               gq_desc_base desc);
+        if (seq != logical_head_seq || !outstanding.exists(seq) ||
+            outstanding[seq] != desc)
+            `uvm_fatal("GQ_STATE", $sformatf(
+                "retire mismatch at logical sequence %0d (head=%0d)",
+                seq, logical_head_seq))
+
+        outstanding.delete(seq);
+        outstanding_ids.delete(desc.get_inst_id());
+        logical_head_seq++;
+        check_state_invariants("completion retire");
+    endfunction
+
+    task drain_completed();
+        gq_desc_base pending[$];
+        gq_desc_base desc;
+        gq_logical_seq_t query_head;
+        gq_logical_seq_t current_outstanding;
+        int unsigned count;
+        bit retired_any;
+        bit protocol_violation;
+
+        completion_serialization.get(1);
+        state_lock.get(1);
+        if (!ready_value) begin
+            state_lock.put(1);
+            completion_serialization.put(1);
+            return;
+        end
+        query_head = logical_head_seq;
+        for (gq_logical_seq_t seq = logical_head_seq;
+             seq < logical_tail_seq; seq++)
+            pending.push_back(outstanding[seq]);
+        state_lock.put(1);
+
+        count = cfg.completion_source.completed_count(
+            mem, ring_base_value, status_addr_value, cfg.depth, cfg.desc_size,
+            query_head, pending);
+        state_lock.get(1);
+        current_outstanding = logical_tail_seq - logical_head_seq;
+        protocol_violation = query_head != logical_head_seq ||
+                             count > pending.size() ||
+                             count > current_outstanding;
+        state_lock.put(1);
+        if (protocol_violation) begin
+            `uvm_error("GQ_COMPLETION_PROTOCOL", $sformatf(
+                "completion count %0d exceeds pending=%0d/outstanding=%0d or query head changed",
+                count, pending.size(), current_outstanding))
+            completion_serialization.put(1);
+            return;
+        end
+
+        retired_any = 0;
+        for (int unsigned i = 0; i < count; i++) begin
+            desc = pending[i];
+            if (!desc.parse_completion()) begin
+                `uvm_error("GQ_COMPLETION_PARSE", $sformatf(
+                    "completion parse failed at logical sequence %0d",
+                    query_head + i))
+                break;
+            end
+            // Analysis delivery is synchronous: subscribers see the parsed
+            // descriptor while owned allocations are still valid. Ownership
+            // is released immediately after write() returns, before the
+            // handle and ID index are atomically retired under state_lock.
+            completion_ap.write(desc);
+            desc.release_owned();
+
+            state_lock.get(1);
+            retire_outstanding(query_head + i, desc);
+            state_lock.put(1);
+            retired_any = 1;
+        end
+        if (retired_any)
+            space_available.trigger();
+        completion_serialization.put(1);
+    endtask
+
+    task wait_and_drain_once();
+        bit ready_snapshot;
+
+        if (wait_policy == null)
+            `uvm_fatal("GQ_WAIT_POLICY", "completion wait policy is not initialized")
+        wait_policy.wait_for_wakeup(cfg, adapter);
+        state_lock.get(1);
+        ready_snapshot = ready_value;
+        state_lock.put(1);
+        if (!ready_snapshot)
+            return;
+        drain_completed();
+    endtask
+
+    task run_completion_worker();
+        wait_ready();
+        forever begin
+            wait_and_drain_once();
+            if (!is_ready())
+                return;
+        end
+    endtask
+
     task submit_batch(input gq_request request, inout gq_response response);
         int unsigned batch_size;
         int unsigned attempted_count;
@@ -326,6 +443,7 @@ class gq_queue_engine extends uvm_component;
         gq_logical_seq_t seq;
         gq_desc_base cleanup_descs[$];
 
+        completion_serialization.get(1);
         state_lock.get(1);
         if (outstanding.first(seq)) begin
             do begin
@@ -354,8 +472,10 @@ class gq_queue_engine extends uvm_component;
         ring_base_value   = 0;
         status_addr_value = 0;
         ring_bytes_value  = 0;
+        wait_policy       = null;
         ready_event.reset();
         space_available.reset();
+        completion_serialization.put(1);
     endtask
 
     function gq_addr_t ring_base();

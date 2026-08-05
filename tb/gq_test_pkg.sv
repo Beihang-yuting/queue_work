@@ -11,9 +11,11 @@ package gq_test_pkg;
     `include "host_mem_manager.sv"
     `include "mocks/gq_test_ptr_codec.svh"
     `include "mocks/mailbox_mock_adapter.svh"
+    `include "mocks/mailbox_mock_dut.svh"
     `include "tests/gq_config_test.svh"
     `include "tests/mailbox_desc_test.svh"
     `include "tests/gq_submit_test.svh"
+    `include "tests/gq_completion_test.svh"
 
     class gq_smoke_test extends uvm_test;
         `uvm_component_utils(gq_smoke_test)

@@ -7,6 +7,8 @@ class mailbox_mock_adapter extends gq_hw_adapter;
     int unsigned configure_calls;
     int unsigned disable_calls;
     int unsigned publish_calls;
+    int unsigned wait_irq_calls;
+    int unsigned ack_irq_calls;
     int unsigned configure_count[string];
     int unsigned disable_count[string];
     int unsigned publish_count[string];
@@ -21,6 +23,8 @@ class mailbox_mock_adapter extends gq_hw_adapter;
         configure_calls = 0;
         disable_calls   = 0;
         publish_calls   = 0;
+        wait_irq_calls  = 0;
+        ack_irq_calls   = 0;
     endfunction
 
     virtual task configure_queue(
@@ -67,6 +71,7 @@ class mailbox_mock_adapter extends gq_hw_adapter;
         string key;
 
         key = gq_queue_key(role, queue_id);
+        wait_irq_calls++;
         if (!irq_events.exists(key))
             irq_events[key] = new({key, "_irq"});
         irq_events[key].wait_on();
@@ -76,6 +81,7 @@ class mailbox_mock_adapter extends gq_hw_adapter;
         string key;
 
         key = gq_queue_key(role, queue_id);
+        ack_irq_calls++;
         if (irq_events.exists(key))
             irq_events[key].reset();
     endtask
