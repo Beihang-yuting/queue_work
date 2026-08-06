@@ -105,6 +105,17 @@ reset, and final cleanup can release them exactly once. See
 `mailbox_tx_desc` and `mailbox_rx_desc` for concrete 64-byte and 16-byte
 implementations.
 
+Completion storage/writeback is a design-level mechanism and strategy type
+across roles and queues, not a per-queue hardware-mode switch. The source still
+stores one `completion_source` object in each `gq_queue_cfg` so an instance can
+carry queue-specific parameters or state. A derived environment must validate
+or install the design's required strategy type for every queue, while creating
+separate instances where needed. For example, `mailbox_env_cfg` enforces a
+`mailbox_completion` instance for every TX and RX queue; a design based on
+`gq_tail_mem_completion` may instead give each queue's instance its applicable
+pointer codec, byte offset, and byte order without changing the design-level
+completion mechanism.
+
 A hardware pointer format derives from `gq_ptr_codec` and implements:
 
 ```systemverilog
@@ -124,10 +135,59 @@ Keep all wrap decisions in the codec and use `gq_phase(sequence, depth)` for
 the descriptor phase. The concrete codec belongs to the user project because
 the raw head/tail representation is DUT-specific.
 
+## Implement publish cancellation in the hardware adapter
+
+A concrete `gq_hw_adapter` may block inside `publish(role, queue_id, raw_tail)`.
+For the same role and queue ID, `disable_queue(role, queue_id)` is the
+cancellation operation for an in-flight blocked `publish()`. The adapter must
+allow the two tasks to run concurrently. Every overlap must linearize in
+exactly one of these orders:
+
+- If `publish()` linearizes first, its tail update may already be visible and
+  the call must proceed to completion as a non-cancelable publish. A later
+  `disable_queue()` does not retroactively revoke that visible update.
+- If `disable_queue()` becomes effective first, the not-yet-linearized publish
+  is canceled and must return without waiting for engine teardown or
+  queue-memory release. From that disable boundary onward, the canceled call
+  must produce no new tail-visible side effect; in particular, its tail must
+  not become visible after `disable_queue()` returns.
+
+The adapter must make publish linearization, task completion, and the visible
+tail side effect agree. It must not make a hardware tail visible while still
+treating that same invocation as cancelable pending work. The public interface
+intentionally requires no separate `cancel_publish()` task; an implementation
+may use private cancellation helpers or state behind `publish()` and
+`disable_queue()`.
+
+The disable-first case is directly testable: block a publish before its
+linearization point, call disable concurrently, then verify that publish
+returns and the canceled tail remains unobserved. This is a cancellation and
+quiescence contract, not a cancellation-timeout contract.
+
+Returning from `disable_queue()` does not by itself prove that the corresponding
+SystemVerilog `publish()` task has unwound. The engine tracks that exact
+in-flight task and waits for its done event before releasing or reusing
+descriptor-owned buffers, the queue ring, or any backing memory. The adapter
+does not inspect the engine's done event and does not free host storage.
+Conversely, return from `publish()` is the adapter's quiescence boundary for
+that invocation: it must leave no deferred work that can later access queue or
+backing storage or expose a tail update. These two responsibilities let disable
+return before task unwind without letting the engine release storage early.
+
+A normal return from `publish()` means only that the adapter call reached its
+quiescence boundary. It does not automatically make the sequence response
+successful and does not set `committed_count`. The engine first revalidates the
+operation against the current epoch and queue lifecycle, and only a current
+operation is reported as published to its caller. If runtime reset made an
+in-flight user TX publish stale, the response is `GQ_ABORTED_BY_RESET`, even
+when the adapter task returned normally.
+
 ## Submit TX work
 
-The same sequence represents a single request or an atomic batch. Descriptor
-ownership transfers only after a successful commit.
+The same sequence represents a single request or an atomic batch. Once the
+engine takes descriptor ownership for its internal submit transaction, it
+retains cleanup responsibility across publish and reset; caller-visible success
+is decided only after publish return and epoch/lifecycle revalidation.
 
 ```systemverilog
 mailbox_tx_sequence tx;
@@ -209,9 +269,12 @@ if (!cfg.trigger_reset_deasserted())
 ```
 
 Drop the test's final run-phase objection normally. When the run phase is ready
-to end, the environment raises its own objection, stops completion workers,
-releases outstanding descriptor buffers, disables every enabled queue, frees
-every ring, runs the one shared memory leak check, and then drops its objection.
+to end, the environment raises its own objection, stops new submissions, and
+quiesces completion activity. For each queue it then disables the hardware (or
+joins disable already in progress), waits for the exact in-flight `publish()`
+task to unwind, releases outstanding descriptor-owned buffers, and finally
+frees the ring's backing allocation. After every queue reaches that boundary,
+the environment runs the one shared memory leak check and drops its objection.
 This automatic finalization is safe after runtime reset. Explicit early calls
 to `cleanup_and_check_leaks()` remain supported; concurrent or repeated calls
 join the same idempotent finalization.
@@ -228,9 +291,12 @@ On a machine where VCS and the UVM license environment are already loaded:
 make run TEST=gq_regression_test
 ```
 
-The repository helper copies a clean source snapshot to `10.11.10.53`, enters
-the host's interactive login environment, builds with VCS, runs one test, and
-removes the remote temporary directory:
+The repository helper copies the current working-tree contents to
+`10.11.10.53`, enters the host's interactive login environment, builds with
+VCS, runs one test, and removes the remote temporary directory. Its `rsync`
+includes tracked working-tree modifications and untracked files except for the
+explicit `.git`, `.superpowers`, and `build` exclusions; it does not require or
+imply a committed or clean tree.
 
 ```bash
 ./scripts/run_vcs_remote.sh gq_regression_test
