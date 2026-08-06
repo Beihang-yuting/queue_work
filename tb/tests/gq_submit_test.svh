@@ -148,6 +148,19 @@ class gq_submit_test_engine extends gq_queue_engine;
     task probe_state_lock_for_test();
         super.probe_state_lock();
     endtask
+
+    task probe_publish_locks_for_test(output bit locks_available);
+        bit got_user;
+        bit got_submit;
+
+        got_user   = user_request_ordering.try_get(1);
+        got_submit = submit_serialization.try_get(1);
+        if (got_submit)
+            submit_serialization.put(1);
+        if (got_user)
+            user_request_ordering.put(1);
+        locks_available = got_user && got_submit;
+    endtask
 endclass
 
 class gq_submit_test extends uvm_test;
@@ -323,6 +336,7 @@ class gq_submit_test extends uvm_test;
         bit first_returned;
         bit second_returned;
         bit probe_returned;
+        bit locks_available;
         byte owned_data[];
         gq_request validation_request;
         gq_response validation_response;
@@ -436,6 +450,10 @@ class gq_submit_test extends uvm_test;
         adapter.publish_entered.wait_on();
         if (engine.tail_seq() != 5 || first_response.status == GQ_OK)
             `uvm_fatal("SUBMIT_DELAY", "state/response timing during publish is incorrect")
+        engine.probe_publish_locks_for_test(locks_available);
+        if (!locks_available)
+            `uvm_fatal("SUBMIT_PUBLISH_LOCK",
+                       "external publish retained an engine submission semaphore")
         fork : state_lock_probe
             begin
                 engine.probe_state_lock_for_test();
@@ -452,7 +470,8 @@ class gq_submit_test extends uvm_test;
         if (!probe_returned)
             `uvm_fatal("SUBMIT_LOCK", "state lock was held across delayed publish")
         if (second_concurrent.prepare_calls != 0 || second_returned)
-            `uvm_fatal("SUBMIT_SERIAL", "second submit was not serialized behind publish")
+            `uvm_fatal("SUBMIT_PUBLISH_ORDER",
+                       "later submit overtook the active publish")
         wait (first_returned && second_returned);
         if (first_response.status != GQ_OK || second_response.status != GQ_OK ||
             engine.tail_seq() != 6 || engine.outstanding_count() != 6)

@@ -118,6 +118,40 @@ class gq_refill_error_catcher extends uvm_report_catcher;
     endfunction
 endclass
 
+class gq_refill_publish_gate_adapter extends mailbox_mock_adapter;
+    `uvm_object_utils(gq_refill_publish_gate_adapter)
+
+    bit gate_publishes;
+    string gated_key;
+    int unsigned gated_entries;
+    gq_raw_ptr_t gated_tails[$];
+    uvm_event allow_publish_return;
+
+    function new(string name = "gq_refill_publish_gate_adapter");
+        super.new(name);
+        gate_publishes = 0;
+        gated_key = "";
+        gated_entries = 0;
+        allow_publish_return = new({name, "_allow_publish_return"});
+    endfunction
+
+    virtual task publish(
+        gq_role_e role,
+        int unsigned queue_id,
+        gq_raw_ptr_t raw_tail);
+        string key;
+
+        key = gq_queue_key(role, queue_id);
+        if (gate_publishes && key == gated_key) begin
+            gated_entries++;
+            gated_tails.push_back(raw_tail);
+            allow_publish_return.wait_on();
+            allow_publish_return.reset();
+        end
+        super.publish(role, queue_id, raw_tail);
+    endtask
+endclass
+
 class gq_refill_test extends uvm_test;
     `uvm_component_utils(gq_refill_test)
 
@@ -127,6 +161,11 @@ class gq_refill_test extends uvm_test;
     mailbox_mock_dut    dut;
     mailbox_env_cfg     env_cfg;
     mailbox_env         env;
+    gq_refill_spy_mem   race_mem;
+    gq_refill_publish_gate_adapter race_adapter;
+    mailbox_mock_dut    race_dut;
+    gq_queue_cfg        race_cfg;
+    gq_queue_engine     race_engine;
 
     function new(string name = "gq_refill_test",
                  uvm_component parent = null);
@@ -152,6 +191,16 @@ class gq_refill_test extends uvm_test;
             `uvm_fatal("REFILL_PATH", {"could not find sequencer ", path})
         return sequencer;
     endfunction
+
+    task wait_for_gated_publish(int unsigned expected);
+        for (int unsigned poll = 0; poll < 200; poll++) begin
+            #1ns;
+            if (race_adapter.gated_entries == expected)
+                return;
+        end
+        `uvm_fatal("REFILL_PUBLISH_REVALIDATE", $sformatf(
+            "gated publish count did not reach %0d", expected))
+    endtask
 
     function void expect_resource_error(string check_name,
                                         gq_response response);
@@ -270,6 +319,35 @@ class gq_refill_test extends uvm_test;
             `uvm_fatal("REFILL_CFG", reason)
         uvm_config_db#(gq_env_cfg)::set(this, "env", "cfg", env_cfg);
         env = mailbox_env::type_id::create("env", this);
+
+        race_mem = new("race_mem");
+        race_mem.init_region(64'h0000_0001_5100_0000,
+                             64'h0000_0001_51ff_ffff, MODE_LINEAR, 16);
+        race_adapter = gq_refill_publish_gate_adapter::type_id::create(
+            "race_adapter");
+        race_dut = mailbox_mock_dut::type_id::create("race_dut");
+        race_dut.mem = race_mem;
+        race_dut.adapter = race_adapter;
+        race_cfg = gq_queue_cfg::type_id::create("race_cfg");
+        race_cfg.queue_id           = 10;
+        race_cfg.role               = GQ_RX;
+        race_cfg.depth              = 32;
+        race_cfg.desc_size          = 16;
+        race_cfg.alignment          = 64;
+        race_cfg.status_area_size   = 0;
+        race_cfg.wait_mode          = GQ_POLL;
+        race_cfg.poll_interval      = 1ns;
+        race_cfg.completion_timeout = 20ns;
+        race_cfg.ptr_codec          = ptr_codec;
+        race_cfg.completion_source  = mailbox_completion::type_id::create(
+            "race_completion");
+        uvm_config_db#(gq_queue_cfg)::set(
+            this, "race_engine", "cfg", race_cfg);
+        uvm_config_db#(host_mem_api)::set(
+            this, "race_engine", "mem", race_mem);
+        uvm_config_db#(gq_hw_adapter)::set(
+            this, "race_engine", "adapter", race_adapter);
+        race_engine = gq_queue_engine::type_id::create("race_engine", this);
     endfunction
 
     task run_phase(uvm_phase phase);
@@ -304,6 +382,19 @@ class gq_refill_test extends uvm_test;
         int unsigned events_before_start;
         bit refill_seen;
         bit failure_seen;
+        gq_deterministic_refill_profile race_profile;
+        gq_request race_start_request;
+        gq_response race_start_response;
+        gq_request race_submit_a_request;
+        gq_response race_submit_a_response;
+        gq_request race_submit_b_request;
+        gq_response race_submit_b_response;
+        mailbox_rx_desc race_submit_a_desc;
+        mailbox_rx_desc race_submit_b_desc;
+        mailbox_rx_desc race_refill_desc;
+        bit race_submit_a_returned;
+        bit race_submit_b_returned;
+        bit race_drain_returned;
 
         phase.raise_objection(this);
         env_cfg.wait_ready();
@@ -542,6 +633,128 @@ class gq_refill_test extends uvm_test;
             adapter.publish_count["rx_9"] != 0)
             `uvm_fatal("REFILL_PREPARE_FAIL",
                        "preparation failure polluted startup state")
+
+        // Refill must not retain a batch generated from a tail/watermark
+        // snapshot taken while an earlier publish was still active. A queued
+        // user submit owns the first wakeup and advances the tail before refill
+        // may generate descriptors for the actual installation sequences.
+        race_engine.initialize();
+        race_profile = gq_deterministic_refill_profile::type_id::create(
+            "race_profile");
+        race_profile.initial_post_count = 4;
+        race_profile.low_watermark      = 3;
+        race_profile.high_watermark     = 4;
+        race_profile.base_len           = 100;
+        race_start_request = gq_request::type_id::create(
+            "race_start_request");
+        race_start_request.kind = GQ_START_RX;
+        race_start_request.set_refill_profile(race_profile);
+        race_start_response = gq_response::type_id::create(
+            "race_start_response");
+        race_engine.start_rx(race_start_request, race_start_response);
+        if (race_start_response.status != GQ_OK ||
+            race_start_response.committed_count != 4 ||
+            race_engine.tail_seq() != 4 ||
+            race_adapter.publish_count["rx_10"] != 1)
+            `uvm_fatal("REFILL_PUBLISH_REVALIDATE",
+                       "race setup did not start four RX descriptors")
+
+        race_adapter.gate_publishes = 1;
+        race_adapter.gated_key = "rx_10";
+        race_adapter.allow_publish_return.reset();
+        race_submit_a_desc = mailbox_rx_desc::type_id::create(
+            "race_submit_a_desc");
+        race_submit_a_desc.buf_len = 800;
+        race_submit_a_request = gq_request::type_id::create(
+            "race_submit_a_request");
+        race_submit_a_request.add_desc(race_submit_a_desc);
+        race_submit_a_response = gq_response::type_id::create(
+            "race_submit_a_response");
+        race_submit_a_returned = 0;
+        fork : race_blocked_publish_a
+            begin
+                race_engine.submit_batch(race_submit_a_request,
+                                         race_submit_a_response);
+                race_submit_a_returned = 1;
+            end
+        join_none
+        wait_for_gated_publish(1);
+
+        race_submit_b_desc = mailbox_rx_desc::type_id::create(
+            "race_submit_b_desc");
+        race_submit_b_desc.buf_len = 900;
+        race_submit_b_request = gq_request::type_id::create(
+            "race_submit_b_request");
+        race_submit_b_request.add_desc(race_submit_b_desc);
+        race_submit_b_response = gq_response::type_id::create(
+            "race_submit_b_response");
+        race_submit_b_returned = 0;
+        fork : race_queued_publish_b
+            begin
+                race_engine.submit_batch(race_submit_b_request,
+                                         race_submit_b_response);
+                race_submit_b_returned = 1;
+            end
+        join_none
+        #1ns;
+        if (race_submit_b_returned || race_engine.tail_seq() != 5)
+            `uvm_fatal("REFILL_PUBLISH_REVALIDATE",
+                       "second user submit did not queue behind blocked publish")
+
+        for (gq_logical_seq_t seq = 0; seq < 3; seq++)
+            race_dut.complete_slot(race_engine, seq, 32, 16);
+        race_drain_returned = 0;
+        fork : race_completion_refill
+            begin
+                race_engine.drain_completed();
+                race_drain_returned = 1;
+            end
+        join_none
+        for (int unsigned poll = 0; poll < 200; poll++) begin
+            #1ns;
+            if (race_engine.head_seq() == 3)
+                break;
+        end
+        #1ns;
+        if (race_engine.head_seq() != 3 || race_drain_returned)
+            `uvm_fatal("REFILL_PUBLISH_REVALIDATE",
+                       "completion refill did not wait behind blocked publish")
+
+        race_adapter.allow_publish_return.trigger();
+        wait_for_gated_publish(2);
+        if (race_adapter.gated_tails[1] !=
+            ptr_codec.encode_publish(5, 6, 32))
+            `uvm_fatal("REFILL_PUBLISH_REVALIDATE",
+                       "queued user submit did not own the first publish wakeup")
+        race_adapter.allow_publish_return.trigger();
+        wait_for_gated_publish(3);
+        if (race_adapter.gated_tails[2] !=
+                ptr_codec.encode_publish(6, 7, 32) ||
+            race_engine.tail_seq() != 7 ||
+            race_engine.outstanding_count() != 4 ||
+            !$cast(race_refill_desc, race_engine.get_outstanding(6)) ||
+            race_refill_desc.buf_len != 106 ||
+            race_engine.get_outstanding(7) != null)
+            `uvm_fatal("REFILL_PUBLISH_REVALIDATE",
+                       "refill used a stale logical sequence or exceeded high watermark")
+        race_adapter.allow_publish_return.trigger();
+        for (int unsigned poll = 0; poll < 200; poll++) begin
+            #1ns;
+            if (race_submit_a_returned && race_submit_b_returned &&
+                race_drain_returned)
+                break;
+        end
+        if (!race_submit_a_returned || !race_submit_b_returned ||
+            !race_drain_returned ||
+            race_submit_a_response.status != GQ_OK ||
+            race_submit_b_response.status != GQ_OK ||
+            race_adapter.publish_count["rx_10"] != 4)
+            `uvm_fatal("REFILL_PUBLISH_REVALIDATE",
+                       "revalidated refill publications did not complete once")
+        race_adapter.gate_publishes = 0;
+        race_adapter.gated_key = "";
+        race_engine.cleanup();
+        race_mem.leak_check(`__FILE__, `__LINE__);
 
         env.cleanup();
         mem.leak_check(`__FILE__, `__LINE__);

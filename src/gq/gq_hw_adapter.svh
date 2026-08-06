@@ -6,6 +6,11 @@ virtual class gq_hw_adapter extends uvm_object;
         super.new(name);
     endfunction
 
+    // publish() may block in a concrete bus/DUT adapter. disable_queue() must be
+    // callable concurrently for the same role/queue, must cause such a publish to
+    // return, and must prevent its pre-disable tail update from becoming visible
+    // after disable returns. The engine waits for publish completion before it
+    // frees or reuses queue memory.
     pure virtual task configure_queue(
         gq_role_e role,
         int unsigned queue_id,

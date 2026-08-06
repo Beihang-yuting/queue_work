@@ -7,6 +7,11 @@ class gq_reset_spy_mem extends host_mem_manager;
     bit enforce_disable_before_desc_free;
     bit queue_disable_observed;
     bit pre_disable_desc_free;
+    bit enforce_publish_quiescence;
+    bit publish_quiesced;
+    bit pre_quiesce_desc_free;
+    bit pre_quiesce_ring_free;
+    int unsigned descriptor_free_calls;
     protected bit ring_allocations[gq_addr_t];
 
     function new(string name = "gq_reset_spy_mem");
@@ -16,6 +21,11 @@ class gq_reset_spy_mem extends host_mem_manager;
         enforce_disable_before_desc_free = 0;
         queue_disable_observed            = 0;
         pre_disable_desc_free              = 0;
+        enforce_publish_quiescence = 0;
+        publish_quiesced = 1;
+        pre_quiesce_desc_free = 0;
+        pre_quiesce_ring_free = 0;
+        descriptor_free_calls = 0;
     endfunction
 
     virtual function bit [63:0] alloc(
@@ -43,10 +53,17 @@ class gq_reset_spy_mem extends host_mem_manager;
         if (enforce_disable_before_desc_free && !queue_disable_observed &&
             !is_ring_allocation)
             pre_disable_desc_free = 1;
+        if (enforce_publish_quiescence && !publish_quiesced) begin
+            if (is_ring_allocation)
+                pre_quiesce_ring_free = 1;
+            else
+                pre_quiesce_desc_free = 1;
+        end
         if (ring_allocations.exists(addr)) begin
             ring_free_calls++;
             ring_allocations.delete(addr);
-        end
+        end else
+            descriptor_free_calls++;
         super.free(addr, file, line);
     endfunction
 endclass
@@ -58,6 +75,14 @@ class gq_reset_order_adapter extends mailbox_mock_adapter;
     string disable_order[$];
     time publish_delay;
     uvm_event publish_entered;
+    bit block_publish_until_disable;
+    string blocked_publish_key;
+    uvm_event publish_cancelled;
+    uvm_event cancel_observed;
+    uvm_event allow_cancelled_publish_return;
+    int unsigned cancelled_publish_count;
+    bit hold_cancelled_publish_return;
+    bit publish_returned;
     bit disabled_state[string];
     bit post_disable_publish;
     gq_reset_spy_mem spy_mem;
@@ -66,6 +91,15 @@ class gq_reset_order_adapter extends mailbox_mock_adapter;
         super.new(name);
         publish_delay        = 0;
         publish_entered      = new({name, "_publish_entered"});
+        block_publish_until_disable = 0;
+        blocked_publish_key = "";
+        publish_cancelled = new({name, "_publish_cancelled"});
+        cancel_observed = new({name, "_cancel_observed"});
+        allow_cancelled_publish_return = new(
+            {name, "_allow_cancelled_publish_return"});
+        cancelled_publish_count = 0;
+        hold_cancelled_publish_return = 0;
+        publish_returned = 0;
         post_disable_publish = 0;
     endfunction
 
@@ -81,11 +115,23 @@ class gq_reset_order_adapter extends mailbox_mock_adapter;
     endtask
 
     virtual task disable_queue(gq_role_e role, int unsigned queue_id);
+        string key;
+
+        key = gq_queue_key(role, queue_id);
+        disabled_state[key] = 1;
+        if (block_publish_until_disable && key == blocked_publish_key) begin
+            if (spy_mem != null) begin
+                spy_mem.enforce_publish_quiescence = 1;
+                spy_mem.publish_quiesced = 0;
+                spy_mem.pre_quiesce_desc_free = 0;
+                spy_mem.pre_quiesce_ring_free = 0;
+            end
+            publish_cancelled.trigger();
+        end
         if (spy_mem != null && spy_mem.enforce_disable_before_desc_free)
             spy_mem.queue_disable_observed = 1;
-        disable_order.push_back(gq_queue_key(role, queue_id));
+        disable_order.push_back(key);
         super.disable_queue(role, queue_id);
-        disabled_state[gq_queue_key(role, queue_id)] = 1;
     endtask
 
     virtual task publish(gq_role_e role, int unsigned queue_id,
@@ -94,6 +140,20 @@ class gq_reset_order_adapter extends mailbox_mock_adapter;
 
         key = gq_queue_key(role, queue_id);
         publish_entered.trigger();
+        if (block_publish_until_disable && key == blocked_publish_key) begin
+            publish_cancelled.wait_on();
+            publish_cancelled.reset();
+            cancelled_publish_count++;
+            cancel_observed.trigger();
+            if (hold_cancelled_publish_return) begin
+                allow_cancelled_publish_return.wait_on();
+                allow_cancelled_publish_return.reset();
+            end
+            if (spy_mem != null)
+                spy_mem.publish_quiesced = 1;
+            publish_returned = 1;
+            return;
+        end
         #(publish_delay);
         if (disabled_state.exists(key) && disabled_state[key])
             post_disable_publish = 1;
@@ -193,6 +253,12 @@ class gq_reset_race_engine extends gq_queue_engine;
         completion_serialization.get(1);
         completion_serialization.put(1);
     endtask
+
+    task configuration_done_for_test(output bit done);
+        state_lock.get(1);
+        done = configuration_done != null && configuration_done.is_on();
+        state_lock.put(1);
+    endtask
 endclass
 
 class gq_reset_test extends uvm_test;
@@ -219,6 +285,14 @@ class gq_reset_test extends uvm_test;
     gq_queue_cfg          stale_cfg;
     gq_reset_race_engine  stale_engine;
     gq_completion_collector stale_collector;
+    gq_reset_spy_mem      repost_mem;
+    gq_reset_order_adapter repost_adapter;
+    gq_queue_cfg          repost_cfg;
+    gq_reset_race_engine  repost_engine;
+    gq_reset_spy_mem      publish_reset_mem;
+    gq_reset_order_adapter publish_reset_adapter;
+    gq_queue_cfg          publish_reset_cfg;
+    gq_queue_engine       publish_reset_engine;
 
     function new(string name = "gq_reset_test", uvm_component parent = null);
         super.new(name, parent);
@@ -384,6 +458,64 @@ class gq_reset_test extends uvm_test;
             "stale_engine", this);
         stale_collector = gq_completion_collector::type_id::create(
             "stale_collector", this);
+
+        repost_mem = new("repost_mem");
+        repost_mem.init_region(64'h0000_0001_7300_0000,
+                               64'h0000_0001_73ff_ffff, MODE_LINEAR, 16);
+        repost_adapter = gq_reset_order_adapter::type_id::create(
+            "repost_adapter");
+        repost_adapter.spy_mem = repost_mem;
+        repost_cfg = gq_queue_cfg::type_id::create("repost_cfg");
+        repost_cfg.queue_id           = 22;
+        repost_cfg.role               = GQ_RX;
+        repost_cfg.depth              = 32;
+        repost_cfg.desc_size          = 16;
+        repost_cfg.alignment          = 64;
+        repost_cfg.status_area_size   = 0;
+        repost_cfg.wait_mode          = GQ_POLL;
+        repost_cfg.poll_interval      = 1ns;
+        repost_cfg.completion_timeout = 20ns;
+        repost_cfg.ptr_codec          = ptr_codec;
+        repost_cfg.completion_source  = mailbox_completion::type_id::create(
+            "repost_completion");
+        uvm_config_db#(gq_queue_cfg)::set(this, "repost_engine", "cfg",
+                                          repost_cfg);
+        uvm_config_db#(host_mem_api)::set(this, "repost_engine", "mem",
+                                          repost_mem);
+        uvm_config_db#(gq_hw_adapter)::set(this, "repost_engine", "adapter",
+                                           repost_adapter);
+        repost_engine = gq_reset_race_engine::type_id::create(
+            "repost_engine", this);
+
+        publish_reset_mem = new("publish_reset_mem");
+        publish_reset_mem.init_region(64'h0000_0001_7400_0000,
+                                      64'h0000_0001_74ff_ffff,
+                                      MODE_LINEAR, 16);
+        publish_reset_adapter = gq_reset_order_adapter::type_id::create(
+            "publish_reset_adapter");
+        publish_reset_adapter.spy_mem = publish_reset_mem;
+        publish_reset_cfg = gq_queue_cfg::type_id::create(
+            "publish_reset_cfg");
+        publish_reset_cfg.queue_id           = 23;
+        publish_reset_cfg.role               = GQ_TX;
+        publish_reset_cfg.depth              = 32;
+        publish_reset_cfg.desc_size          = 64;
+        publish_reset_cfg.alignment          = 64;
+        publish_reset_cfg.status_area_size   = 0;
+        publish_reset_cfg.wait_mode          = GQ_POLL;
+        publish_reset_cfg.poll_interval      = 1ns;
+        publish_reset_cfg.completion_timeout = 20ns;
+        publish_reset_cfg.ptr_codec          = ptr_codec;
+        publish_reset_cfg.completion_source =
+            mailbox_completion::type_id::create("publish_reset_completion");
+        uvm_config_db#(gq_queue_cfg)::set(
+            this, "publish_reset_engine", "cfg", publish_reset_cfg);
+        uvm_config_db#(host_mem_api)::set(
+            this, "publish_reset_engine", "mem", publish_reset_mem);
+        uvm_config_db#(gq_hw_adapter)::set(
+            this, "publish_reset_engine", "adapter", publish_reset_adapter);
+        publish_reset_engine = gq_queue_engine::type_id::create(
+            "publish_reset_engine", this);
     endfunction
 
     function void connect_phase(uvm_phase phase);
@@ -441,6 +573,14 @@ class gq_reset_test extends uvm_test;
         int unsigned disable_calls_before_delayed_ack;
         gq_request global_publish_request;
         gq_response global_publish_response;
+        gq_request cleanup_publish_request;
+        gq_response cleanup_publish_response;
+        bit cleanup_publish_returned;
+        bit env_cleanup_returned;
+        int unsigned publish_count_before_cancel;
+        int unsigned cancelled_count_before_cleanup;
+        int unsigned lifetime_ring_free_before;
+        int unsigned lifetime_desc_free_before;
         bit disable_cleanup_returned;
         bit disable_drain_returned;
         bit configure_release_returned;
@@ -453,6 +593,21 @@ class gq_reset_test extends uvm_test;
         bit cleanup_initialize_returned;
         int unsigned disable_calls_before_cleanup_join;
         int unsigned configure_calls_before_cleanup_join;
+        gq_deterministic_refill_profile repost_profile;
+        gq_request repost_start_request;
+        gq_response repost_start_response;
+        bit repost_release_returned;
+        bit repost_cleanup_returned;
+        bit repost_configuration_done;
+        int unsigned repost_publish_count_before;
+        int unsigned repost_disable_count_before;
+        gq_request publish_reset_request;
+        gq_response publish_reset_response;
+        bit publish_reset_submit_returned;
+        bit publish_reset_assert_returned;
+        int unsigned publish_reset_count_before;
+        int unsigned publish_reset_ring_free_before;
+        int unsigned publish_reset_desc_free_before;
 
         phase.raise_objection(this);
         fork : reset_test_watchdog
@@ -694,11 +849,18 @@ class gq_reset_test extends uvm_test;
             `uvm_fatal("RESET_RX_OFF",
                        "restart=false RX did not accept a new startup")
 
-        // Two real DUT retirements drive RX refill into delayed publish. Reset
-        // advances the epoch while publish is in flight; reset must wait for
-        // the submit critical section and then release each owned buffer once.
-        adapter.publish_delay = 50ns;
+        // Two real DUT retirements drive RX refill into a publish that only
+        // same-queue disable may cancel. Reset must reach disable without
+        // waiting on the submit path, then release each owned buffer once.
+        adapter.block_publish_until_disable = 1;
+        adapter.blocked_publish_key = "rx_5";
+        adapter.hold_cancelled_publish_return = 1;
+        adapter.publish_cancelled.reset();
+        adapter.cancel_observed.reset();
+        adapter.allow_cancelled_publish_return.reset();
         adapter.publish_entered.reset();
+        adapter.publish_returned = 0;
+        publish_count_before_cancel = adapter.publish_count["rx_5"];
         dut.complete_slot(rx_engine, 0, 32, 16);
         dut.complete_slot(rx_engine, 1, 32, 16);
         refill_publish_seen = 0;
@@ -710,13 +872,12 @@ class gq_reset_test extends uvm_test;
             end
         end
         if (!refill_publish_seen)
-            `uvm_fatal("RESET_REFILL", "refill did not enter delayed publish")
-        // The in-flight delay was sampled on entry. Keep the later TX probe
-        // zero-time so it observes reset publication, not eventual teardown.
-        adapter.publish_delay = 0;
+            `uvm_fatal("RESET_REFILL", "refill did not enter blocked publish")
         mem.enforce_disable_before_desc_free = 1;
         mem.queue_disable_observed            = 0;
         mem.pre_disable_desc_free              = 0;
+        lifetime_ring_free_before = mem.ring_free_calls;
+        lifetime_desc_free_before = mem.descriptor_free_calls;
         if (!env_cfg.trigger_reset_asserted())
             `uvm_fatal("RESET_EVENT", "third reset assertion was rejected")
         for (int unsigned poll = 0; poll < 20; poll++) begin
@@ -740,18 +901,205 @@ class gq_reset_test extends uvm_test;
             tx_engine.reset_epoch() != 3)
             `uvm_fatal("RESET_GLOBAL_PUBLISH",
                        "later queues stayed ready while the first reset teardown was blocked")
-        wait_for_disable_count(9);
+        adapter.cancel_observed.wait_on();
+        #1ns;
+        if (adapter.publish_returned || adapter.disable_calls != 7 ||
+            mem.ring_free_calls != lifetime_ring_free_before ||
+            mem.descriptor_free_calls != lifetime_desc_free_before ||
+            mem.pre_quiesce_desc_free || mem.pre_quiesce_ring_free)
+            `uvm_fatal("RESET_PUBLISH_LIFETIME",
+                       "reset released publish resources before publish returned")
+        adapter.allow_cancelled_publish_return.trigger();
+        wait (adapter.publish_returned);
+        wait (adapter.disable_calls == 9);
+        if (!mem.publish_quiesced || mem.pre_quiesce_desc_free ||
+            mem.pre_quiesce_ring_free)
+            `uvm_fatal("RESET_PUBLISH_LIFETIME",
+                       "reset resource release did not follow publish quiescence")
         if (mem.pre_disable_desc_free)
             `uvm_fatal("RESET_OWNERSHIP",
                        "reset freed a descriptor buffer before disabling its queue")
-        if (adapter.post_disable_publish)
-            `uvm_fatal("RESET_PUBLISH", "publish completed after queue disable")
+        if (adapter.cancelled_publish_count != 1)
+            `uvm_fatal("RESET_PUBLISH_CANCEL",
+                       "disable did not quiesce exactly one blocked publish")
+        if (adapter.post_disable_publish ||
+            adapter.publish_count["rx_5"] != publish_count_before_cancel)
+            `uvm_fatal("RESET_PUBLISH_CANCEL",
+                       "a canceled publish became visible after disable")
         if (rx_engine.outstanding_count() != 0 ||
             rx_no_restart_engine.outstanding_count() != 0 ||
             tx_engine.outstanding_count() != 0)
             `uvm_fatal("RESET_REFILL", "third reset left outstanding state")
 
-        env.cleanup();
+        adapter.block_publish_until_disable = 0;
+        adapter.blocked_publish_key = "";
+        adapter.hold_cancelled_publish_return = 0;
+        mem.enforce_publish_quiescence = 0;
+        if (!env_cfg.trigger_reset_deasserted())
+            `uvm_fatal("RESET_EVENT", "third reset release was rejected")
+        wait_for_configure_count(12);
+        if (!tx_engine.is_ready() || !rx_engine.is_ready() ||
+            !rx_no_restart_engine.is_ready() ||
+            adapter.publish_count["rx_5"] !=
+                publish_count_before_cancel + 1)
+            `uvm_fatal("RESET_PUBLISH_CANCEL",
+                       "reset recovery did not follow publish quiescence")
+
+        // A user TX publish can lose its lifecycle while the adapter call is
+        // in flight. Reset must cancel the adapter, wait for that exact call
+        // to return before releasing either allocation, and report the stale
+        // submit as reset-aborted rather than committed.
+        publish_reset_engine.initialize();
+        publish_reset_adapter.block_publish_until_disable = 1;
+        publish_reset_adapter.blocked_publish_key = "tx_23";
+        publish_reset_adapter.hold_cancelled_publish_return = 1;
+        publish_reset_adapter.publish_cancelled.reset();
+        publish_reset_adapter.cancel_observed.reset();
+        publish_reset_adapter.allow_cancelled_publish_return.reset();
+        publish_reset_adapter.publish_entered.reset();
+        publish_reset_adapter.publish_returned = 0;
+        publish_reset_count_before =
+            publish_reset_adapter.publish_count["tx_23"];
+        publish_reset_request = gq_request::type_id::create(
+            "publish_reset_request");
+        publish_reset_request.add_desc(make_tx("publish_reset_tx", 502));
+        publish_reset_response = gq_response::type_id::create(
+            "publish_reset_response");
+        publish_reset_submit_returned = 0;
+        publish_reset_assert_returned = 0;
+        fork : blocked_user_tx_publish
+            begin
+                publish_reset_engine.submit_batch(publish_reset_request,
+                                                  publish_reset_response);
+                publish_reset_submit_returned = 1;
+            end
+        join_none
+        publish_reset_adapter.publish_entered.wait_on();
+        publish_reset_ring_free_before = publish_reset_mem.ring_free_calls;
+        publish_reset_desc_free_before =
+            publish_reset_mem.descriptor_free_calls;
+        fork : reset_cancels_user_tx_publish
+            begin
+                publish_reset_engine.assert_reset();
+                publish_reset_assert_returned = 1;
+            end
+        join_none
+        publish_reset_adapter.cancel_observed.wait_on();
+        #1ns;
+        if (publish_reset_submit_returned || publish_reset_assert_returned ||
+            publish_reset_adapter.publish_returned ||
+            publish_reset_mem.ring_free_calls !=
+                publish_reset_ring_free_before ||
+            publish_reset_mem.descriptor_free_calls !=
+                publish_reset_desc_free_before ||
+            publish_reset_mem.pre_quiesce_desc_free ||
+            publish_reset_mem.pre_quiesce_ring_free)
+            `uvm_fatal("RESET_PUBLISH_LIFETIME",
+                       "runtime reset released TX resources before publish returned")
+        publish_reset_adapter.allow_cancelled_publish_return.trigger();
+        for (int unsigned poll = 0; poll < 200; poll++) begin
+            #1ns;
+            if (publish_reset_submit_returned &&
+                publish_reset_assert_returned)
+                break;
+        end
+        if (!publish_reset_submit_returned ||
+            publish_reset_response.status != GQ_ABORTED_BY_RESET ||
+            publish_reset_response.committed_count != 0 ||
+            publish_reset_response.reset_epoch != 1)
+            `uvm_fatal("RESET_PUBLISH_RESPONSE",
+                       "stale TX publish did not return reset-aborted response")
+        if (!publish_reset_assert_returned ||
+            !publish_reset_adapter.publish_returned ||
+            publish_reset_engine.reset_epoch() != 1 ||
+            publish_reset_adapter.publish_count["tx_23"] !=
+                publish_reset_count_before ||
+            publish_reset_engine.ring_base() != 0 ||
+            publish_reset_engine.outstanding_count() != 0 ||
+            publish_reset_adapter.cancelled_publish_count != 1 ||
+            publish_reset_mem.pre_quiesce_desc_free ||
+            publish_reset_mem.pre_quiesce_ring_free ||
+            publish_reset_mem.ring_free_calls !=
+                publish_reset_ring_free_before + 1 ||
+            publish_reset_mem.descriptor_free_calls !=
+                publish_reset_desc_free_before + 1)
+            `uvm_fatal("RESET_PUBLISH_LIFETIME",
+                       "runtime reset did not quiesce and release TX exactly once")
+        publish_reset_adapter.block_publish_until_disable = 0;
+        publish_reset_adapter.blocked_publish_key = "";
+        publish_reset_adapter.hold_cancelled_publish_return = 0;
+        publish_reset_mem.enforce_publish_quiescence = 0;
+        publish_reset_mem.leak_check(`__FILE__, `__LINE__);
+
+        // Explicit final cleanup uses the same disable-first cancellation
+        // path as runtime reset and must abort the active user request.
+        adapter.block_publish_until_disable = 1;
+        adapter.blocked_publish_key = "tx_7";
+        adapter.hold_cancelled_publish_return = 1;
+        adapter.publish_cancelled.reset();
+        adapter.cancel_observed.reset();
+        adapter.allow_cancelled_publish_return.reset();
+        adapter.publish_entered.reset();
+        adapter.publish_returned = 0;
+        cancelled_count_before_cleanup = adapter.cancelled_publish_count;
+        publish_count_before_cancel = adapter.publish_count["tx_7"];
+        cleanup_publish_request = gq_request::type_id::create(
+            "cleanup_publish_request");
+        cleanup_publish_request.add_desc(make_tx("cleanup_publish_tx", 501));
+        cleanup_publish_response = gq_response::type_id::create(
+            "cleanup_publish_response");
+        cleanup_publish_returned = 0;
+        env_cleanup_returned = 0;
+        fork : cleanup_blocked_publish
+            begin
+                tx_engine.submit_batch(cleanup_publish_request,
+                                       cleanup_publish_response);
+                cleanup_publish_returned = 1;
+            end
+        join_none
+        adapter.publish_entered.wait_on();
+        fork : cleanup_cancels_publish
+            begin
+                env.cleanup();
+                env_cleanup_returned = 1;
+            end
+        join_none
+        adapter.cancel_observed.wait_on();
+        lifetime_ring_free_before = mem.ring_free_calls;
+        lifetime_desc_free_before = mem.descriptor_free_calls;
+        #1ns;
+        if (cleanup_publish_returned || env_cleanup_returned ||
+            adapter.publish_returned ||
+            mem.ring_free_calls != lifetime_ring_free_before ||
+            mem.descriptor_free_calls != lifetime_desc_free_before ||
+            mem.pre_quiesce_desc_free || mem.pre_quiesce_ring_free)
+            `uvm_fatal("RESET_PUBLISH_LIFETIME",
+                       "cleanup released publish resources before publish returned")
+        adapter.allow_cancelled_publish_return.trigger();
+        for (int unsigned poll = 0; poll < 200; poll++) begin
+            #1ns;
+            if (cleanup_publish_returned && env_cleanup_returned)
+                break;
+        end
+        if (!cleanup_publish_returned ||
+            cleanup_publish_response.status != GQ_ABORTED_BY_RESET)
+            `uvm_fatal("RESET_PUBLISH_CANCEL",
+                       "blocked publish request was not cleanup-aborted")
+        if (!env_cleanup_returned || adapter.cancelled_publish_count !=
+            cancelled_count_before_cleanup + 1)
+            `uvm_fatal("RESET_PUBLISH_CANCEL",
+                       "cleanup did not quiesce exactly one blocked publish")
+        if (adapter.post_disable_publish ||
+            adapter.publish_count["tx_7"] != publish_count_before_cancel)
+            `uvm_fatal("RESET_PUBLISH_CANCEL",
+                       "cleanup-canceled publish became visible after disable")
+        if (tx_engine.ring_base() != 0 || tx_engine.outstanding_count() != 0)
+            `uvm_fatal("RESET_PUBLISH_CANCEL",
+                       "cleanup freed or retained the wrong publish resources")
+        adapter.block_publish_until_disable = 0;
+        adapter.blocked_publish_key = "";
+        adapter.hold_cancelled_publish_return = 0;
+        mem.enforce_publish_quiescence = 0;
         mem.leak_check(`__FILE__, `__LINE__);
 
         irq_engine.initialize();
@@ -1202,6 +1550,72 @@ class gq_reset_test extends uvm_test;
                        "cleanup joiners did not preserve one terminal teardown")
         stale_adapter.disable_delay = 0;
         stale_mem.leak_check(`__FILE__, `__LINE__);
+
+        // Cleanup must cancel a reset-release RX repost without returning
+        // before release_reset has committed its final lifecycle state.
+        repost_engine.initialize();
+        repost_profile = gq_deterministic_refill_profile::type_id::create(
+            "repost_profile");
+        repost_profile.initial_post_count  = 1;
+        repost_profile.low_watermark       = 0;
+        repost_profile.high_watermark      = 1;
+        repost_profile.restart_after_reset = 1;
+        repost_profile.base_len            = 64;
+        repost_start_request = gq_request::type_id::create(
+            "repost_start_request");
+        repost_start_request.kind = GQ_START_RX;
+        repost_start_request.set_refill_profile(repost_profile);
+        repost_start_response = gq_response::type_id::create(
+            "repost_start_response");
+        repost_engine.start_rx(repost_start_request, repost_start_response);
+        if (repost_start_response.status != GQ_OK ||
+            repost_adapter.publish_count["rx_22"] != 1)
+            `uvm_fatal("RESET_REPOST_CLEANUP",
+                       "standalone RX startup did not publish")
+        repost_engine.assert_reset();
+        repost_adapter.block_publish_until_disable = 1;
+        repost_adapter.blocked_publish_key = "rx_22";
+        repost_adapter.publish_cancelled.reset();
+        repost_adapter.publish_entered.reset();
+        repost_publish_count_before = repost_adapter.publish_count["rx_22"];
+        repost_disable_count_before = repost_adapter.disable_calls;
+        repost_release_returned = 0;
+        repost_cleanup_returned = 0;
+        fork : blocked_reset_repost
+            begin
+                repost_engine.release_reset();
+                repost_release_returned = 1;
+            end
+        join_none
+        repost_adapter.publish_entered.wait_on();
+        fork : cleanup_cancels_reset_repost
+            begin
+                repost_engine.cleanup();
+                repost_cleanup_returned = 1;
+            end
+        join_none
+        wait (repost_release_returned && repost_cleanup_returned);
+        repost_engine.configuration_done_for_test(repost_configuration_done);
+        if (!repost_configuration_done)
+            `uvm_fatal("RESET_REPOST_CLEANUP",
+                       "cleanup returned before reset release completed")
+        if (repost_adapter.cancelled_publish_count != 1 ||
+            repost_adapter.disable_calls != repost_disable_count_before + 1)
+            `uvm_fatal("RESET_REPOST_CLEANUP",
+                       "cleanup did not disable exactly once for blocked repost")
+        if (repost_adapter.post_disable_publish ||
+            repost_adapter.publish_count["rx_22"] !=
+                repost_publish_count_before)
+            `uvm_fatal("RESET_REPOST_CLEANUP",
+                       "cleanup-canceled reset repost became visible")
+        if (repost_engine.ring_base() != 0 ||
+            repost_engine.outstanding_count() != 0)
+            `uvm_fatal("RESET_REPOST_CLEANUP",
+                       "cleanup retained reset repost resources")
+        repost_adapter.block_publish_until_disable = 0;
+        repost_adapter.blocked_publish_key = "";
+        repost_mem.leak_check(`__FILE__, `__LINE__);
+
         disable reset_test_watchdog;
         phase.drop_objection(this);
     endtask

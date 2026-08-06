@@ -1,6 +1,24 @@
 `ifndef GQ_QUEUE_ENGINE_SVH
 `define GQ_QUEUE_ENGINE_SVH
 
+class gq_publish_operation;
+    gq_logical_seq_t old_tail;
+    gq_logical_seq_t new_tail;
+    gq_raw_ptr_t raw_tail;
+    longint unsigned request_epoch;
+    bit allow_during_reset;
+    uvm_event done;
+
+    function new(string name = "gq_publish_operation");
+        old_tail = 0;
+        new_tail = 0;
+        raw_tail = 0;
+        request_epoch = 0;
+        allow_during_reset = 0;
+        done = new({name, "_done"});
+    endfunction
+endclass
+
 class gq_queue_engine extends uvm_component;
     `uvm_component_utils(gq_queue_engine)
 
@@ -31,6 +49,8 @@ class gq_queue_engine extends uvm_component;
     protected bit configuration_in_progress;
     protected uvm_event cleanup_done;
     protected bit cleanup_in_progress;
+    protected bit publish_in_progress;
+    protected uvm_event active_publish_done;
     protected semaphore user_request_ordering;
     protected semaphore submit_serialization;
     protected semaphore completion_serialization;
@@ -73,6 +93,8 @@ class gq_queue_engine extends uvm_component;
         configuration_in_progress = 0;
         cleanup_done = null;
         cleanup_in_progress = 0;
+        publish_in_progress = 0;
+        active_publish_done = null;
         user_request_ordering = new(1);
         submit_serialization = new(1);
         completion_serialization = new(1);
@@ -704,7 +726,7 @@ class gq_queue_engine extends uvm_component;
     endtask
 
     // Caller holds submit_serialization. No caller may hold state_lock or
-    // completion_serialization while this task prepares or publishes.
+    // completion_serialization while this task prepares descriptors.
     // ownership_transferred stays set after installation even when a later
     // epoch check aborts the response; reset cleanup then owns final release.
     protected task submit_desc_batch_locked(
@@ -715,19 +737,24 @@ class gq_queue_engine extends uvm_component;
         input longint unsigned request_epoch,
         input bit allow_during_reset,
         output bit capacity_wait_required,
+        output bit publish_wait_required,
+        output uvm_event wait_publish_done,
+        output gq_publish_operation publish_op,
         output bit ownership_transferred);
         int unsigned batch_size;
         int unsigned attempted_count;
         gq_logical_seq_t old_tail;
         gq_logical_seq_t new_tail;
         gq_logical_seq_t seq;
-        gq_raw_ptr_t raw_tail;
         gq_addr_t slot_addr;
         byte packed_data[];
         bit seen_ids[int];
         bit stale_request;
 
         capacity_wait_required = 0;
+        publish_wait_required  = 0;
+        wait_publish_done      = null;
+        publish_op             = null;
         ownership_transferred  = 0;
         batch_size = descs.size();
         if (batch_size == 0 || batch_size > cfg.depth)
@@ -746,6 +773,12 @@ class gq_queue_engine extends uvm_component;
         if (stale_request || (!ready_value && !allow_during_reset)) begin
             if (stale_request)
                 abort_response_by_reset(response);
+            state_lock.put(1);
+            return;
+        end
+        if (publish_in_progress) begin
+            publish_wait_required = 1;
+            wait_publish_done = active_publish_done;
             state_lock.put(1);
             return;
         end
@@ -807,57 +840,123 @@ class gq_queue_engine extends uvm_component;
             refill_profile = activation_profile;
             rx_started     = 1;
         end
+        publish_op = new($sformatf("%s_publish_%0d", get_name(), old_tail));
+        publish_op.old_tail = old_tail;
+        publish_op.new_tail = new_tail;
+        publish_op.raw_tail = cfg.ptr_codec.encode_publish(
+            old_tail, new_tail, cfg.depth);
+        publish_op.request_epoch = request_epoch;
+        publish_op.allow_during_reset = allow_during_reset;
+        publish_in_progress = 1;
+        active_publish_done = publish_op.done;
         check_state_invariants("submit commit");
-        state_lock.put(1);
-        raw_tail = cfg.ptr_codec.encode_publish(old_tail, new_tail, cfg.depth);
-        adapter.publish(cfg.role, cfg.queue_id, raw_tail);
-        state_lock.get(1);
-        // A completion cannot time out before the hardware has observed its
-        // published tail. Entries retired while a timed publish was in flight
-        // are intentionally skipped instead of recreating stale metadata.
-        for (seq = old_tail; seq < new_tail; seq++) begin
-            if (outstanding.exists(seq)) begin
-                outstanding_since[seq] = $time;
-                outstanding_published[seq] = 1;
-            end
-        end
-        if (logical_head_seq >= old_tail && logical_head_seq < new_tail)
-            oldest_timeout_reported = 0;
-        stale_request = shutdown_requested ||
-                        reset_epoch_value != request_epoch ||
-                        (reset_requested_value && !allow_during_reset);
-        if (stale_request)
-            abort_response_by_reset(response);
-        else begin
-            response.status          = GQ_OK;
-            response.committed_count = int'(batch_size);
-            response.reset_epoch     = request_epoch;
-        end
         state_lock.put(1);
     endtask
 
-    // Caller holds user_request_ordering. Capacity waits retain that FIFO
-    // position but release submit_serialization so completion-triggered refill
-    // and later completion drains can make progress. Each retry revalidates
-    // readiness, descriptor identity, capacity, and the current logical tail.
+    protected task publish_and_complete(
+        input gq_publish_operation publish_op,
+        inout gq_response response);
+        gq_logical_seq_t seq;
+        bit operation_current;
+        bit lifecycle_current;
+
+        if (publish_op == null)
+            return;
+
+        state_lock.get(1);
+        operation_current = publish_in_progress &&
+                            active_publish_done == publish_op.done;
+        lifecycle_current = operation_current && !shutdown_requested &&
+                            reset_epoch_value == publish_op.request_epoch &&
+                            (!reset_requested_value ||
+                             publish_op.allow_during_reset) &&
+                            (ready_value || publish_op.allow_during_reset);
+        if (!lifecycle_current) begin
+            abort_response_by_reset(response);
+            if (operation_current) begin
+                publish_in_progress = 0;
+                if (active_publish_done == publish_op.done)
+                    active_publish_done = null;
+            end
+            state_lock.put(1);
+            publish_op.done.trigger();
+            return;
+        end
+        state_lock.put(1);
+
+        adapter.publish(cfg.role, cfg.queue_id, publish_op.raw_tail);
+
+        state_lock.get(1);
+        operation_current = publish_in_progress &&
+                            active_publish_done == publish_op.done;
+        lifecycle_current = operation_current && !shutdown_requested &&
+                            reset_epoch_value == publish_op.request_epoch &&
+                            (!reset_requested_value ||
+                             publish_op.allow_during_reset) &&
+                            (ready_value || publish_op.allow_during_reset);
+        // A completion cannot time out before the hardware has observed its
+        // published tail. Entries retired while a timed publish was in flight
+        // are intentionally skipped instead of recreating stale metadata.
+        if (lifecycle_current) begin
+            for (seq = publish_op.old_tail;
+                 seq < publish_op.new_tail; seq++) begin
+                if (outstanding.exists(seq)) begin
+                    outstanding_since[seq] = $time;
+                    outstanding_published[seq] = 1;
+                end
+            end
+            if (logical_head_seq >= publish_op.old_tail &&
+                logical_head_seq < publish_op.new_tail)
+                oldest_timeout_reported = 0;
+            response.status          = GQ_OK;
+            response.committed_count = int'(publish_op.new_tail -
+                                             publish_op.old_tail);
+            response.reset_epoch     = publish_op.request_epoch;
+        end else
+            abort_response_by_reset(response);
+        if (operation_current) begin
+            publish_in_progress = 0;
+            if (active_publish_done == publish_op.done)
+                active_publish_done = null;
+        end
+        state_lock.put(1);
+        publish_op.done.trigger();
+    endtask
+
+    // User callers retain user_request_ordering across waits. Every retry
+    // releases submit_serialization before waiting and revalidates lifecycle,
+    // descriptor identity, capacity, and the current logical tail.
     protected task submit_desc_batch_ordered(
         input gq_desc_base descs[$],
         inout gq_response response,
         input bit activate_rx,
         input gq_refill_profile activation_profile,
         input longint unsigned request_epoch,
+        input bit allow_during_reset,
+        output gq_publish_operation publish_op,
         output bit ownership_transferred);
         bit capacity_wait_required;
+        bit publish_wait_required;
+        uvm_event wait_publish_done;
 
+        publish_op = null;
         ownership_transferred = 0;
         forever begin
             submit_serialization.get(1);
             submit_desc_batch_locked(descs, response, activate_rx,
                                      activation_profile,
-                                     request_epoch, 0,
+                                     request_epoch, allow_during_reset,
                                      capacity_wait_required,
+                                     publish_wait_required,
+                                     wait_publish_done,
+                                     publish_op,
                                      ownership_transferred);
             submit_serialization.put(1);
+            if (publish_wait_required) begin
+                if (wait_publish_done != null && !wait_publish_done.is_on())
+                    wait_publish_done.wait_on();
+                continue;
+            end
             if (!capacity_wait_required)
                 return;
             space_available.wait_on();
@@ -867,6 +966,7 @@ class gq_queue_engine extends uvm_component;
 
     task submit_batch(input gq_request request, inout gq_response response);
         gq_desc_base request_descs[$];
+        gq_publish_operation publish_op;
         longint unsigned request_epoch;
         bit ownership_transferred;
 
@@ -883,8 +983,10 @@ class gq_queue_engine extends uvm_component;
 
         user_request_ordering.get(1);
         submit_desc_batch_ordered(request_descs, response, 0, null,
-                                  request_epoch, ownership_transferred);
+                                  request_epoch, 0, publish_op,
+                                  ownership_transferred);
         user_request_ordering.put(1);
+        publish_and_complete(publish_op, response);
     endtask
 
     task start_rx(input gq_request request, inout gq_response response);
@@ -892,6 +994,7 @@ class gq_queue_engine extends uvm_component;
         gq_refill_profile cloned_profile;
         gq_desc_base generated_descs[$];
         gq_desc_base desc;
+        gq_publish_operation publish_op;
         gq_logical_seq_t first_seq;
         longint unsigned request_epoch;
         string reason;
@@ -974,11 +1077,12 @@ class gq_queue_engine extends uvm_component;
 
         submit_serialization.put(1);
         submit_desc_batch_ordered(generated_descs, response, 1,
-                                  cloned_profile, request_epoch,
+                                  cloned_profile, request_epoch, 0, publish_op,
                                   ownership_transferred);
+        user_request_ordering.put(1);
+        publish_and_complete(publish_op, response);
         if (response.status != GQ_OK && !ownership_transferred)
             release_generated(generated_descs);
-        user_request_ordering.put(1);
     endtask
 
     // Called only after at least one descriptor was actually retired. It
@@ -989,10 +1093,13 @@ class gq_queue_engine extends uvm_component;
         gq_desc_base generated_descs[$];
         gq_desc_base desc;
         gq_response response;
+        gq_publish_operation publish_op;
+        uvm_event wait_publish_done;
         gq_logical_seq_t posted;
         gq_logical_seq_t first_seq;
         int unsigned refill_count;
         bit capacity_wait_required;
+        bit publish_wait_required;
         bit refill_active;
         bit should_refill;
         bit ownership_transferred;
@@ -1007,68 +1114,110 @@ class gq_queue_engine extends uvm_component;
         if (!refill_active)
             return;
 
-        submit_serialization.get(1);
-        state_lock.get(1);
-        active_profile = refill_profile;
-        posted         = logical_tail_seq - logical_head_seq;
-        first_seq      = logical_tail_seq;
-        should_refill  = cfg.role == GQ_RX && ready_value && rx_started &&
-                         !reset_requested_value && !shutdown_requested &&
-                         reset_epoch_value == refill_epoch &&
-                         active_profile != null &&
-                         posted <= active_profile.low_watermark;
-        if (should_refill)
-            refill_count = int'(active_profile.high_watermark - posted);
-        else
-            refill_count = 0;
-        state_lock.put(1);
+        forever begin
+            generated_descs.delete();
+            publish_op = null;
+            wait_publish_done = null;
+            ownership_transferred = 0;
 
-        if (!should_refill) begin
-            submit_serialization.put(1);
-            return;
-        end
+            submit_serialization.get(1);
+            state_lock.get(1);
+            active_profile = refill_profile;
+            should_refill  = cfg.role == GQ_RX && ready_value && rx_started &&
+                             !reset_requested_value && !shutdown_requested &&
+                             reset_epoch_value == refill_epoch &&
+                             active_profile != null;
+            if (should_refill && publish_in_progress)
+                wait_publish_done = active_publish_done;
+            if (should_refill && wait_publish_done == null) begin
+                posted        = logical_tail_seq - logical_head_seq;
+                first_seq     = logical_tail_seq;
+                should_refill = posted <= active_profile.low_watermark;
+                if (should_refill)
+                    refill_count = int'(
+                        active_profile.high_watermark - posted);
+            end
+            state_lock.put(1);
 
-        for (int unsigned i = 0; i < refill_count; i++) begin
-            desc = active_profile.create_desc(cfg.queue_id, first_seq + i);
-            if (desc == null) begin
-                release_generated(generated_descs);
-                `uvm_error("GQ_REFILL", $sformatf(
-                    "role=RX queue_id=%0d could not create refill descriptor at logical sequence %0d",
-                    cfg.queue_id, first_seq + i))
+            if (wait_publish_done != null) begin
+                submit_serialization.put(1);
+                if (!wait_publish_done.is_on())
+                    wait_publish_done.wait_on();
+                continue;
+            end
+
+            if (!should_refill) begin
                 submit_serialization.put(1);
                 return;
             end
-            generated_descs.push_back(desc);
-        end
 
-        initialize_response(response, "refill_response");
-        submit_desc_batch_locked(generated_descs, response, 0, null,
-                                 refill_epoch, 0,
-                                 capacity_wait_required,
-                                 ownership_transferred);
-        if (response.status != GQ_OK && !ownership_transferred) begin
-            release_generated(generated_descs);
-            if (response.status != GQ_ABORTED_BY_RESET)
-                `uvm_error("GQ_REFILL", $sformatf(
-                    "role=RX queue_id=%0d failed to publish %0d refill descriptors after DUT progress",
-                    cfg.queue_id, refill_count))
+            for (int unsigned i = 0; i < refill_count; i++) begin
+                desc = active_profile.create_desc(
+                    cfg.queue_id, first_seq + i);
+                if (desc == null) begin
+                    release_generated(generated_descs);
+                    `uvm_error("GQ_REFILL", $sformatf(
+                        "role=RX queue_id=%0d could not create refill descriptor at logical sequence %0d",
+                        cfg.queue_id, first_seq + i))
+                    submit_serialization.put(1);
+                    return;
+                end
+                generated_descs.push_back(desc);
+            end
+
+            initialize_response(response, "refill_response");
+            submit_desc_batch_locked(generated_descs, response, 0, null,
+                                     refill_epoch, 0,
+                                     capacity_wait_required,
+                                     publish_wait_required,
+                                     wait_publish_done,
+                                     publish_op,
+                                     ownership_transferred);
+            submit_serialization.put(1);
+
+            if (publish_wait_required) begin
+                release_generated(generated_descs);
+                if (wait_publish_done != null &&
+                    !wait_publish_done.is_on())
+                    wait_publish_done.wait_on();
+                continue;
+            end
+            if (capacity_wait_required) begin
+                release_generated(generated_descs);
+                space_available.wait_on();
+                space_available.reset();
+                continue;
+            end
+
+            publish_and_complete(publish_op, response);
+            if (response.status != GQ_OK && !ownership_transferred) begin
+                release_generated(generated_descs);
+                if (response.status != GQ_ABORTED_BY_RESET)
+                    `uvm_error("GQ_REFILL", $sformatf(
+                        "role=RX queue_id=%0d failed to publish %0d refill descriptors after DUT progress",
+                        cfg.queue_id, refill_count))
+            end
+            return;
         end
-        submit_serialization.put(1);
     endtask
 
     // Caller has already made reset/shutdown visible and awakened capacity
     // waiters. The fixed quiesce order is submit -> completion -> state.
-    protected task release_queue_resources(input bit preserve_restart_profile);
+    protected task release_queue_resources(
+        input bit preserve_restart_profile,
+        input bit queue_already_disabled = 0);
         gq_logical_seq_t seq;
         gq_desc_base cleanup_descs[$];
         gq_refill_profile preserved_profile;
         bit release_configured;
         bit release_allocated;
         gq_addr_t release_ring_base;
+        uvm_event release_publish_done;
 
         submit_serialization.get(1);
         completion_serialization.get(1);
         state_lock.get(1);
+        release_publish_done = publish_in_progress ? active_publish_done : null;
         if (outstanding.first(seq)) begin
             do begin
                 if (outstanding[seq] != null)
@@ -1106,8 +1255,10 @@ class gq_queue_engine extends uvm_component;
         // Timed adapter work retains no engine lock. The queue remains
         // externally owned until disable completes, so descriptor and ring
         // release must stay after this call.
-        if (release_configured)
+        if (release_configured && !queue_already_disabled)
             adapter.disable_queue(cfg.role, cfg.queue_id);
+        if (release_publish_done != null && !release_publish_done.is_on())
+            release_publish_done.wait_on();
         foreach (cleanup_descs[i])
             cleanup_descs[i].release_owned();
         if (release_allocated)
@@ -1189,11 +1340,11 @@ class gq_queue_engine extends uvm_component;
         gq_desc_base generated_descs[$];
         gq_desc_base desc;
         gq_response response;
+        gq_publish_operation publish_op;
         longint unsigned release_epoch;
         longint unsigned new_ring_bytes;
         gq_addr_t new_ring_base;
         gq_addr_t new_status_addr;
-        bit capacity_wait_required;
         bit ownership_transferred;
         bit release_allowed;
         bit release_owner;
@@ -1269,20 +1420,19 @@ class gq_queue_engine extends uvm_component;
                 end
                 state_lock.put(1);
             end else if (generated_descs.size() ==
-                         recovery_profile.initial_post_count) begin
+                recovery_profile.initial_post_count) begin
                 initialize_response(response, "reset_rx_response");
-                submit_serialization.get(1);
-                submit_desc_batch_locked(generated_descs, response, 1,
-                                         recovery_profile, release_epoch, 1,
-                                         capacity_wait_required,
-                                         ownership_transferred);
-                submit_serialization.put(1);
+                submit_desc_batch_ordered(generated_descs, response, 1,
+                                          recovery_profile, release_epoch, 1,
+                                          publish_op, ownership_transferred);
+                publish_and_complete(publish_op, response);
                 if (response.status != GQ_OK) begin
                     if (!ownership_transferred)
                         release_generated(generated_descs);
-                    `uvm_error("GQ_RESET_RX", $sformatf(
-                        "role=RX queue_id=%0d failed to repost %0d descriptors",
-                        cfg.queue_id, generated_descs.size()))
+                    if (response.status != GQ_ABORTED_BY_RESET)
+                        `uvm_error("GQ_RESET_RX", $sformatf(
+                            "role=RX queue_id=%0d failed to repost %0d descriptors",
+                            cfg.queue_id, generated_descs.size()))
                     state_lock.get(1);
                     refill_profile = null;
                     rx_started     = 0;
@@ -1315,7 +1465,9 @@ class gq_queue_engine extends uvm_component;
         uvm_event ack_done;
         uvm_event reset_teardown_done;
         uvm_event configure_done;
+        uvm_event configure_publish_done;
         uvm_event operation_done;
+        bit configure_publish_disabled;
 
         cleanup_owner = 0;
         completion_commit_boundary.get(1);
@@ -1346,8 +1498,11 @@ class gq_queue_engine extends uvm_component;
                 if (reset_finish_done != null &&
                     !reset_finish_done.is_on())
                     reset_teardown_done = reset_finish_done;
-                if (configuration_in_progress)
+                if (configuration_in_progress) begin
                     configure_done = configuration_done;
+                    if (publish_in_progress)
+                        configure_publish_done = active_publish_done;
+                end
             end
         end
         state_lock.put(1);
@@ -1364,10 +1519,17 @@ class gq_queue_engine extends uvm_component;
         quiesce_completion_activity(wait_cancel, wait_done, ack_done);
         if (reset_teardown_done != null)
             reset_teardown_done.wait_on();
+        configure_publish_disabled = 0;
+        if (configure_publish_done != null) begin
+            adapter.disable_queue(cfg.role, cfg.queue_id);
+            configure_publish_disabled = 1;
+            if (!configure_publish_done.is_on())
+                configure_publish_done.wait_on();
+        end
         if (configure_done != null)
             configure_done.wait_on();
         if (cleanup_required)
-            release_queue_resources(0);
+            release_queue_resources(0, configure_publish_disabled);
         space_available.reset();
         state_lock.get(1);
         cleanup_in_progress = 0;
