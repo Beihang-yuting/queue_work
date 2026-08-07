@@ -112,7 +112,20 @@ class gq_queue_engine extends uvm_component;
 
     function void bind_completion_port(
         uvm_analysis_port #(gq_desc_base) port_handle);
-        completion_ap = port_handle;
+        if (port_handle == null) begin
+            `uvm_fatal("GQ_COMPLETION_PORT",
+                       "cannot bind a null completion analysis port")
+            return;
+        end
+        if (completion_ap == null) begin
+            completion_ap = port_handle;
+            return;
+        end
+        if (completion_ap != port_handle) begin
+            `uvm_fatal("GQ_COMPLETION_PORT",
+                       "completion analysis port is already bound")
+            return;
+        end
     endfunction
 
     // Return newly configured resources as local ownership. The lifecycle

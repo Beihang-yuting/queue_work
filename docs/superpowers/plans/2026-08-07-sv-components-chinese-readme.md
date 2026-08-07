@@ -654,9 +654,25 @@ completion_ap = null;
 ```systemverilog
 function void bind_completion_port(
     uvm_analysis_port #(gq_desc_base) port_handle);
-    completion_ap = port_handle;
+    if (port_handle == null) begin
+        `uvm_fatal("GQ_COMPLETION_PORT",
+                   "cannot bind a null completion analysis port")
+        return;
+    end
+    if (completion_ap == null) begin
+        completion_ap = port_handle;
+        return;
+    end
+    if (completion_ap != port_handle) begin
+        `uvm_fatal("GQ_COMPLETION_PORT",
+                   "completion analysis port is already bound")
+        return;
+    end
 endfunction
 ```
+
+从未调用 `bind_completion_port()` 的 direct engine 仍允许保持
+unbound/null；它会正常退休 descriptor，但不发布 analysis transaction。
 
 在完成退休路径中把无条件 write 改为：
 
@@ -731,10 +747,11 @@ endfunction
 
 - [ ] **Step 4: 更新 focused tests 的 analysis port 绑定**
 
-在 `gq_completion_test` 的成员声明中加入四个由测试拥有的 port：
+在 `gq_completion_test` 的成员声明中加入五个由测试拥有的 port：
 
 ```systemverilog
 uvm_analysis_port #(gq_desc_base) engine_completion_ap;
+uvm_analysis_port #(gq_desc_base) rebind_completion_ap;
 uvm_analysis_port #(gq_desc_base) poll_completion_ap;
 uvm_analysis_port #(gq_desc_base) irq_completion_ap;
 uvm_analysis_port #(gq_desc_base) rx_completion_ap;
@@ -744,6 +761,7 @@ uvm_analysis_port #(gq_desc_base) rx_completion_ap;
 
 ```systemverilog
 engine_completion_ap = new("engine_completion_ap", this);
+rebind_completion_ap = new("rebind_completion_ap", this);
 poll_completion_ap   = new("poll_completion_ap", this);
 irq_completion_ap    = new("irq_completion_ap", this);
 rx_completion_ap     = new("rx_completion_ap", this);
@@ -771,6 +789,59 @@ function void connect_phase(uvm_phase phase);
     worker_monitor.completion_ap.connect(worker_collector.analysis_export);
 endfunction
 ```
+
+为最终 TDD contract test 增加只捕获 engine 上固定 ID
+`GQ_COMPLETION_PORT` 的 fatal catcher，并在 `engine_completion_ap` 已绑定后
+执行 null、不同 handle、相同 handle 三次绑定：
+
+```systemverilog
+class gq_completion_port_catcher extends uvm_report_catcher;
+    `uvm_object_utils(gq_completion_port_catcher)
+
+    int unsigned caught_port_fatals;
+
+    function new(string name = "gq_completion_port_catcher");
+        super.new(name);
+        caught_port_fatals = 0;
+    endfunction
+
+    virtual function action_e catch();
+        if (get_severity() == UVM_FATAL &&
+            get_id() == "GQ_COMPLETION_PORT") begin
+            caught_port_fatals++;
+            return CAUGHT;
+        end
+        return THROW;
+    endfunction
+endclass
+
+function void check_completion_port_binding();
+    gq_completion_port_catcher catcher;
+    int unsigned null_bind_count;
+    int unsigned rebind_count;
+    int unsigned same_bind_count;
+
+    catcher = new("completion_port_catcher");
+    uvm_report_cb::add(engine, catcher);
+    engine.bind_completion_port(null);
+    null_bind_count = catcher.caught_port_fatals;
+    engine.bind_completion_port(rebind_completion_ap);
+    rebind_count = catcher.caught_port_fatals;
+    engine.bind_completion_port(engine_completion_ap);
+    same_bind_count = catcher.caught_port_fatals;
+    uvm_report_cb::delete(engine, catcher);
+
+    if (null_bind_count != 1 || rebind_count != 2 ||
+        same_bind_count != 2)
+        `uvm_fatal("COMPLETE_PORT_BIND", $sformatf(
+            "completion port bind fatal counts expected 1/2/2, got %0d/%0d/%0d",
+            null_bind_count, rebind_count, same_bind_count))
+endfunction
+```
+
+在 `engine.initialize()` 后调用该检查。null 后计数必须为 1，不同 handle 后
+必须为 2，相同 handle 后仍为 2；随后既有 completion 流程必须继续由原
+`engine_completion_ap` collector 收包，以证明无效调用没有改变绑定。
 
 在 `check_run_phase_worker()` 中把 component 路径和检查改为：
 
@@ -838,10 +909,13 @@ if (env.get_monitor("tx_1") == null ||
 验证旧 API 已清除：
 
 ```bash
-rg -n 'gq_completion_worker|completion_worker|run_completion_worker|engine\.completion_ap' src tb
+rg -n 'gq_completion_worker|run_completion_worker|engine\.completion_ap' src tb README.md
+rg -n 'completion_worker' src tb README.md
 ```
 
-Expected：无输出。
+Expected：精确旧 class/task/direct API 检查无输出；宽泛的
+`completion_worker` 检查只允许输出 `tb/tests/gq_agent_test.sv` 中确认 legacy
+component 不存在的断言。
 
 - [ ] **Step 5: 运行 focused GREEN**
 
@@ -1303,14 +1377,16 @@ make check-layout
 bash -n scripts/check_sv_layout.sh
 make -n run TEST=gq_agent_test
 rg --files src tb | rg '\.svh$'
-rg -n 'gq_completion_worker|completion_worker|run_completion_worker|engine\.completion_ap' src tb README.md
+rg -n 'gq_completion_worker|run_completion_worker|engine\.completion_ap' src tb README.md
+rg -n 'completion_worker' src tb README.md
 git diff --check master..HEAD
 git status --short
 git submodule status
 ```
 
-Expected：两个 `rg` 旧布局/API 检查无输出；其他命令 exit 0；submodule 为
-前导空格的
+Expected：旧布局和精确旧 API 的两个 `rg` 检查无输出；宽泛的
+`completion_worker` 检查只允许输出 `tb/tests/gq_agent_test.sv` 中确认 legacy
+component 不存在的断言；其他命令 exit 0；submodule 为前导空格的
 `3b9e000d5df4d10efbb3029f43605e0362e0caca host_mem`。
 
 - [ ] **Step 2: 在 53 上运行八项完整 VCS 回归**

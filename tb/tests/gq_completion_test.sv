@@ -104,6 +104,26 @@ class gq_completion_addr_catcher extends uvm_report_catcher;
     endfunction
 endclass
 
+class gq_completion_port_catcher extends uvm_report_catcher;
+    `uvm_object_utils(gq_completion_port_catcher)
+
+    int unsigned caught_port_fatals;
+
+    function new(string name = "gq_completion_port_catcher");
+        super.new(name);
+        caught_port_fatals = 0;
+    endfunction
+
+    virtual function action_e catch();
+        if (get_severity() == UVM_FATAL &&
+            get_id() == "GQ_COMPLETION_PORT") begin
+            caught_port_fatals++;
+            return CAUGHT;
+        end
+        return THROW;
+    endfunction
+endclass
+
 class gq_completion_test_engine extends gq_queue_engine;
     `uvm_component_utils(gq_completion_test_engine)
 
@@ -213,6 +233,7 @@ class gq_completion_test extends uvm_test;
     gq_queue_engine        cleanup_engine;
     gq_counting_completion cleanup_source;
     uvm_analysis_port #(gq_desc_base) engine_completion_ap;
+    uvm_analysis_port #(gq_desc_base) rebind_completion_ap;
     uvm_analysis_port #(gq_desc_base) poll_completion_ap;
     uvm_analysis_port #(gq_desc_base) irq_completion_ap;
     uvm_analysis_port #(gq_desc_base) rx_completion_ap;
@@ -244,6 +265,7 @@ class gq_completion_test extends uvm_test;
         super.build_phase(phase);
 
         engine_completion_ap = new("engine_completion_ap", this);
+        rebind_completion_ap = new("rebind_completion_ap", this);
         poll_completion_ap   = new("poll_completion_ap", this);
         irq_completion_ap    = new("irq_completion_ap", this);
         rx_completion_ap     = new("rx_completion_ap", this);
@@ -468,6 +490,29 @@ class gq_completion_test extends uvm_test;
             `uvm_fatal("MONITOR_PATH", "could not find tx_20 monitor")
         worker_monitor.completion_ap.connect(
             worker_collector.analysis_export);
+    endfunction
+
+    function void check_completion_port_binding();
+        gq_completion_port_catcher catcher;
+        int unsigned null_bind_count;
+        int unsigned rebind_count;
+        int unsigned same_bind_count;
+
+        catcher = new("completion_port_catcher");
+        uvm_report_cb::add(engine, catcher);
+        engine.bind_completion_port(null);
+        null_bind_count = catcher.caught_port_fatals;
+        engine.bind_completion_port(rebind_completion_ap);
+        rebind_count = catcher.caught_port_fatals;
+        engine.bind_completion_port(engine_completion_ap);
+        same_bind_count = catcher.caught_port_fatals;
+        uvm_report_cb::delete(engine, catcher);
+
+        if (null_bind_count != 1 || rebind_count != 2 ||
+            same_bind_count != 2)
+            `uvm_fatal("COMPLETE_PORT_BIND", $sformatf(
+                "completion port bind fatal counts expected 1/2/2, got %0d/%0d/%0d",
+                null_bind_count, rebind_count, same_bind_count))
     endfunction
 
     function void check_tail_memory_endian();
@@ -1088,6 +1133,7 @@ class gq_completion_test extends uvm_test;
 
         phase.raise_objection(this);
         engine.initialize();
+        check_completion_port_binding();
         check_completion_validation();
         check_tail_memory_endian();
         check_tail_engine_integration();
