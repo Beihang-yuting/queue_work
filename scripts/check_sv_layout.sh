@@ -30,13 +30,18 @@ for required_file in \
     fi
 done
 
+if [[ ! -f README.md ]]; then
+    printf 'required README file not found: README.md\n' >&2
+    status=1
+fi
+
 if ((status != 0)); then
     exit "$status"
 fi
 
 stale_files=()
 if stale_files_output=$(
-    find src tb/mocks tb/tests -type f -name '*.svh' -print | sort
+    find src tb -type f -name '*.svh' -print | sort
 ); then
     if [[ -n "$stale_files_output" ]]; then
         mapfile -t stale_files <<< "$stale_files_output"
@@ -56,8 +61,7 @@ fi
 all_svh_includes=()
 include_pattern='`include[[:space:]]+"[^"]+\.svh"'
 if all_svh_includes_output=$(
-    rg -n "$include_pattern" \
-        src/gq/gq_pkg.sv src/mailbox/mailbox_pkg.sv tb/gq_test_pkg.sv \
+    rg --hidden --no-ignore -n "$include_pattern" src tb \
 ); then
     mapfile -t all_svh_includes <<< "$all_svh_includes_output"
 else
@@ -86,7 +90,7 @@ fi
 stale_guards=()
 guard_pattern='^[[:space:]]*`(ifndef|define)[[:space:]]+[A-Z0-9_]+_SVH[[:space:]]*$'
 if stale_guards_output=$(
-    rg -n "$guard_pattern" src tb/mocks tb/tests
+    rg --hidden --no-ignore -n "$guard_pattern" src tb
 ); then
     mapfile -t stale_guards <<< "$stale_guards_output"
 else
@@ -102,5 +106,48 @@ if ((${#stale_guards[@]} != 0)); then
     printf '  %s\n' "${stale_guards[@]}" >&2
     status=1
 fi
+
+stale_readme_refs=()
+stale_readme_pattern='gq_completion_worker|run_completion_worker|(?:src|tb)/[^`[:space:]]+\.svh'
+if stale_readme_refs_output=$(rg -n "$stale_readme_pattern" README.md); then
+    mapfile -t stale_readme_refs <<< "$stale_readme_refs_output"
+else
+    scan_status=$?
+    if ((scan_status != 1)); then
+        printf 'failed to scan README for stale source or worker references (exit %d)\n' \
+            "$scan_status" >&2
+        exit "$scan_status"
+    fi
+fi
+if ((${#stale_readme_refs[@]} != 0)); then
+    printf 'stale README source or worker references remain:\n' >&2
+    printf '  %s\n' "${stale_readme_refs[@]}" >&2
+    status=1
+fi
+
+required_readme_refs=(
+    'src/gq/gq_pkg.sv'
+    'src/mailbox/mailbox_pkg.sv'
+    'tb/gq_test_pkg.sv'
+    'gq_monitor'
+    'get_monitor("tx_1")'
+    'monitor.completion_ap.connect'
+)
+for required_ref in "${required_readme_refs[@]}"; do
+    if rg -Fq "$required_ref" README.md; then
+        continue
+    else
+        scan_status=$?
+        if ((scan_status != 1)); then
+            printf 'failed to scan README for required reference %s (exit %d)\n' \
+                "$required_ref" "$scan_status" >&2
+            exit "$scan_status"
+        fi
+    fi
+
+    printf 'README is missing required reference: %s\n' \
+        "$required_ref" >&2
+    status=1
+done
 
 exit "$status"
