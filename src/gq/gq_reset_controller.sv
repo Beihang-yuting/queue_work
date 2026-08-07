@@ -1,5 +1,5 @@
-`ifndef GQ_RESET_CONTROLLER_SVH
-`define GQ_RESET_CONTROLLER_SVH
+`ifndef GQ_RESET_CONTROLLER_SV
+`define GQ_RESET_CONTROLLER_SV
 
 class gq_reset_controller extends uvm_component;
     `uvm_component_utils(gq_reset_controller)

@@ -1,5 +1,5 @@
-`ifndef GQ_CONFIG_TEST_SVH
-`define GQ_CONFIG_TEST_SVH
+`ifndef GQ_CONFIG_TEST_SV
+`define GQ_CONFIG_TEST_SV
 
 class gq_config_test extends uvm_test;
     `uvm_component_utils(gq_config_test)

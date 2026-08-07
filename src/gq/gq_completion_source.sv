@@ -1,5 +1,5 @@
-`ifndef GQ_COMPLETION_SOURCE_SVH
-`define GQ_COMPLETION_SOURCE_SVH
+`ifndef GQ_COMPLETION_SOURCE_SV
+`define GQ_COMPLETION_SOURCE_SV
 
 virtual class gq_completion_source extends uvm_object;
     function new(string name = "gq_completion_source");

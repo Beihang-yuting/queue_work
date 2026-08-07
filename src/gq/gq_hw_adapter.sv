@@ -1,5 +1,5 @@
-`ifndef GQ_HW_ADAPTER_SVH
-`define GQ_HW_ADAPTER_SVH
+`ifndef GQ_HW_ADAPTER_SV
+`define GQ_HW_ADAPTER_SV
 
 virtual class gq_hw_adapter extends uvm_object;
     function new(string name = "gq_hw_adapter");

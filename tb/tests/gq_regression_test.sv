@@ -1,5 +1,5 @@
-`ifndef GQ_REGRESSION_TEST_SVH
-`define GQ_REGRESSION_TEST_SVH
+`ifndef GQ_REGRESSION_TEST_SV
+`define GQ_REGRESSION_TEST_SV
 
 class gq_regression_zero_completion extends gq_completion_source;
     `uvm_object_utils(gq_regression_zero_completion)

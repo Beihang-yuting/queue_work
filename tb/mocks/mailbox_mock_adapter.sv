@@ -1,5 +1,5 @@
-`ifndef MAILBOX_MOCK_ADAPTER_SVH
-`define MAILBOX_MOCK_ADAPTER_SVH
+`ifndef MAILBOX_MOCK_ADAPTER_SV
+`define MAILBOX_MOCK_ADAPTER_SV
 
 class mailbox_mock_adapter extends gq_hw_adapter;
     `uvm_object_utils(mailbox_mock_adapter)

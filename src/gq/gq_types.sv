@@ -1,5 +1,5 @@
-`ifndef GQ_TYPES_SVH
-`define GQ_TYPES_SVH
+`ifndef GQ_TYPES_SV
+`define GQ_TYPES_SV
 
 typedef bit [63:0] gq_addr_t;
 typedef bit [31:0] gq_raw_ptr_t;

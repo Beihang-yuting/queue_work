@@ -1,5 +1,5 @@
-`ifndef GQ_ENV_SVH
-`define GQ_ENV_SVH
+`ifndef GQ_ENV_SV
+`define GQ_ENV_SV
 
 class gq_env extends uvm_env;
     `uvm_component_utils(gq_env)

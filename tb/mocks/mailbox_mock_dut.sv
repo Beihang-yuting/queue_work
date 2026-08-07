@@ -1,5 +1,5 @@
-`ifndef MAILBOX_MOCK_DUT_SVH
-`define MAILBOX_MOCK_DUT_SVH
+`ifndef MAILBOX_MOCK_DUT_SV
+`define MAILBOX_MOCK_DUT_SV
 
 class mailbox_mock_dut extends uvm_object;
     `uvm_object_utils(mailbox_mock_dut)

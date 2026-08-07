@@ -143,14 +143,14 @@ the complete seven-test VCS regression on `10.11.10.53`.
 
 ## 8. Expected Files
 
-- `src/gq/gq_hw_adapter.svh`: document the disable-driven cancellation contract.
-- `src/gq/gq_queue_engine.svh`: add publish owner/done lifecycle and reorder
+- `src/gq/gq_hw_adapter.sv`: document the disable-driven cancellation contract.
+- `src/gq/gq_queue_engine.sv`: add publish owner/done lifecycle and reorder
   teardown.
-- `tb/mocks/mailbox_mock_adapter.svh`: model the adapter contract.
-- `tb/tests/gq_submit_test.svh`: verify publish ordering without a held engine
+- `tb/mocks/mailbox_mock_adapter.sv`: model the adapter contract.
+- `tb/tests/gq_submit_test.sv`: verify publish ordering without a held engine
   semaphore.
-- `tb/tests/gq_reset_test.svh`: verify blocked publish cancellation and reset
+- `tb/tests/gq_reset_test.sv`: verify blocked publish cancellation and reset
   completion.
-- `tb/tests/gq_regression_test.svh`: retain the final global watchdog and
+- `tb/tests/gq_regression_test.sv`: retain the final global watchdog and
   automatic-finalization coverage.
 - `README.md`: document the adapter cancellation requirement.

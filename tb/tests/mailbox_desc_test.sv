@@ -1,5 +1,5 @@
-`ifndef MAILBOX_DESC_TEST_SVH
-`define MAILBOX_DESC_TEST_SVH
+`ifndef MAILBOX_DESC_TEST_SV
+`define MAILBOX_DESC_TEST_SV
 
 class mailbox_desc_test extends uvm_test;
     `uvm_component_utils(mailbox_desc_test)

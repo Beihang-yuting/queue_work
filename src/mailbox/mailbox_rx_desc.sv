@@ -1,5 +1,5 @@
-`ifndef MAILBOX_RX_DESC_SVH
-`define MAILBOX_RX_DESC_SVH
+`ifndef MAILBOX_RX_DESC_SV
+`define MAILBOX_RX_DESC_SV
 
 class mailbox_rx_desc extends gq_desc_base;
     `uvm_object_utils(mailbox_rx_desc)

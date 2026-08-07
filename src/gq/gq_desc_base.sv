@@ -1,5 +1,5 @@
-`ifndef GQ_DESC_BASE_SVH
-`define GQ_DESC_BASE_SVH
+`ifndef GQ_DESC_BASE_SV
+`define GQ_DESC_BASE_SV
 
 typedef struct {
     gq_addr_t   addr;

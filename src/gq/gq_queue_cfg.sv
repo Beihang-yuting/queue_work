@@ -1,5 +1,5 @@
-`ifndef GQ_QUEUE_CFG_SVH
-`define GQ_QUEUE_CFG_SVH
+`ifndef GQ_QUEUE_CFG_SV
+`define GQ_QUEUE_CFG_SV
 
 class gq_queue_cfg extends uvm_object;
     `uvm_object_utils(gq_queue_cfg)

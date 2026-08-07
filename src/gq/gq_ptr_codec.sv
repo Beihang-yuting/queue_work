@@ -1,5 +1,5 @@
-`ifndef GQ_PTR_CODEC_SVH
-`define GQ_PTR_CODEC_SVH
+`ifndef GQ_PTR_CODEC_SV
+`define GQ_PTR_CODEC_SV
 
 virtual class gq_ptr_codec extends uvm_object;
     function new(string name = "gq_ptr_codec");

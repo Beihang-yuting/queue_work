@@ -1,5 +1,5 @@
-`ifndef GQ_REFILL_PROFILE_SVH
-`define GQ_REFILL_PROFILE_SVH
+`ifndef GQ_REFILL_PROFILE_SV
+`define GQ_REFILL_PROFILE_SV
 
 virtual class gq_refill_profile extends uvm_object;
     int unsigned initial_post_count;

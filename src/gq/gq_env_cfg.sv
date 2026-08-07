@@ -1,5 +1,5 @@
-`ifndef GQ_ENV_CFG_SVH
-`define GQ_ENV_CFG_SVH
+`ifndef GQ_ENV_CFG_SV
+`define GQ_ENV_CFG_SV
 
 class gq_env_cfg extends uvm_object;
     `uvm_object_utils(gq_env_cfg)

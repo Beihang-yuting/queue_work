@@ -1,5 +1,5 @@
-`ifndef MAILBOX_ENV_SVH
-`define MAILBOX_ENV_SVH
+`ifndef MAILBOX_ENV_SV
+`define MAILBOX_ENV_SV
 
 class mailbox_env_cfg extends gq_env_cfg;
     `uvm_object_utils(mailbox_env_cfg)

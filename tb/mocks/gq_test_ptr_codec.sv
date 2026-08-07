@@ -1,5 +1,5 @@
-`ifndef GQ_TEST_PTR_CODEC_SVH
-`define GQ_TEST_PTR_CODEC_SVH
+`ifndef GQ_TEST_PTR_CODEC_SV
+`define GQ_TEST_PTR_CODEC_SV
 
 class gq_test_ptr_codec extends gq_ptr_codec;
     `uvm_object_utils(gq_test_ptr_codec)

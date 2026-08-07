@@ -1,5 +1,5 @@
-`ifndef GQ_COMPLETION_TEST_SVH
-`define GQ_COMPLETION_TEST_SVH
+`ifndef GQ_COMPLETION_TEST_SV
+`define GQ_COMPLETION_TEST_SV
 
 class gq_overcount_completion extends gq_completion_source;
     `uvm_object_utils(gq_overcount_completion)

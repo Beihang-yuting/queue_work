@@ -1,5 +1,5 @@
-`ifndef GQ_TAIL_MEM_COMPLETION_SVH
-`define GQ_TAIL_MEM_COMPLETION_SVH
+`ifndef GQ_TAIL_MEM_COMPLETION_SV
+`define GQ_TAIL_MEM_COMPLETION_SV
 
 class gq_tail_mem_completion extends gq_completion_source;
     `uvm_object_utils(gq_tail_mem_completion)

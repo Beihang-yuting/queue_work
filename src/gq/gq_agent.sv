@@ -1,5 +1,5 @@
-`ifndef GQ_AGENT_SVH
-`define GQ_AGENT_SVH
+`ifndef GQ_AGENT_SV
+`define GQ_AGENT_SV
 
 class gq_sequencer extends uvm_sequencer #(gq_request, gq_response);
     `uvm_component_utils(gq_sequencer)

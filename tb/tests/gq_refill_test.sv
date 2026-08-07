@@ -1,5 +1,5 @@
-`ifndef GQ_REFILL_TEST_SVH
-`define GQ_REFILL_TEST_SVH
+`ifndef GQ_REFILL_TEST_SV
+`define GQ_REFILL_TEST_SV
 
 class gq_refill_spy_mem extends host_mem_manager;
     int unsigned event_serial;

@@ -1,5 +1,5 @@
-`ifndef GQ_QUEUE_ENGINE_SVH
-`define GQ_QUEUE_ENGINE_SVH
+`ifndef GQ_QUEUE_ENGINE_SV
+`define GQ_QUEUE_ENGINE_SV
 
 class gq_publish_operation;
     gq_logical_seq_t old_tail;

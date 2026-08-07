@@ -1,5 +1,5 @@
-`ifndef GQ_SUBMIT_TEST_SVH
-`define GQ_SUBMIT_TEST_SVH
+`ifndef GQ_SUBMIT_TEST_SV
+`define GQ_SUBMIT_TEST_SV
 
 class gq_prepare_fail_desc extends gq_desc_base;
     `uvm_object_utils(gq_prepare_fail_desc)

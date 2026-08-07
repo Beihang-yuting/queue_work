@@ -1,5 +1,5 @@
-`ifndef GQ_RESET_TEST_SVH
-`define GQ_RESET_TEST_SVH
+`ifndef GQ_RESET_TEST_SV
+`define GQ_RESET_TEST_SV
 
 class gq_reset_spy_mem extends host_mem_manager;
     int unsigned ring_alloc_calls;

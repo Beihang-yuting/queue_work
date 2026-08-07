@@ -1,5 +1,5 @@
-`ifndef MAILBOX_SEQUENCES_SVH
-`define MAILBOX_SEQUENCES_SVH
+`ifndef MAILBOX_SEQUENCES_SV
+`define MAILBOX_SEQUENCES_SV
 
 class mailbox_tx_sequence extends uvm_sequence #(gq_request, gq_response);
     `uvm_object_utils(mailbox_tx_sequence)

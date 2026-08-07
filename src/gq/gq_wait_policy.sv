@@ -1,5 +1,5 @@
-`ifndef GQ_WAIT_POLICY_SVH
-`define GQ_WAIT_POLICY_SVH
+`ifndef GQ_WAIT_POLICY_SV
+`define GQ_WAIT_POLICY_SV
 
 virtual class gq_wait_policy extends uvm_object;
     function new(string name = "gq_wait_policy");

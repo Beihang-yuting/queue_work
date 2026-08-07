@@ -1,5 +1,5 @@
-`ifndef MAILBOX_COMPLETION_SVH
-`define MAILBOX_COMPLETION_SVH
+`ifndef MAILBOX_COMPLETION_SV
+`define MAILBOX_COMPLETION_SV
 
 class mailbox_completion extends gq_completion_source;
     `uvm_object_utils(mailbox_completion)

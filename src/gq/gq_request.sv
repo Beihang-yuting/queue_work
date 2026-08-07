@@ -1,5 +1,5 @@
-`ifndef GQ_REQUEST_SVH
-`define GQ_REQUEST_SVH
+`ifndef GQ_REQUEST_SV
+`define GQ_REQUEST_SV
 
 typedef enum bit { GQ_SUBMIT, GQ_START_RX } gq_request_kind_e;
 

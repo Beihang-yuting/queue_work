@@ -11,13 +11,16 @@ SOURCES := host_mem/src/host_mem_pkg.sv \
            tb/gq_test_pkg.sv \
            tb/tb_top.sv
 
-.PHONY: build vcs run
+.PHONY: build vcs run check-layout
 
 build: vcs
 
 vcs:
 	mkdir -p $(BUILD_DIR)
 	$(VCS) $(VCS_FLAGS) $(INCDIRS) $(SOURCES) -o $(SIMV)
+
+check-layout:
+	./scripts/check_sv_layout.sh
 
 run: vcs
 	$(SIMV) +UVM_TESTNAME=$(TEST)

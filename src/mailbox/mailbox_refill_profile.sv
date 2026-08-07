@@ -1,5 +1,5 @@
-`ifndef MAILBOX_REFILL_PROFILE_SVH
-`define MAILBOX_REFILL_PROFILE_SVH
+`ifndef MAILBOX_REFILL_PROFILE_SV
+`define MAILBOX_REFILL_PROFILE_SV
 
 class mailbox_refill_profile extends gq_refill_profile;
     `uvm_object_utils(mailbox_refill_profile)
