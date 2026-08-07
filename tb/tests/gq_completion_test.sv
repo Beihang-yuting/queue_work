@@ -212,6 +212,10 @@ class gq_completion_test extends uvm_test;
     gq_queue_cfg           cleanup_cfg;
     gq_queue_engine        cleanup_engine;
     gq_counting_completion cleanup_source;
+    uvm_analysis_port #(gq_desc_base) engine_completion_ap;
+    uvm_analysis_port #(gq_desc_base) poll_completion_ap;
+    uvm_analysis_port #(gq_desc_base) irq_completion_ap;
+    uvm_analysis_port #(gq_desc_base) rx_completion_ap;
     bit                    irq_wait_returned;
     bit                    irq_wait_timed_out;
     time                   irq_wait_timeout;
@@ -238,6 +242,11 @@ class gq_completion_test extends uvm_test;
         string reason;
 
         super.build_phase(phase);
+
+        engine_completion_ap = new("engine_completion_ap", this);
+        poll_completion_ap   = new("poll_completion_ap", this);
+        irq_completion_ap    = new("irq_completion_ap", this);
+        rx_completion_ap     = new("rx_completion_ap", this);
 
         mem = new("mem");
         mem.init_region(64'h0000_0001_4000_0000,
@@ -442,22 +451,23 @@ class gq_completion_test extends uvm_test;
     endfunction
 
     function void connect_phase(uvm_phase phase);
-        super.connect_phase(phase);
-        engine.completion_ap.connect(collector.analysis_export);
-        poll_engine.completion_ap.connect(poll_collector.analysis_export);
-        irq_engine.completion_ap.connect(irq_collector.analysis_export);
-        rx_engine.completion_ap.connect(rx_collector.analysis_export);
-        begin
-            uvm_component worker_engine_component;
-            gq_queue_engine worker_engine;
+        gq_monitor worker_monitor;
 
-            worker_engine_component = uvm_root::get().find(
-                "uvm_test_top.worker_env.tx_20.engine");
-            if (!$cast(worker_engine, worker_engine_component))
-                `uvm_fatal("WORKER_PATH", "could not find worker engine")
-            worker_engine.completion_ap.connect(
-                worker_collector.analysis_export);
-        end
+        super.connect_phase(phase);
+        engine.bind_completion_port(engine_completion_ap);
+        engine_completion_ap.connect(collector.analysis_export);
+        poll_engine.bind_completion_port(poll_completion_ap);
+        poll_completion_ap.connect(poll_collector.analysis_export);
+        irq_engine.bind_completion_port(irq_completion_ap);
+        irq_completion_ap.connect(irq_collector.analysis_export);
+        rx_engine.bind_completion_port(rx_completion_ap);
+        rx_completion_ap.connect(rx_collector.analysis_export);
+
+        worker_monitor = worker_env.get_monitor("tx_20");
+        if (worker_monitor == null)
+            `uvm_fatal("MONITOR_PATH", "could not find tx_20 monitor")
+        worker_monitor.completion_ap.connect(
+            worker_collector.analysis_export);
     endfunction
 
     function void check_tail_memory_endian();
@@ -900,9 +910,9 @@ class gq_completion_test extends uvm_test;
 
         worker_env_cfg.wait_ready();
         component_handle = uvm_root::get().find(
-            "uvm_test_top.worker_env.tx_20.completion_worker");
+            "uvm_test_top.worker_env.tx_20.monitor");
         if (component_handle == null)
-            `uvm_fatal("WORKER_PATH", "agent completion worker was not built")
+            `uvm_fatal("MONITOR_PATH", "agent monitor was not built")
         component_handle = uvm_root::get().find(
             "uvm_test_top.worker_env.tx_20.engine");
         if (!$cast(worker_engine, component_handle))
@@ -1056,7 +1066,7 @@ class gq_completion_test extends uvm_test;
         worker_returned = 0;
         fork : cleanup_worker
             begin
-                cleanup_engine.run_completion_worker();
+                cleanup_engine.run_completion_monitor();
                 worker_returned = 1;
             end
         join_none

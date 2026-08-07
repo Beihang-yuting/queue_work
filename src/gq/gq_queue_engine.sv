@@ -66,7 +66,7 @@ class gq_queue_engine extends uvm_component;
     protected gq_refill_profile refill_profile;
     protected bit rx_started;
     protected uvm_event space_available;
-    uvm_analysis_port #(gq_desc_base) completion_ap;
+    protected uvm_analysis_port #(gq_desc_base) completion_ap;
 
     function new(string name = "gq_queue_engine", uvm_component parent = null);
         super.new(name, parent);
@@ -106,8 +106,13 @@ class gq_queue_engine extends uvm_component;
         refill_profile    = null;
         rx_started        = 0;
         space_available   = new({name, "_space_available"});
-        completion_ap     = new("completion_ap", this);
+        completion_ap     = null;
         wait_policy       = null;
+    endfunction
+
+    function void bind_completion_port(
+        uvm_analysis_port #(gq_desc_base) port_handle);
+        completion_ap = port_handle;
     endfunction
 
     // Return newly configured resources as local ownership. The lifecycle
@@ -542,7 +547,8 @@ class gq_queue_engine extends uvm_component;
             // descriptor while owned allocations are still valid. Ownership
             // is released immediately after write() returns, before the
             // handle and ID index are atomically retired under state_lock.
-            completion_ap.write(desc);
+            if (completion_ap != null)
+                completion_ap.write(desc);
             desc.release_owned();
 
             state_lock.get(1);
@@ -693,7 +699,7 @@ class gq_queue_engine extends uvm_component;
             ack_done.wait_on();
     endtask
 
-    task run_completion_worker();
+    task run_completion_monitor();
         forever begin
             bit worker_active;
 

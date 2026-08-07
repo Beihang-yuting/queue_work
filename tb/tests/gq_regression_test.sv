@@ -473,6 +473,12 @@ class gq_regression_test extends uvm_test;
             !env.has_agent("rx_2") || !env.has_agent("rx_3000") ||
             env.has_agent("tx_2") || env.has_agent("rx_1"))
             `uvm_fatal("REG_SPARSE", "sparse queue construction is incorrect")
+        if (env.get_monitor("tx_1") == null ||
+            env.get_monitor("tx_4095") == null ||
+            env.get_monitor("rx_2") == null ||
+            env.get_monitor("rx_3000") == null)
+            `uvm_fatal("REG_MONITOR",
+                       "sparse queue monitor construction is incorrect")
         tx_1    = find_engine("tx_1");
         tx_4095 = find_engine("tx_4095");
         rx_2    = find_engine("rx_2");

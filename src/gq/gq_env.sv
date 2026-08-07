@@ -154,6 +154,12 @@ class gq_env extends uvm_env;
         return agents.exists(key);
     endfunction
 
+    function gq_monitor get_monitor(string key);
+        if (!agents.exists(key))
+            return null;
+        return agents[key].monitor;
+    endfunction
+
     function longint unsigned ring_size(string key);
         if (!agents.exists(key))
             return 0;

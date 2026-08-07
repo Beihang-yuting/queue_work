@@ -293,6 +293,8 @@ class gq_reset_test extends uvm_test;
     gq_reset_order_adapter publish_reset_adapter;
     gq_queue_cfg          publish_reset_cfg;
     gq_queue_engine       publish_reset_engine;
+    uvm_analysis_port #(gq_desc_base) stale_completion_ap;
+    uvm_analysis_port #(gq_desc_base) irq_completion_ap;
 
     function new(string name = "gq_reset_test", uvm_component parent = null);
         super.new(name, parent);
@@ -370,6 +372,9 @@ class gq_reset_test extends uvm_test;
         string reason;
 
         super.build_phase(phase);
+        stale_completion_ap = new("stale_completion_ap", this);
+        irq_completion_ap   = new("irq_completion_ap", this);
+
         mem = new("mem");
         mem.init_region(64'h0000_0001_7000_0000,
                         64'h0000_0001_70ff_ffff, MODE_LINEAR, 16);
@@ -519,13 +524,18 @@ class gq_reset_test extends uvm_test;
     endfunction
 
     function void connect_phase(uvm_phase phase);
-        gq_queue_engine tx_engine;
+        gq_monitor tx_monitor;
 
         super.connect_phase(phase);
-        tx_engine = find_engine("tx_7");
-        tx_engine.completion_ap.connect(collector.analysis_export);
-        stale_engine.completion_ap.connect(stale_collector.analysis_export);
-        irq_engine.completion_ap.connect(irq_collector.analysis_export);
+        tx_monitor = env.get_monitor("tx_7");
+        if (tx_monitor == null)
+            `uvm_fatal("RESET_PATH", "could not find monitor tx_7")
+        tx_monitor.completion_ap.connect(collector.analysis_export);
+
+        stale_engine.bind_completion_port(stale_completion_ap);
+        stale_completion_ap.connect(stale_collector.analysis_export);
+        irq_engine.bind_completion_port(irq_completion_ap);
+        irq_completion_ap.connect(irq_collector.analysis_export);
     endfunction
 
     task run_phase(uvm_phase phase);
@@ -1106,7 +1116,7 @@ class gq_reset_test extends uvm_test;
         irq_worker_returned = 0;
         fork : blocked_irq_worker
             begin
-                irq_engine.run_completion_worker();
+                irq_engine.run_completion_monitor();
                 irq_worker_returned = 1;
             end
         join_none

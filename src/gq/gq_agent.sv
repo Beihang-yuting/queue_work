@@ -41,20 +41,21 @@ class gq_driver extends uvm_driver #(gq_request, gq_response);
     endtask
 endclass
 
-class gq_completion_worker extends uvm_component;
-    `uvm_component_utils(gq_completion_worker)
+class gq_monitor extends uvm_monitor;
+    `uvm_component_utils(gq_monitor)
 
     gq_queue_engine engine;
+    uvm_analysis_port #(gq_desc_base) completion_ap;
 
-    function new(string name = "gq_completion_worker",
-                 uvm_component parent = null);
+    function new(string name = "gq_monitor", uvm_component parent = null);
         super.new(name, parent);
+        completion_ap = new("completion_ap", this);
     endfunction
 
     task run_phase(uvm_phase phase);
         if (engine == null)
-            `uvm_fatal("GQ_WORKER_CFG", "completion worker has no queue engine")
-        engine.run_completion_worker();
+            `uvm_fatal("GQ_MONITOR_CFG", "monitor has no queue engine")
+        engine.run_completion_monitor();
     endtask
 endclass
 
@@ -64,7 +65,7 @@ class gq_queue_agent extends uvm_agent;
     gq_queue_engine engine;
     gq_sequencer sequencer;
     gq_driver driver;
-    gq_completion_worker completion_worker;
+    gq_monitor monitor;
 
     function new(string name = "gq_queue_agent", uvm_component parent = null);
         super.new(name, parent);
@@ -89,14 +90,14 @@ class gq_queue_agent extends uvm_agent;
         engine = gq_queue_engine::type_id::create("engine", this);
         sequencer = gq_sequencer::type_id::create("sequencer", this);
         driver    = gq_driver::type_id::create("driver", this);
-        completion_worker = gq_completion_worker::type_id::create(
-            "completion_worker", this);
+        monitor = gq_monitor::type_id::create("monitor", this);
     endfunction
 
     function void connect_phase(uvm_phase phase);
         super.connect_phase(phase);
         driver.engine = engine;
-        completion_worker.engine = engine;
+        monitor.engine = engine;
+        engine.bind_completion_port(monitor.completion_ap);
         driver.seq_item_port.connect(sequencer.seq_item_export);
     endfunction
 endclass

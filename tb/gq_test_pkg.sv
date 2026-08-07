@@ -16,6 +16,7 @@ package gq_test_pkg;
     `include "tests/mailbox_desc_test.sv"
     `include "tests/gq_submit_test.sv"
     `include "tests/gq_completion_test.sv"
+    `include "tests/gq_agent_test.sv"
     `include "tests/gq_refill_test.sv"
     `include "tests/gq_reset_test.sv"
     `include "tests/gq_regression_test.sv"
