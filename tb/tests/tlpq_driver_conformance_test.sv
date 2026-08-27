@@ -56,6 +56,126 @@ class tlpq_start_capture_driver extends
     endtask
 endclass
 
+class tlpq_driver_observation extends uvm_object;
+    `uvm_object_utils(tlpq_driver_observation)
+
+    byte dpu_bytes[];
+    bit [15:0] flags;
+    bit [15:0] buf_len;
+    gq_addr_t buf_addr;
+    tlpq_route_metadata_t metadata;
+    int unsigned owned_allocation_count;
+    tlp_kind_e decoded_kind;
+    tlp_fmt_e decoded_fmt;
+    tlp_type_e decoded_type;
+    bit [9:0] decoded_length;
+    bit [15:0] decoded_requester;
+    bit [7:0] decoded_tag;
+    gq_addr_t decoded_addr;
+    time callback_time;
+
+    function new(string name = "tlpq_driver_observation");
+        super.new(name);
+        dpu_bytes = new[0];
+        flags = 0;
+        buf_len = 0;
+        buf_addr = 0;
+        metadata = '0;
+        owned_allocation_count = 0;
+        decoded_kind = TLP_MEM_RD;
+        decoded_fmt = FMT_4DW_NO_DATA;
+        decoded_type = TLP_TYPE_MEM_RD;
+        decoded_length = 0;
+        decoded_requester = 0;
+        decoded_tag = 0;
+        decoded_addr = 0;
+        callback_time = 0;
+    endfunction
+endclass
+
+class tlpq_driver_collector extends uvm_component;
+    `uvm_component_utils(tlpq_driver_collector)
+
+    uvm_analysis_imp #(gq_desc_base, tlpq_driver_collector) analysis_export;
+    tlpq_driver_observation observations[$];
+    uvm_event observation_event;
+
+    function new(string name = "tlpq_driver_collector",
+                 uvm_component parent = null);
+        super.new(name, parent);
+        analysis_export = new("analysis_export", this);
+        observation_event = new({name, "_observation"});
+    endfunction
+
+    function void write(gq_desc_base base_desc);
+        tlpq_rx_desc desc;
+        pcie_tl_mem_tlp decoded;
+        tlpq_driver_observation observation;
+
+        if (!$cast(desc, base_desc) || desc == null)
+            `uvm_fatal("TLPQ_DRIVER_CALLBACK",
+                       "completion callback was not a TLPQ RX descriptor")
+        if (!$cast(decoded, desc.decoded_tlp) || decoded == null)
+            `uvm_fatal("TLPQ_DRIVER_CALLBACK",
+                       "completion callback did not carry a decoded Memory TLP")
+        observation = tlpq_driver_observation::type_id::create(
+            $sformatf("observation_%0d", observations.size()));
+        observation.dpu_bytes = new[desc.dpu_bytes.size()];
+        foreach (desc.dpu_bytes[i])
+            observation.dpu_bytes[i] = desc.dpu_bytes[i];
+        observation.flags = desc.flags;
+        observation.buf_len = desc.buf_len;
+        observation.buf_addr = desc.buf_addr;
+        observation.metadata = desc.metadata;
+        observation.owned_allocation_count = desc.owned_allocation_count();
+        observation.decoded_kind = decoded.kind;
+        observation.decoded_fmt = decoded.fmt;
+        observation.decoded_type = decoded.type_f;
+        observation.decoded_length = decoded.length;
+        observation.decoded_requester = decoded.requester_id;
+        observation.decoded_tag = decoded.tag[7:0];
+        observation.decoded_addr = decoded.addr;
+        observation.callback_time = $time;
+        observations.push_back(observation);
+        observation_event.trigger();
+    endfunction
+endclass
+
+class tlpq_driver_report_catcher extends uvm_report_catcher;
+    `uvm_object_utils(tlpq_driver_report_catcher)
+
+    int unsigned invalid_query_count;
+    int unsigned parse_error_count;
+    uvm_severity report_severities[$];
+    string report_ids[$];
+    string report_messages[$];
+
+    function new(string name = "tlpq_driver_report_catcher");
+        super.new(name);
+        invalid_query_count = 0;
+        parse_error_count = 0;
+    endfunction
+
+    virtual function action_e catch();
+        if (get_id() != "GQ_COMPLETION_QUERY" &&
+            get_id() != "GQ_COMPLETION_PARSE")
+            return THROW;
+        report_severities.push_back(get_severity());
+        report_ids.push_back(get_id());
+        report_messages.push_back(get_message());
+        if (get_id() == "GQ_COMPLETION_QUERY")
+            invalid_query_count++;
+        else
+            parse_error_count++;
+        if ((get_id() == "GQ_COMPLETION_QUERY" &&
+             get_severity() == UVM_WARNING) ||
+            (get_id() == "GQ_COMPLETION_PARSE" &&
+             get_severity() == UVM_ERROR))
+            return CAUGHT;
+        return THROW;
+    endfunction
+endclass
+
 class tlpq_reg_error_catcher extends uvm_report_catcher;
     `uvm_object_utils(tlpq_reg_error_catcher)
 
@@ -106,7 +226,17 @@ class tlpq_driver_conformance_test extends uvm_test;
     localparam gq_addr_t HOST_BASE   = 64'h0000_0001_e000_0000;
     localparam gq_addr_t SWITCH_BASE = 64'h0000_0001_e001_0000;
 
-    host_mem_manager mem;
+    localparam int unsigned MAIN_HOST_ENGINE   = 0;
+    localparam int unsigned MAIN_SWITCH_ENGINE = 1;
+    localparam int unsigned POLL_HOST_ENGINE   = 2;
+    localparam int unsigned POLL_SWITCH_ENGINE = 3;
+    localparam int unsigned ERROR_HOST_ENGINE  = 4;
+    localparam int unsigned DRIVER_ENGINE_COUNT = 5;
+    localparam int unsigned MAIN_ADAPTER_SLOT  = 0;
+    localparam int unsigned POLL_ADAPTER_SLOT  = 1;
+    localparam int unsigned ERROR_ADAPTER_SLOT = 2;
+
+    tlpq_driver_mem mem;
     tlpq_mock_adapter adapter;
     tlpq_env_cfg env_cfg;
     gq_queue_cfg host_cfg;
@@ -119,14 +249,160 @@ class tlpq_driver_conformance_test extends uvm_test;
     gq_sequencer switch_start_sequencer;
     tlpq_start_capture_driver host_start_driver;
     tlpq_start_capture_driver switch_start_driver;
+    tlpq_mock_adapter driver_adapters[int unsigned];
+    gq_queue_cfg driver_cfgs[int unsigned];
+    tlpq_refill_profile driver_profiles[int unsigned];
+    tlpq_mock_completion driver_completions[int unsigned];
+    gq_queue_engine driver_engines[int unsigned];
+    tlpq_driver_collector driver_collectors[int unsigned];
+    bit driver_worker_started[int unsigned];
+    bit driver_worker_returned[int unsigned];
+    tlpq_mock_dut dut;
+    tlpq_driver_report_catcher driver_report_catcher;
 
     function new(string name = "tlpq_driver_conformance_test",
                  uvm_component parent = null);
         super.new(name, parent);
     endfunction
 
+    function tlpq_channel_e driver_channel(int unsigned engine_id);
+        if (engine_id == MAIN_SWITCH_ENGINE ||
+            engine_id == POLL_SWITCH_ENGINE)
+            return TLPQ_SWITCH;
+        return TLPQ_HOST;
+    endfunction
+
+    function int unsigned driver_adapter_slot(int unsigned engine_id);
+        if (engine_id == MAIN_HOST_ENGINE ||
+            engine_id == MAIN_SWITCH_ENGINE)
+            return MAIN_ADAPTER_SLOT;
+        if (engine_id == POLL_HOST_ENGINE ||
+            engine_id == POLL_SWITCH_ENGINE)
+            return POLL_ADAPTER_SLOT;
+        return ERROR_ADAPTER_SLOT;
+    endfunction
+
+    function gq_queue_cfg make_driver_cfg(
+        int unsigned engine_id, gq_wait_mode_e wait_mode);
+        gq_queue_cfg cfg;
+        tlpq_channel_e channel;
+
+        channel = driver_channel(engine_id);
+        cfg = gq_queue_cfg::type_id::create(
+            $sformatf("driver_%0d_cfg", engine_id));
+        cfg.queue_id = channel == TLPQ_HOST ?
+                       TLPQ_HOST_QUEUE_ID : TLPQ_SWITCH_QUEUE_ID;
+        cfg.role = GQ_RX;
+        cfg.depth = TLPQ_DEPTH;
+        cfg.desc_size = TLPQ_DESC_BYTES;
+        cfg.alignment = 64;
+        cfg.status_area_size = 0;
+        cfg.wait_mode = wait_mode;
+        cfg.poll_policy = GQ_POLL_FIXED;
+        cfg.poll_min_interval = 10ns;
+        cfg.poll_max_interval = 10ns;
+        cfg.poll_backoff_factor = 2;
+        cfg.irq_watchdog_interval = 1us;
+        cfg.completion_timeout = 0;
+        cfg.rx_slot_mode = GQ_RX_EXPLICIT_REFILL;
+        cfg.ptr_codec = tlpq_ptr_codec::type_id::create(
+            $sformatf("driver_%0d_ptr_codec", engine_id));
+        driver_completions[engine_id] =
+            tlpq_mock_completion::type_id::create(
+                $sformatf("driver_%0d_completion", engine_id));
+        driver_completions[engine_id].channel = channel;
+        cfg.completion_source = driver_completions[engine_id];
+        driver_profiles[engine_id] =
+            tlpq_refill_profile::type_id::create(
+                $sformatf("driver_%0d_profile", engine_id));
+        return cfg;
+    endfunction
+
+    function void build_driver_engine(
+        int unsigned engine_id, gq_wait_mode_e wait_mode);
+        string engine_name;
+        string collector_name;
+        string reason;
+        int unsigned adapter_slot;
+
+        adapter_slot = driver_adapter_slot(engine_id);
+        driver_cfgs[engine_id] = make_driver_cfg(engine_id, wait_mode);
+        if (driver_cfgs[engine_id] == null ||
+            driver_profiles[engine_id] == null ||
+            !driver_cfgs[engine_id].validate(reason) ||
+            !driver_profiles[engine_id].validate(TLPQ_DEPTH, reason))
+            `uvm_fatal("TLPQ_DRIVER_CFG", $sformatf(
+                "engine %0d directed configuration rejected: %s",
+                engine_id, reason))
+        engine_name = $sformatf("driver_engine_%0d", engine_id);
+        collector_name = $sformatf("driver_collector_%0d", engine_id);
+        uvm_config_db#(gq_queue_cfg)::set(
+            this, engine_name, "cfg", driver_cfgs[engine_id]);
+        uvm_config_db#(host_mem_api)::set(
+            this, engine_name, "mem", mem);
+        uvm_config_db#(gq_hw_adapter)::set(
+            this, engine_name, "adapter", driver_adapters[adapter_slot]);
+        driver_engines[engine_id] = gq_queue_engine::type_id::create(
+            engine_name, this);
+        driver_collectors[engine_id] =
+            tlpq_driver_collector::type_id::create(collector_name, this);
+        driver_worker_started[engine_id] = 0;
+        driver_worker_returned[engine_id] = 0;
+    endfunction
+
     function void build_phase(uvm_phase phase);
+        string reason;
+        tlpq_rx_hw_cfg_t main_host_hw;
+        tlpq_rx_hw_cfg_t main_switch_hw;
+        tlpq_rx_hw_cfg_t poll_host_hw;
+        tlpq_rx_hw_cfg_t poll_switch_hw;
+        tlpq_rx_hw_cfg_t error_host_hw;
+
         super.build_phase(phase);
+        mem = new("mem");
+        mem.init_region(64'h0000_0001_e000_0000,
+                        64'h0000_0001_e0ff_ffff, MODE_LINEAR, 16);
+        for (int unsigned adapter_slot = 0;
+             adapter_slot <= ERROR_ADAPTER_SLOT; adapter_slot++)
+            driver_adapters[adapter_slot] =
+                tlpq_mock_adapter::type_id::create(
+                    $sformatf("driver_adapter_%0d", adapter_slot));
+
+        main_host_hw = '{host_id:3'h1, bdf:16'h0100,
+                         msix_index:13'h011, msix_valid:1'b1};
+        main_switch_hw = '{host_id:3'h5, bdf:16'h0201,
+                           msix_index:13'h122, msix_valid:1'b1};
+        poll_host_hw = '{host_id:3'h2, bdf:16'h0300,
+                         msix_index:13'h033, msix_valid:1'b1};
+        poll_switch_hw = '{host_id:3'h6, bdf:16'h0401,
+                           msix_index:13'h144, msix_valid:1'b1};
+        error_host_hw = '{host_id:3'h3, bdf:16'h0500,
+                          msix_index:13'h055, msix_valid:1'b1};
+        if (!driver_adapters[MAIN_ADAPTER_SLOT].register_tlpq_rx(
+                TLPQ_HOST, TLPQ_HOST_QUEUE_ID, main_host_hw, reason) ||
+            !driver_adapters[MAIN_ADAPTER_SLOT].register_tlpq_rx(
+                TLPQ_SWITCH, TLPQ_SWITCH_QUEUE_ID,
+                main_switch_hw, reason) ||
+            !driver_adapters[POLL_ADAPTER_SLOT].register_tlpq_rx(
+                TLPQ_HOST, TLPQ_HOST_QUEUE_ID, poll_host_hw, reason) ||
+            !driver_adapters[POLL_ADAPTER_SLOT].register_tlpq_rx(
+                TLPQ_SWITCH, TLPQ_SWITCH_QUEUE_ID,
+                poll_switch_hw, reason) ||
+            !driver_adapters[ERROR_ADAPTER_SLOT].register_tlpq_rx(
+                TLPQ_HOST, TLPQ_HOST_QUEUE_ID, error_host_hw, reason))
+            `uvm_fatal("TLPQ_DRIVER_MAP",
+                       {"directed adapter mapping failed: ", reason})
+
+        build_driver_engine(MAIN_HOST_ENGINE, GQ_IRQ);
+        build_driver_engine(MAIN_SWITCH_ENGINE, GQ_IRQ);
+        build_driver_engine(POLL_HOST_ENGINE, GQ_POLL);
+        build_driver_engine(POLL_SWITCH_ENGINE, GQ_POLL);
+        build_driver_engine(ERROR_HOST_ENGINE, GQ_POLL);
+        dut = tlpq_mock_dut::type_id::create("dut");
+        dut.mem = mem;
+        driver_report_catcher =
+            tlpq_driver_report_catcher::type_id::create(
+                "driver_report_catcher");
         host_start_sequencer = gq_sequencer::type_id::create(
             "host_start_sequencer", this);
         switch_start_sequencer = gq_sequencer::type_id::create(
@@ -139,6 +415,10 @@ class tlpq_driver_conformance_test extends uvm_test;
 
     function void connect_phase(uvm_phase phase);
         super.connect_phase(phase);
+        for (int unsigned engine_id = 0;
+             engine_id < DRIVER_ENGINE_COUNT; engine_id++)
+            driver_engines[engine_id].completion_ap.connect(
+                driver_collectors[engine_id].analysis_export);
         host_start_driver.seq_item_port.connect(
             host_start_sequencer.seq_item_export);
         switch_start_driver.seq_item_port.connect(
@@ -644,6 +924,1148 @@ class tlpq_driver_conformance_test extends uvm_test;
                        "dual start shared descriptors/profile or queue path")
     endtask
 
+    function bit driver_bytes_equal(input byte lhs[], input byte rhs[]);
+        if (lhs.size() != rhs.size())
+            return 0;
+        foreach (lhs[i]) begin
+            if (lhs[i] !== rhs[i])
+                return 0;
+        end
+        return 1;
+    endfunction
+
+    function bit driver_dpu_bytes_equal(
+        input bit [7:0] lhs[], input byte rhs[]);
+        if (lhs.size() != rhs.size())
+            return 0;
+        foreach (lhs[i]) begin
+            if (lhs[i] !== rhs[i])
+                return 0;
+        end
+        return 1;
+    endfunction
+
+    function bit driver_report_matches(
+        int unsigned index, uvm_severity severity,
+        string id, string message);
+        return index < driver_report_catcher.report_ids.size() &&
+               driver_report_catcher.report_severities[index] == severity &&
+               driver_report_catcher.report_ids[index] == id &&
+               driver_report_catcher.report_messages[index] == message;
+    endfunction
+
+    function tlpq_rx_hw_cfg_t expected_driver_hw(int unsigned engine_id);
+        case (engine_id)
+            MAIN_HOST_ENGINE:
+                return '{host_id:3'h1, bdf:16'h0100,
+                         msix_index:13'h011, msix_valid:1'b1};
+            MAIN_SWITCH_ENGINE:
+                return '{host_id:3'h5, bdf:16'h0201,
+                         msix_index:13'h122, msix_valid:1'b1};
+            POLL_HOST_ENGINE:
+                return '{host_id:3'h2, bdf:16'h0300,
+                         msix_index:13'h033, msix_valid:1'b1};
+            POLL_SWITCH_ENGINE:
+                return '{host_id:3'h6, bdf:16'h0401,
+                         msix_index:13'h144, msix_valid:1'b1};
+            default:
+                return '{host_id:3'h3, bdf:16'h0500,
+                         msix_index:13'h055, msix_valid:1'b1};
+        endcase
+    endfunction
+
+    function void check_driver_observation(
+        tlpq_driver_observation observation,
+        input byte expected_bytes[],
+        tlpq_route_metadata_t expected_metadata,
+        string label);
+        if (observation == null ||
+            !driver_bytes_equal(observation.dpu_bytes, expected_bytes) ||
+            observation.flags !=
+                (TLPQ_DESC_AVAIL | TLPQ_DESC_USED) ||
+            observation.buf_len != expected_bytes.size() ||
+            observation.metadata != expected_metadata ||
+            observation.owned_allocation_count != 1 ||
+            observation.decoded_kind != TLP_MEM_RD ||
+            observation.decoded_fmt != FMT_4DW_NO_DATA ||
+            observation.decoded_type != TLP_TYPE_MEM_RD ||
+            observation.decoded_length != 10'd2 ||
+            observation.decoded_requester != 16'h5678 ||
+            observation.decoded_tag != 8'h9a ||
+            observation.decoded_addr != 64'h1122_3344_5566_7780)
+            `uvm_fatal("TLPQ_DRIVER_CALLBACK", {label,
+                       " callback bytes/decode/metadata/ownership diverged"})
+    endfunction
+
+    function void check_initial_descriptor(
+        int unsigned engine_id, gq_logical_seq_t logical_seq,
+        ref int descriptor_ids[int], ref gq_addr_t buffer_addresses[$]);
+        gq_desc_base base_desc;
+        tlpq_rx_desc desc;
+        byte raw[];
+
+        base_desc = driver_engines[engine_id].get_outstanding(logical_seq);
+        if (!$cast(desc, base_desc) || desc == null)
+            `uvm_fatal("TLPQ_DRIVER_INITIAL_DESC", $sformatf(
+                "engine %0d sequence %0d is not a TLPQ descriptor",
+                engine_id, logical_seq))
+        dut.read_slot(driver_engines[engine_id], logical_seq, raw);
+        if (raw.size() != 16 || raw[0] != 8'h01 || raw[1] != 8'h00 ||
+            raw[2] != 8'h80 || raw[3] != 8'h00 ||
+            raw[12] != 8'h00 || raw[13] != 8'h00 ||
+            raw[14] != 8'h00 || raw[15] != 8'h00 ||
+            dut.decode_buffer_address(raw) != desc.buf_addr ||
+            desc.flags != TLPQ_DESC_AVAIL ||
+            desc.buf_len != TLPQ_BUFFER_BYTES ||
+            desc.owned_allocation_count() != 1 ||
+            desc.buf_addr == 0 || desc.buf_addr == '1 ||
+            mem.allocation_size(desc.buf_addr) != TLPQ_BUFFER_BYTES ||
+            mem.allocation_generation(desc.buf_addr) == 0 ||
+            descriptor_ids.exists(desc.get_inst_id()))
+            `uvm_fatal("TLPQ_DRIVER_INITIAL_DESC", $sformatf(
+                "engine %0d sequence %0d initial descriptor diverged",
+                engine_id, logical_seq))
+        foreach (buffer_addresses[i]) begin
+            if (buffer_addresses[i] == desc.buf_addr)
+                `uvm_fatal("TLPQ_DRIVER_INITIAL_DESC", $sformatf(
+                    "engine %0d reused initial buffer 0x%016h",
+                    engine_id, desc.buf_addr))
+        end
+        descriptor_ids[desc.get_inst_id()] = 1;
+        buffer_addresses.push_back(desc.buf_addr);
+    endfunction
+
+    function void check_refill_replacement(
+        int unsigned engine_id,
+        gq_logical_seq_t replacement_seq,
+        tlpq_rx_desc retired_desc,
+        gq_addr_t retired_addr,
+        int unsigned retired_generation,
+        int unsigned retired_free_before,
+        string label);
+        tlpq_rx_desc replacement;
+
+        if (!$cast(replacement,
+                   driver_engines[engine_id].get_outstanding(
+                       replacement_seq)) ||
+            replacement == null || replacement == retired_desc ||
+            replacement.owned_allocation_count() != 1 ||
+            replacement.buf_len != 128 ||
+            mem.allocation_size(replacement.buf_addr) != 128 ||
+            mem.free_count(retired_addr) != retired_free_before + 1 ||
+            (replacement.buf_addr == retired_addr &&
+             mem.allocation_generation(replacement.buf_addr) <=
+                retired_generation))
+            `uvm_fatal("TLPQ_DRIVER_REPLACEMENT", {label,
+                       " was not a fresh 128-byte ownership with one retire"})
+    endfunction
+
+    task start_driver_engine(int unsigned engine_id);
+        tlpq_channel_e channel;
+        tlpq_rx_hw_cfg_t expected_hw;
+        tlpq_mock_adapter harness_adapter;
+        gq_request request;
+        gq_response response;
+        string expected_trace[$];
+        string channel_string;
+        int channel_key;
+        int descriptor_ids[int];
+        gq_addr_t buffer_addresses[$];
+
+        channel = driver_channel(engine_id);
+        channel_key = int'(channel);
+        channel_string = channel == TLPQ_HOST ? "HOST" : "SWITCH";
+        expected_hw = expected_driver_hw(engine_id);
+        harness_adapter =
+            driver_adapters[driver_adapter_slot(engine_id)];
+        driver_engines[engine_id].initialize();
+        if (!driver_engines[engine_id].is_ready() ||
+            harness_adapter.reset_count[channel_key] != 1 ||
+            harness_adapter.configure_count[channel_key] != 1 ||
+            harness_adapter.enable_count.exists(channel_key) ||
+            harness_adapter.configured_depth[channel_key] != 32 ||
+            harness_adapter.configured_desc_size[channel_key] != 16 ||
+            harness_adapter.configured_hw_cfg[channel_key] != expected_hw)
+            `uvm_fatal("TLPQ_DRIVER_INITIAL_SETUP", $sformatf(
+                "engine %0d configure/reset/deferred-enable diverged",
+                engine_id))
+
+        request = gq_request::type_id::create(
+            $sformatf("driver_%0d_start_request", engine_id));
+        request.kind = GQ_START_RX;
+        request.set_refill_profile(driver_profiles[engine_id]);
+        driver_engines[engine_id].start_rx(request, response);
+        if (response == null || response.status != GQ_OK ||
+            response.committed_count != 31 ||
+            driver_engines[engine_id].head_seq() != 0 ||
+            driver_engines[engine_id].tail_seq() != 31 ||
+            driver_engines[engine_id].outstanding_count() != 31 ||
+            harness_adapter.published_tails[channel_key].size() != 1 ||
+            harness_adapter.published_tails[channel_key][0] != 16'h001f ||
+            harness_adapter.enable_count[channel_key] != 1)
+            `uvm_fatal("TLPQ_DRIVER_INITIAL_POST", $sformatf(
+                "engine %0d did not post 31 descriptors and tail 0x001f",
+                engine_id))
+
+        expected_trace.push_back($sformatf(
+            "RESET(channel=%s)", channel_string));
+        expected_trace.push_back($sformatf(
+            {"CONFIGURE(channel=%s,base=0x%016h,depth=32,size=16,",
+             "host_id=0x%01h,bdf=0x%04h,msix=0x%04h,valid=%0b)"},
+            channel_string, driver_engines[engine_id].ring_base(),
+            expected_hw.host_id, expected_hw.bdf, expected_hw.msix_index,
+            expected_hw.msix_valid));
+        expected_trace.push_back($sformatf(
+            "PUBLISH(channel=%s,tail=31)", channel_string));
+        expected_trace.push_back($sformatf(
+            "ENABLE(channel=%s)", channel_string));
+        if (harness_adapter.trace[channel_key] != expected_trace)
+            `uvm_fatal("TLPQ_DRIVER_INITIAL_TRACE", $sformatf(
+                "engine %0d setup trace diverged", engine_id))
+
+        for (gq_logical_seq_t seq = 0; seq < 31; seq++)
+            check_initial_descriptor(engine_id, seq,
+                                     descriptor_ids, buffer_addresses);
+    endtask
+
+    task start_driver_worker(int unsigned engine_id);
+        automatic int unsigned worker_engine = engine_id;
+
+        if (driver_worker_started[engine_id])
+            return;
+        driver_worker_started[engine_id] = 1;
+        fork
+            begin
+                driver_engines[worker_engine].run_completion_worker();
+                driver_worker_returned[worker_engine] = 1;
+            end
+        join_none
+    endtask
+
+    task wait_for_driver_callbacks(
+        int unsigned engine_id, int unsigned expected_count, string label);
+        while (driver_collectors[engine_id].observations.size() <
+               expected_count) begin
+            driver_collectors[engine_id].observation_event.reset();
+            if (driver_collectors[engine_id].observations.size() <
+                expected_count)
+                driver_collectors[engine_id].observation_event.wait_on();
+        end
+        if (driver_collectors[engine_id].observations.size() !=
+            expected_count)
+            `uvm_fatal("TLPQ_DRIVER_CALLBACK", {label,
+                       " observed an unexpected callback count"})
+    endtask
+
+    task wait_for_driver_publishes(
+        int unsigned engine_id, int unsigned expected_count, string label);
+        tlpq_channel_e channel;
+        tlpq_mock_adapter harness_adapter;
+        int channel_key;
+
+        channel = driver_channel(engine_id);
+        channel_key = int'(channel);
+        harness_adapter = driver_adapters[driver_adapter_slot(engine_id)];
+        while (harness_adapter.published_tails[channel_key].size() <
+               expected_count) begin
+            harness_adapter.publish_events[channel_key].reset();
+            if (harness_adapter.published_tails[channel_key].size() <
+                expected_count)
+                harness_adapter.publish_events[channel_key].wait_on();
+        end
+        if (harness_adapter.published_tails[channel_key].size() !=
+            expected_count)
+            `uvm_fatal("TLPQ_DRIVER_PUBLISH", {label,
+                       " observed an unexpected publish count"})
+    endtask
+
+    task wait_for_driver_queries(
+        int unsigned engine_id, int unsigned expected_count, string label);
+        while (driver_completions[engine_id].query_times.size() <
+               expected_count) begin
+            driver_completions[engine_id].query_event.reset();
+            if (driver_completions[engine_id].query_times.size() <
+                expected_count)
+                driver_completions[engine_id].query_event.wait_on();
+        end
+        if (driver_completions[engine_id].query_times.size() !=
+            expected_count)
+            `uvm_fatal("TLPQ_DRIVER_QUERY", {label,
+                       " observed an unexpected query count"})
+    endtask
+
+    task wait_for_driver_irq_waits(
+        int unsigned engine_id, int unsigned expected_count, string label);
+        tlpq_channel_e channel;
+        tlpq_mock_adapter harness_adapter;
+        int channel_key;
+
+        channel = driver_channel(engine_id);
+        channel_key = int'(channel);
+        harness_adapter = driver_adapters[driver_adapter_slot(engine_id)];
+        while (harness_adapter.wait_irq_count[channel_key] < expected_count) begin
+            harness_adapter.irq_wait_events[channel_key].reset();
+            if (harness_adapter.wait_irq_count[channel_key] < expected_count)
+                harness_adapter.irq_wait_events[channel_key].wait_on();
+        end
+        if (harness_adapter.wait_irq_count[channel_key] != expected_count)
+            `uvm_fatal("TLPQ_DRIVER_IRQ_WAIT", {label,
+                       " observed an unexpected IRQ wait count"})
+    endtask
+
+    task run_main_dual_ring_scenario();
+        byte golden[] = '{8'h80, 8'h77, 8'h66, 8'h55,
+                          8'h44, 8'h33, 8'h22, 8'h11,
+                          8'hc3, 8'h9a, 8'h78, 8'h56,
+                          8'h02, 8'h00, 8'h00, 8'h20};
+        bit [15:0] host_batch_tails[4] = '{
+            16'h001f, 16'h8000, 16'h8001, 16'h8002};
+        bit [15:0] switch_batch_tails[3] = '{
+            16'h001f, 16'h8000, 16'h8001};
+        tlpq_route_metadata_t host_metadata[3];
+        tlpq_route_metadata_t switch_metadata[2];
+        tlpq_route_metadata_t simultaneous_host_metadata;
+        tlpq_route_metadata_t simultaneous_switch_metadata;
+        tlpq_route_metadata_t lost_metadata;
+        tlpq_rx_desc host_retired[3];
+        tlpq_rx_desc switch_retired[2];
+        tlpq_rx_desc simultaneous_host_retired;
+        tlpq_rx_desc simultaneous_switch_retired;
+        tlpq_rx_desc lost_retired;
+        gq_addr_t host_retired_addr[3];
+        gq_addr_t switch_retired_addr[2];
+        gq_addr_t simultaneous_host_addr;
+        gq_addr_t simultaneous_switch_addr;
+        gq_addr_t lost_addr;
+        int unsigned host_retired_generation[3];
+        int unsigned switch_retired_generation[2];
+        int unsigned simultaneous_host_generation;
+        int unsigned simultaneous_switch_generation;
+        int unsigned lost_generation;
+        int unsigned host_free_before[3];
+        int unsigned switch_free_before[2];
+        int unsigned simultaneous_host_free_before;
+        int unsigned simultaneous_switch_free_before;
+        int unsigned lost_free_before;
+        int unsigned host_alloc_before;
+        int unsigned switch_alloc_before;
+        int unsigned simultaneous_alloc_before;
+        int unsigned lost_alloc_before;
+        int unsigned host_key;
+        int unsigned switch_key;
+        int unsigned wait_before;
+        int unsigned ack_before;
+        int unsigned query_before;
+        int unsigned trigger_before;
+        int unsigned callback_before;
+        int unsigned publish_before;
+        time host_irq_time;
+        time switch_irq_time;
+        time watchdog_wait_time;
+        gq_desc_base replacement_base;
+        tlpq_rx_desc replacement;
+        bit replacement_matches_retired;
+
+        host_key = int'(TLPQ_HOST);
+        switch_key = int'(TLPQ_SWITCH);
+        host_metadata[0] = '{host_id:4'h1, tlp_type:4'h2,
+                             primary_bus:8'h10, secondary_bus:8'h20,
+                             subordinate_bus:8'h30};
+        host_metadata[1] = '{host_id:4'h2, tlp_type:4'h3,
+                             primary_bus:8'h11, secondary_bus:8'h21,
+                             subordinate_bus:8'h31};
+        host_metadata[2] = '{host_id:4'h3, tlp_type:4'h4,
+                             primary_bus:8'h12, secondary_bus:8'h22,
+                             subordinate_bus:8'h32};
+        switch_metadata[0] = '{host_id:4'h5, tlp_type:4'h6,
+                               primary_bus:8'h40, secondary_bus:8'h50,
+                               subordinate_bus:8'h60};
+        switch_metadata[1] = '{host_id:4'h6, tlp_type:4'h7,
+                               primary_bus:8'h41, secondary_bus:8'h51,
+                               subordinate_bus:8'h61};
+        simultaneous_host_metadata =
+            '{host_id:4'h7, tlp_type:4'h8,
+              primary_bus:8'h70, secondary_bus:8'h71,
+              subordinate_bus:8'h72};
+        simultaneous_switch_metadata =
+            '{host_id:4'h8, tlp_type:4'h9,
+              primary_bus:8'h80, secondary_bus:8'h81,
+              subordinate_bus:8'h82};
+        lost_metadata = '{host_id:4'h9, tlp_type:4'ha,
+                          primary_bus:8'h90, secondary_bus:8'h91,
+                          subordinate_bus:8'h92};
+
+        if (driver_cfgs[MAIN_HOST_ENGINE].wait_mode != GQ_IRQ ||
+            driver_cfgs[MAIN_SWITCH_ENGINE].wait_mode != GQ_IRQ ||
+            driver_cfgs[MAIN_HOST_ENGINE].poll_policy != GQ_POLL_FIXED ||
+            driver_cfgs[MAIN_SWITCH_ENGINE].poll_policy != GQ_POLL_FIXED ||
+            driver_cfgs[MAIN_HOST_ENGINE].poll_min_interval != 10ns ||
+            driver_cfgs[MAIN_HOST_ENGINE].poll_max_interval != 10ns ||
+            driver_cfgs[MAIN_SWITCH_ENGINE].poll_min_interval != 10ns ||
+            driver_cfgs[MAIN_SWITCH_ENGINE].poll_max_interval != 10ns ||
+            driver_cfgs[MAIN_HOST_ENGINE].irq_watchdog_interval != 1us ||
+            driver_cfgs[MAIN_SWITCH_ENGINE].irq_watchdog_interval != 1us)
+            `uvm_fatal("TLPQ_DRIVER_IRQ_CFG",
+                       "directed dual IRQ configuration diverged")
+
+        start_driver_engine(MAIN_HOST_ENGINE);
+        if (driver_engines[MAIN_HOST_ENGINE].ring_base() !=
+                64'h0000_0001_e000_0000)
+            `uvm_fatal("TLPQ_DRIVER_HOST_BASE",
+                       "Host driver ring base broke the literal allocation map")
+        start_driver_engine(MAIN_SWITCH_ENGINE);
+        if (driver_engines[MAIN_SWITCH_ENGINE].ring_base() !=
+                64'h0000_0001_e000_1180)
+            `uvm_fatal("TLPQ_DRIVER_SWITCH_BASE",
+                       "Switch driver ring base broke the literal allocation map")
+        start_driver_worker(MAIN_HOST_ENGINE);
+        start_driver_worker(MAIN_SWITCH_ENGINE);
+        wait_for_driver_irq_waits(MAIN_HOST_ENGINE, 1, "Host batch");
+        wait_for_driver_irq_waits(MAIN_SWITCH_ENGINE, 1, "Switch idle");
+
+        host_alloc_before = mem.allocation_count_for_size(TLPQ_BUFFER_BYTES);
+        for (int unsigned i = 0; i < 3; i++) begin
+            if (!$cast(host_retired[i],
+                       driver_engines[MAIN_HOST_ENGINE].get_outstanding(i)))
+                `uvm_fatal("TLPQ_DRIVER_HOST_BATCH",
+                           "Host retired handle was not a TLPQ descriptor")
+            host_retired_addr[i] = host_retired[i].buf_addr;
+            host_retired_generation[i] =
+                mem.allocation_generation(host_retired_addr[i]);
+            host_free_before[i] = mem.free_count(host_retired_addr[i]);
+            if (!dut.complete_slot(driver_engines[MAIN_HOST_ENGINE], i,
+                                   golden, 16, host_metadata[i], -1))
+                `uvm_fatal("TLPQ_DRIVER_DUT",
+                           "Host batch completion injection failed")
+        end
+        host_irq_time = $time;
+        dut.trigger_irq(driver_adapters[MAIN_ADAPTER_SLOT], TLPQ_HOST);
+        wait_for_driver_callbacks(MAIN_HOST_ENGINE, 3, "Host batch");
+        wait_for_driver_publishes(MAIN_HOST_ENGINE, 4, "Host batch refill");
+        if (driver_adapters[MAIN_ADAPTER_SLOT].ack_irq_count[host_key] != 1 ||
+            driver_completions[MAIN_HOST_ENGINE].query_times.size() != 1 ||
+            driver_completions[MAIN_HOST_ENGINE].query_times[0] !=
+                host_irq_time ||
+            driver_completions[MAIN_HOST_ENGINE].ack_counts_at_query[0] != 1 ||
+            driver_collectors[MAIN_SWITCH_ENGINE].observations.size() != 0 ||
+            driver_adapters[MAIN_ADAPTER_SLOT].published_tails[switch_key].size()
+                != 1 ||
+            driver_adapters[MAIN_ADAPTER_SLOT].ack_irq_count.exists(switch_key))
+            `uvm_fatal("TLPQ_DRIVER_HOST_IRQ",
+                       "one Host IRQ crossed channel or ACK/query ordering")
+        foreach (host_batch_tails[i]) begin
+            if (driver_adapters[MAIN_ADAPTER_SLOT].published_tails[host_key][i]
+                    != host_batch_tails[i])
+                `uvm_fatal("TLPQ_DRIVER_HOST_TAIL", $sformatf(
+                    "Host tail[%0d] was not literal 0x%04h",
+                    i, host_batch_tails[i]))
+        end
+        for (int unsigned i = 0; i < 3; i++) begin
+            check_driver_observation(
+                driver_collectors[MAIN_HOST_ENGINE].observations[i],
+                golden, host_metadata[i], $sformatf("Host batch %0d", i));
+            replacement_base =
+                driver_engines[MAIN_HOST_ENGINE].get_outstanding(31 + i);
+            if (!$cast(replacement, replacement_base) || replacement == null)
+                `uvm_fatal("TLPQ_DRIVER_HOST_REPLACEMENT",
+                           "Host replacement was not a TLPQ descriptor")
+            replacement_matches_retired = 0;
+            foreach (host_retired[j]) begin
+                if (replacement == host_retired[j])
+                    replacement_matches_retired = 1;
+            end
+            if (replacement_matches_retired ||
+                replacement.owned_allocation_count() != 1 ||
+                replacement.buf_len != 128 ||
+                mem.allocation_size(replacement.buf_addr) != 128 ||
+                mem.free_count(host_retired_addr[i]) !=
+                    host_free_before[i] + 1 ||
+                (replacement.buf_addr == host_retired_addr[i] &&
+                 mem.allocation_generation(replacement.buf_addr) <=
+                    host_retired_generation[i]))
+                `uvm_fatal("TLPQ_DRIVER_HOST_REPLACEMENT", $sformatf(
+                    "Host replacement %0d was not a fresh 128-byte ownership",
+                    i))
+        end
+        if (mem.allocation_count_for_size(TLPQ_BUFFER_BYTES) !=
+                host_alloc_before + 3 ||
+            driver_engines[MAIN_HOST_ENGINE].head_seq() != 3 ||
+            driver_engines[MAIN_HOST_ENGINE].tail_seq() != 34 ||
+            driver_engines[MAIN_HOST_ENGINE].outstanding_count() != 31)
+            `uvm_fatal("TLPQ_DRIVER_HOST_REFILL",
+                       "Host batch did not refill singly back to 31")
+
+        // The Host first replacement crosses slot 31 to slot 0 and publishes
+        // phase-tail 0x8000 while the untouched Switch remains at 0x001f.
+        if (driver_adapters[MAIN_ADAPTER_SLOT].published_tails[host_key][1] !=
+                16'h8000 ||
+            driver_adapters[MAIN_ADAPTER_SLOT].published_tails[switch_key][0]
+                != 16'h001f)
+            `uvm_fatal("TLPQ_DRIVER_HOST_WRAP_ISOLATION",
+                       "Host wrap changed the Switch pre-wrap tail")
+
+        switch_alloc_before = mem.allocation_count_for_size(TLPQ_BUFFER_BYTES);
+        for (int unsigned i = 0; i < 2; i++) begin
+            if (!$cast(switch_retired[i],
+                       driver_engines[MAIN_SWITCH_ENGINE].get_outstanding(i)))
+                `uvm_fatal("TLPQ_DRIVER_SWITCH_BATCH",
+                           "Switch retired handle was not a TLPQ descriptor")
+            switch_retired_addr[i] = switch_retired[i].buf_addr;
+            switch_retired_generation[i] =
+                mem.allocation_generation(switch_retired_addr[i]);
+            switch_free_before[i] = mem.free_count(switch_retired_addr[i]);
+            if (!dut.complete_slot(driver_engines[MAIN_SWITCH_ENGINE], i,
+                                   golden, 16, switch_metadata[i], -1))
+                `uvm_fatal("TLPQ_DRIVER_DUT",
+                           "Switch batch completion injection failed")
+        end
+        switch_irq_time = $time;
+        dut.trigger_irq(driver_adapters[MAIN_ADAPTER_SLOT], TLPQ_SWITCH);
+        wait_for_driver_callbacks(MAIN_SWITCH_ENGINE, 2, "Switch batch");
+        wait_for_driver_publishes(MAIN_SWITCH_ENGINE, 3,
+                                  "Switch batch refill");
+        if (driver_adapters[MAIN_ADAPTER_SLOT].ack_irq_count[switch_key] != 1 ||
+            driver_completions[MAIN_SWITCH_ENGINE].query_times.size() != 1 ||
+            driver_completions[MAIN_SWITCH_ENGINE].query_times[0] !=
+                switch_irq_time ||
+            driver_completions[MAIN_SWITCH_ENGINE].ack_counts_at_query[0] != 1 ||
+            driver_collectors[MAIN_HOST_ENGINE].observations.size() != 3 ||
+            driver_adapters[MAIN_ADAPTER_SLOT].published_tails[host_key].size()
+                != 4 ||
+            driver_adapters[MAIN_ADAPTER_SLOT].ack_irq_count[host_key] != 1)
+            `uvm_fatal("TLPQ_DRIVER_SWITCH_IRQ",
+                       "one Switch IRQ crossed channel or ACK/query ordering")
+        foreach (switch_batch_tails[i]) begin
+            if (driver_adapters[MAIN_ADAPTER_SLOT].published_tails[switch_key][i]
+                    != switch_batch_tails[i])
+                `uvm_fatal("TLPQ_DRIVER_SWITCH_TAIL", $sformatf(
+                    "Switch tail[%0d] was not literal 0x%04h",
+                    i, switch_batch_tails[i]))
+        end
+        for (int unsigned i = 0; i < 2; i++) begin
+            check_driver_observation(
+                driver_collectors[MAIN_SWITCH_ENGINE].observations[i],
+                golden, switch_metadata[i],
+                $sformatf("Switch batch %0d", i));
+            if (!$cast(replacement,
+                       driver_engines[MAIN_SWITCH_ENGINE].get_outstanding(
+                           31 + i)) || replacement == null)
+                `uvm_fatal("TLPQ_DRIVER_SWITCH_REPLACEMENT",
+                           "Switch replacement was not a TLPQ descriptor")
+            replacement_matches_retired = 0;
+            foreach (switch_retired[j]) begin
+                if (replacement == switch_retired[j])
+                    replacement_matches_retired = 1;
+            end
+            if (replacement_matches_retired ||
+                replacement.owned_allocation_count() != 1 ||
+                replacement.buf_len != 128 ||
+                mem.allocation_size(replacement.buf_addr) != 128 ||
+                mem.free_count(switch_retired_addr[i]) !=
+                    switch_free_before[i] + 1 ||
+                (replacement.buf_addr == switch_retired_addr[i] &&
+                 mem.allocation_generation(replacement.buf_addr) <=
+                    switch_retired_generation[i]))
+                `uvm_fatal("TLPQ_DRIVER_SWITCH_REPLACEMENT", $sformatf(
+                    "Switch replacement %0d was not a fresh 128-byte ownership",
+                    i))
+        end
+        if (mem.allocation_count_for_size(TLPQ_BUFFER_BYTES) !=
+                switch_alloc_before + 2 ||
+            driver_engines[MAIN_SWITCH_ENGINE].head_seq() != 2 ||
+            driver_engines[MAIN_SWITCH_ENGINE].tail_seq() != 33 ||
+            driver_engines[MAIN_SWITCH_ENGINE].outstanding_count() != 31 ||
+            driver_adapters[MAIN_ADAPTER_SLOT].published_tails[switch_key][1]
+                != 16'h8000 ||
+            driver_adapters[MAIN_ADAPTER_SLOT].published_tails[host_key].size()
+                != 4)
+            `uvm_fatal("TLPQ_DRIVER_SWITCH_WRAP_ISOLATION",
+                       "Switch wrap/refill changed Host state")
+
+        // Spurious Host IRQ: exactly one ACK and query, zero delivery/refill.
+        wait_before =
+            driver_adapters[MAIN_ADAPTER_SLOT].wait_irq_count[host_key];
+        wait_for_driver_irq_waits(MAIN_HOST_ENGINE, wait_before + 1,
+                                  "Host spurious");
+        ack_before =
+            driver_adapters[MAIN_ADAPTER_SLOT].ack_irq_count[host_key];
+        query_before =
+            driver_completions[MAIN_HOST_ENGINE].query_times.size();
+        callback_before =
+            driver_collectors[MAIN_HOST_ENGINE].observations.size();
+        publish_before =
+            driver_adapters[MAIN_ADAPTER_SLOT].published_tails[host_key].size();
+        dut.trigger_irq(driver_adapters[MAIN_ADAPTER_SLOT], TLPQ_HOST);
+        wait_for_driver_queries(MAIN_HOST_ENGINE, query_before + 1,
+                                "Host spurious");
+        if (driver_adapters[MAIN_ADAPTER_SLOT].ack_irq_count[host_key] !=
+                ack_before + 1 ||
+            driver_completions[MAIN_HOST_ENGINE].ack_counts_at_query[
+                query_before] != ack_before + 1 ||
+            driver_collectors[MAIN_HOST_ENGINE].observations.size() !=
+                callback_before ||
+            driver_adapters[MAIN_ADAPTER_SLOT].published_tails[host_key].size()
+                != publish_before)
+            `uvm_fatal("TLPQ_DRIVER_SPURIOUS_IRQ",
+                       "spurious IRQ did not ACK once with zero delivery")
+
+        // Independent Host and Switch IRQ waiters are triggered at the same
+        // simulation timestamp and each owns exactly one ACK and one callback.
+        wait_before =
+            driver_adapters[MAIN_ADAPTER_SLOT].wait_irq_count[host_key];
+        wait_for_driver_irq_waits(MAIN_HOST_ENGINE, wait_before + 1,
+                                  "simultaneous Host");
+        wait_before =
+            driver_adapters[MAIN_ADAPTER_SLOT].wait_irq_count[switch_key];
+        wait_for_driver_irq_waits(MAIN_SWITCH_ENGINE, wait_before + 1,
+                                  "simultaneous Switch");
+        if (!$cast(simultaneous_host_retired,
+                   driver_engines[MAIN_HOST_ENGINE].get_outstanding(3)) ||
+            !$cast(simultaneous_switch_retired,
+                   driver_engines[MAIN_SWITCH_ENGINE].get_outstanding(2)))
+            `uvm_fatal("TLPQ_DRIVER_SIMULTANEOUS_OWNERSHIP",
+                       "simultaneous retired handles were not TLPQ descriptors")
+        simultaneous_host_addr = simultaneous_host_retired.buf_addr;
+        simultaneous_switch_addr = simultaneous_switch_retired.buf_addr;
+        simultaneous_host_generation =
+            mem.allocation_generation(simultaneous_host_addr);
+        simultaneous_switch_generation =
+            mem.allocation_generation(simultaneous_switch_addr);
+        simultaneous_host_free_before =
+            mem.free_count(simultaneous_host_addr);
+        simultaneous_switch_free_before =
+            mem.free_count(simultaneous_switch_addr);
+        simultaneous_alloc_before =
+            mem.allocation_count_for_size(TLPQ_BUFFER_BYTES);
+        if (!dut.complete_slot(driver_engines[MAIN_HOST_ENGINE], 3,
+                               golden, 16,
+                               simultaneous_host_metadata, -1) ||
+            !dut.complete_slot(driver_engines[MAIN_SWITCH_ENGINE], 2,
+                               golden, 16,
+                               simultaneous_switch_metadata, -1))
+            `uvm_fatal("TLPQ_DRIVER_DUT",
+                       "simultaneous completion injection failed")
+        ack_before =
+            driver_adapters[MAIN_ADAPTER_SLOT].ack_irq_count[host_key];
+        query_before =
+            driver_adapters[MAIN_ADAPTER_SLOT].ack_irq_count[switch_key];
+        host_irq_time = $time;
+        dut.trigger_irq(driver_adapters[MAIN_ADAPTER_SLOT], TLPQ_HOST);
+        dut.trigger_irq(driver_adapters[MAIN_ADAPTER_SLOT], TLPQ_SWITCH);
+        switch_irq_time = $time;
+        wait_for_driver_callbacks(MAIN_HOST_ENGINE, 4,
+                                  "simultaneous Host");
+        wait_for_driver_callbacks(MAIN_SWITCH_ENGINE, 3,
+                                  "simultaneous Switch");
+        wait_for_driver_publishes(MAIN_HOST_ENGINE, 5,
+                                  "simultaneous Host refill");
+        wait_for_driver_publishes(MAIN_SWITCH_ENGINE, 4,
+                                  "simultaneous Switch refill");
+        if (host_irq_time != switch_irq_time ||
+            driver_adapters[MAIN_ADAPTER_SLOT].ack_irq_count[host_key] !=
+                ack_before + 1 ||
+            driver_adapters[MAIN_ADAPTER_SLOT].ack_irq_count[switch_key] !=
+                query_before + 1)
+            `uvm_fatal("TLPQ_DRIVER_SIMULTANEOUS_IRQ",
+                       "simultaneous IRQs did not ACK independently once")
+        check_driver_observation(
+            driver_collectors[MAIN_HOST_ENGINE].observations[3],
+            golden, simultaneous_host_metadata, "simultaneous Host");
+        check_driver_observation(
+            driver_collectors[MAIN_SWITCH_ENGINE].observations[2],
+            golden, simultaneous_switch_metadata, "simultaneous Switch");
+        check_refill_replacement(
+            MAIN_HOST_ENGINE, 34, simultaneous_host_retired,
+            simultaneous_host_addr, simultaneous_host_generation,
+            simultaneous_host_free_before, "simultaneous Host replacement");
+        check_refill_replacement(
+            MAIN_SWITCH_ENGINE, 33, simultaneous_switch_retired,
+            simultaneous_switch_addr, simultaneous_switch_generation,
+            simultaneous_switch_free_before,
+            "simultaneous Switch replacement");
+        if (mem.allocation_count_for_size(TLPQ_BUFFER_BYTES) !=
+                simultaneous_alloc_before + 2)
+            `uvm_fatal("TLPQ_DRIVER_SIMULTANEOUS_OWNERSHIP",
+                       "simultaneous refills did not allocate two buffers")
+
+        // A completion with no interrupt edge is recovered by the standard
+        // one-microsecond watchdog, and that wakeup never acknowledges IRQ.
+        wait_before =
+            driver_adapters[MAIN_ADAPTER_SLOT].wait_irq_count[host_key];
+        wait_for_driver_irq_waits(MAIN_HOST_ENGINE, wait_before + 1,
+                                  "Host lost IRQ");
+        watchdog_wait_time =
+            driver_adapters[MAIN_ADAPTER_SLOT].wait_irq_times[host_key][
+                wait_before];
+        if (!$cast(lost_retired,
+                   driver_engines[MAIN_HOST_ENGINE].get_outstanding(4)))
+            `uvm_fatal("TLPQ_DRIVER_LOST_OWNERSHIP",
+                       "lost-IRQ retired handle was not a TLPQ descriptor")
+        lost_addr = lost_retired.buf_addr;
+        lost_generation = mem.allocation_generation(lost_addr);
+        lost_free_before = mem.free_count(lost_addr);
+        lost_alloc_before =
+            mem.allocation_count_for_size(TLPQ_BUFFER_BYTES);
+        if (!dut.complete_slot(driver_engines[MAIN_HOST_ENGINE], 4,
+                               golden, 16, lost_metadata, -1))
+            `uvm_fatal("TLPQ_DRIVER_DUT",
+                       "lost IRQ completion injection failed")
+        ack_before =
+            driver_adapters[MAIN_ADAPTER_SLOT].ack_irq_count[host_key];
+        query_before =
+            driver_completions[MAIN_HOST_ENGINE].query_times.size();
+        trigger_before =
+            driver_adapters[MAIN_ADAPTER_SLOT].trigger_irq_count[host_key];
+        wait_for_driver_callbacks(MAIN_HOST_ENGINE, 5, "Host lost IRQ");
+        wait_for_driver_publishes(MAIN_HOST_ENGINE, 6,
+                                  "Host lost IRQ refill");
+        if (driver_adapters[MAIN_ADAPTER_SLOT].ack_irq_count[host_key] !=
+                ack_before ||
+            driver_adapters[MAIN_ADAPTER_SLOT].trigger_irq_count[host_key] !=
+                trigger_before ||
+            driver_completions[MAIN_HOST_ENGINE].query_times[query_before] !=
+                watchdog_wait_time + 1us ||
+            driver_completions[MAIN_HOST_ENGINE].ack_counts_at_query[
+                query_before] != ack_before)
+            `uvm_fatal("TLPQ_DRIVER_LOST_IRQ",
+                       "one-us watchdog recovery ACKed or fired at wrong time")
+        check_driver_observation(
+            driver_collectors[MAIN_HOST_ENGINE].observations[4],
+            golden, lost_metadata, "Host lost IRQ");
+        check_refill_replacement(
+            MAIN_HOST_ENGINE, 35, lost_retired, lost_addr, lost_generation,
+            lost_free_before, "lost-IRQ Host replacement");
+        if (mem.allocation_count_for_size(TLPQ_BUFFER_BYTES) !=
+                lost_alloc_before + 1)
+            `uvm_fatal("TLPQ_DRIVER_LOST_OWNERSHIP",
+                       "lost-IRQ refill did not allocate one buffer")
+    endtask
+
+    task run_fixed_poll_scenario();
+        byte golden[] = '{8'h80, 8'h77, 8'h66, 8'h55,
+                          8'h44, 8'h33, 8'h22, 8'h11,
+                          8'hc3, 8'h9a, 8'h78, 8'h56,
+                          8'h02, 8'h00, 8'h00, 8'h20};
+        tlpq_route_metadata_t host_metadata;
+        tlpq_route_metadata_t switch_metadata;
+        tlpq_rx_desc host_retired;
+        tlpq_rx_desc switch_retired;
+        gq_addr_t host_retired_addr;
+        gq_addr_t switch_retired_addr;
+        int unsigned host_retired_generation;
+        int unsigned switch_retired_generation;
+        int unsigned host_retired_free_before;
+        int unsigned switch_retired_free_before;
+        int unsigned allocation_before;
+        time poll_started;
+        int host_key;
+        int switch_key;
+
+        host_key = int'(TLPQ_HOST);
+        switch_key = int'(TLPQ_SWITCH);
+        host_metadata = '{host_id:4'ha, tlp_type:4'hb,
+                          primary_bus:8'ha1, secondary_bus:8'ha2,
+                          subordinate_bus:8'ha3};
+        switch_metadata = '{host_id:4'hb, tlp_type:4'hc,
+                            primary_bus:8'hb1, secondary_bus:8'hb2,
+                            subordinate_bus:8'hb3};
+        if (driver_cfgs[POLL_HOST_ENGINE].wait_mode != GQ_POLL ||
+            driver_cfgs[POLL_SWITCH_ENGINE].wait_mode != GQ_POLL ||
+            driver_cfgs[POLL_HOST_ENGINE].poll_policy != GQ_POLL_FIXED ||
+            driver_cfgs[POLL_SWITCH_ENGINE].poll_policy != GQ_POLL_FIXED ||
+            driver_cfgs[POLL_HOST_ENGINE].poll_min_interval != 10ns ||
+            driver_cfgs[POLL_HOST_ENGINE].poll_max_interval != 10ns ||
+            driver_cfgs[POLL_SWITCH_ENGINE].poll_min_interval != 10ns ||
+            driver_cfgs[POLL_SWITCH_ENGINE].poll_max_interval != 10ns)
+            `uvm_fatal("TLPQ_DRIVER_POLL_CFG",
+                       "directed Host/Switch fixed 10ns Poll diverged")
+
+        start_driver_engine(POLL_HOST_ENGINE);
+        start_driver_engine(POLL_SWITCH_ENGINE);
+        if (!$cast(host_retired,
+                   driver_engines[POLL_HOST_ENGINE].get_outstanding(0)) ||
+            !$cast(switch_retired,
+                   driver_engines[POLL_SWITCH_ENGINE].get_outstanding(0)))
+            `uvm_fatal("TLPQ_DRIVER_POLL_OWNERSHIP",
+                       "fixed Poll retired handles were not TLPQ descriptors")
+        host_retired_addr = host_retired.buf_addr;
+        switch_retired_addr = switch_retired.buf_addr;
+        host_retired_generation =
+            mem.allocation_generation(host_retired_addr);
+        switch_retired_generation =
+            mem.allocation_generation(switch_retired_addr);
+        host_retired_free_before = mem.free_count(host_retired_addr);
+        switch_retired_free_before = mem.free_count(switch_retired_addr);
+        allocation_before =
+            mem.allocation_count_for_size(TLPQ_BUFFER_BYTES);
+        if (!dut.complete_slot(driver_engines[POLL_HOST_ENGINE], 0,
+                               golden, 16, host_metadata, -1) ||
+            !dut.complete_slot(driver_engines[POLL_SWITCH_ENGINE], 0,
+                               golden, 16, switch_metadata, -1))
+            `uvm_fatal("TLPQ_DRIVER_DUT",
+                       "fixed Poll completion injection failed")
+        poll_started = $time;
+        start_driver_worker(POLL_HOST_ENGINE);
+        start_driver_worker(POLL_SWITCH_ENGINE);
+        wait_for_driver_callbacks(POLL_HOST_ENGINE, 1, "Host fixed Poll");
+        wait_for_driver_callbacks(POLL_SWITCH_ENGINE, 1,
+                                  "Switch fixed Poll");
+        wait_for_driver_publishes(POLL_HOST_ENGINE, 2,
+                                  "Host fixed Poll refill");
+        wait_for_driver_publishes(POLL_SWITCH_ENGINE, 2,
+                                  "Switch fixed Poll refill");
+        if (driver_completions[POLL_HOST_ENGINE].query_times[0] !=
+                poll_started + 10ns ||
+            driver_completions[POLL_SWITCH_ENGINE].query_times[0] !=
+                poll_started + 10ns ||
+            driver_collectors[POLL_HOST_ENGINE].observations[0].callback_time
+                != poll_started + 10ns ||
+            driver_collectors[POLL_SWITCH_ENGINE].observations[0].callback_time
+                != poll_started + 10ns ||
+            driver_adapters[POLL_ADAPTER_SLOT].ack_irq_count.exists(host_key) ||
+            driver_adapters[POLL_ADAPTER_SLOT].ack_irq_count.exists(switch_key) ||
+            driver_adapters[POLL_ADAPTER_SLOT].trigger_irq_count.exists(host_key) ||
+            driver_adapters[POLL_ADAPTER_SLOT].trigger_irq_count.exists(switch_key) ||
+            driver_adapters[POLL_ADAPTER_SLOT].wait_irq_count.exists(host_key) ||
+            driver_adapters[POLL_ADAPTER_SLOT].wait_irq_count.exists(switch_key) ||
+            driver_adapters[POLL_ADAPTER_SLOT].published_tails[host_key][1]
+                != 16'h8000 ||
+            driver_adapters[POLL_ADAPTER_SLOT].published_tails[switch_key][1]
+                != 16'h8000)
+            `uvm_fatal("TLPQ_DRIVER_FIXED_POLL",
+                       "Host/Switch did not query and refill at fixed 10ns")
+        check_driver_observation(
+            driver_collectors[POLL_HOST_ENGINE].observations[0],
+            golden, host_metadata, "Host fixed Poll");
+        check_driver_observation(
+            driver_collectors[POLL_SWITCH_ENGINE].observations[0],
+            golden, switch_metadata, "Switch fixed Poll");
+        check_refill_replacement(
+            POLL_HOST_ENGINE, 31, host_retired, host_retired_addr,
+            host_retired_generation, host_retired_free_before,
+            "fixed Poll Host replacement");
+        check_refill_replacement(
+            POLL_SWITCH_ENGINE, 31, switch_retired, switch_retired_addr,
+            switch_retired_generation, switch_retired_free_before,
+            "fixed Poll Switch replacement");
+        if (mem.allocation_count_for_size(TLPQ_BUFFER_BYTES) !=
+                allocation_before + 2)
+            `uvm_fatal("TLPQ_DRIVER_POLL_OWNERSHIP",
+                       "fixed Poll refills did not allocate two buffers")
+    endtask
+
+    task recycle_error_engine(string label);
+        gq_addr_t ring_addr;
+        gq_addr_t buffer_addresses[$];
+        int unsigned ring_free_before;
+        int unsigned buffer_free_before[$];
+        tlpq_rx_desc desc;
+        int host_key;
+        int publish_before;
+
+        host_key = int'(TLPQ_HOST);
+        ring_addr = driver_engines[ERROR_HOST_ENGINE].ring_base();
+        ring_free_before = mem.free_count(ring_addr);
+        for (gq_logical_seq_t seq =
+                 driver_engines[ERROR_HOST_ENGINE].head_seq();
+             seq < driver_engines[ERROR_HOST_ENGINE].tail_seq(); seq++) begin
+            if (!$cast(desc,
+                       driver_engines[ERROR_HOST_ENGINE].get_outstanding(seq)))
+                `uvm_fatal("TLPQ_DRIVER_ERROR_RESET", {label,
+                           " could not snapshot outstanding descriptor"})
+            buffer_addresses.push_back(desc.buf_addr);
+            buffer_free_before.push_back(mem.free_count(desc.buf_addr));
+        end
+        publish_before =
+            driver_adapters[ERROR_ADAPTER_SLOT].published_tails[host_key].size();
+        driver_engines[ERROR_HOST_ENGINE].begin_reset();
+        driver_engines[ERROR_HOST_ENGINE].finish_reset();
+        if (driver_engines[ERROR_HOST_ENGINE].outstanding_count() != 0 ||
+            driver_engines[ERROR_HOST_ENGINE].ring_base() != 0 ||
+            mem.free_count(ring_addr) != ring_free_before + 1)
+            `uvm_fatal("TLPQ_DRIVER_ERROR_RESET", {label,
+                       " reset did not release ring ownership once"})
+        foreach (buffer_addresses[i]) begin
+            if (mem.free_count(buffer_addresses[i]) !=
+                    buffer_free_before[i] + 1)
+                `uvm_fatal("TLPQ_DRIVER_ERROR_RESET", {label,
+                           " reset did not release buffer ownership once"})
+        end
+        driver_engines[ERROR_HOST_ENGINE].release_reset();
+        if (!driver_engines[ERROR_HOST_ENGINE].is_ready() ||
+            driver_engines[ERROR_HOST_ENGINE].head_seq() != 0 ||
+            driver_engines[ERROR_HOST_ENGINE].tail_seq() != 31 ||
+            driver_engines[ERROR_HOST_ENGINE].outstanding_count() != 31 ||
+            driver_adapters[ERROR_ADAPTER_SLOT].published_tails[host_key].size()
+                != publish_before + 1 ||
+            driver_adapters[ERROR_ADAPTER_SLOT].published_tails[host_key][
+                publish_before] != 16'h001f)
+            `uvm_fatal("TLPQ_DRIVER_ERROR_RESTART", {label,
+                       " reset release did not repost initial tail 0x001f"})
+    endtask
+
+    task run_invalid_completion_case(
+        string label, input byte dpu_bytes[], int unsigned completed_length,
+        int stable_corrupt_offset, bit expect_invalid_query,
+        bit expect_malformed_bytes);
+        tlpq_route_metadata_t metadata;
+        tlpq_rx_desc desc;
+        gq_addr_t buffer_addr;
+        int unsigned free_before;
+        int unsigned report_before;
+        int unsigned invalid_before;
+        int unsigned parse_before;
+
+        metadata = '{host_id:4'hc, tlp_type:4'hd,
+                     primary_bus:8'hc1, secondary_bus:8'hc2,
+                     subordinate_bus:8'hc3};
+        if (!$cast(desc,
+                   driver_engines[ERROR_HOST_ENGINE].get_outstanding(0)))
+            `uvm_fatal("TLPQ_DRIVER_INVALID",
+                       {label, " missing head descriptor"})
+        buffer_addr = desc.buf_addr;
+        free_before = mem.free_count(buffer_addr);
+        report_before = driver_report_catcher.report_ids.size();
+        invalid_before = driver_report_catcher.invalid_query_count;
+        parse_before = driver_report_catcher.parse_error_count;
+        if (!dut.complete_slot(driver_engines[ERROR_HOST_ENGINE], 0,
+                               dpu_bytes, completed_length,
+                               metadata, stable_corrupt_offset))
+            `uvm_fatal("TLPQ_DRIVER_DUT", {label,
+                       " completion injection failed"})
+        driver_engines[ERROR_HOST_ENGINE].drain_completed();
+        if (driver_report_catcher.report_ids.size() != report_before + 1 ||
+            driver_report_catcher.invalid_query_count !=
+                invalid_before + (expect_invalid_query ? 1 : 0) ||
+            driver_report_catcher.parse_error_count !=
+                parse_before + (expect_invalid_query ? 0 : 1) ||
+            !driver_report_matches(
+                report_before,
+                expect_invalid_query ? UVM_WARNING : UVM_ERROR,
+                expect_invalid_query ?
+                    "GQ_COMPLETION_QUERY" : "GQ_COMPLETION_PARSE",
+                expect_invalid_query ?
+                    "completion source returned an invalid query" :
+                    "completion parse failed at logical sequence 0") ||
+            driver_collectors[ERROR_HOST_ENGINE].observations.size() != 0 ||
+            driver_engines[ERROR_HOST_ENGINE].head_seq() != 0 ||
+            driver_engines[ERROR_HOST_ENGINE].outstanding_count() != 31 ||
+            mem.free_count(buffer_addr) != free_before)
+            `uvm_fatal("TLPQ_DRIVER_INVALID", {label,
+                       " retired, delivered, freed, or reported incorrectly"})
+        if (expect_invalid_query) begin
+            if (desc.flags != TLPQ_DESC_AVAIL || desc.buf_len != 128 ||
+                desc.dpu_bytes.size() != 0 || desc.decoded_tlp != null)
+                `uvm_fatal("TLPQ_DRIVER_CHANGED_ADDRESS",
+                           "changed address mutated the owned descriptor")
+        end else if (expect_malformed_bytes) begin
+            if (!driver_dpu_bytes_equal(desc.dpu_bytes, dpu_bytes) ||
+                desc.decoded_tlp != null)
+                `uvm_fatal("TLPQ_DRIVER_MALFORMED_BYTES",
+                           "malformed DPU bytes were not preserved exactly")
+        end else if (desc.dpu_bytes.size() != 0 ||
+                     desc.decoded_tlp != null) begin
+            `uvm_fatal("TLPQ_DRIVER_BAD_LENGTH",
+                       "zero/oversize length exposed decoded data")
+        end
+        recycle_error_engine(label);
+    endtask
+
+    task run_malformed_and_reset_query_scenario();
+        byte golden[] = '{8'h80, 8'h77, 8'h66, 8'h55,
+                          8'h44, 8'h33, 8'h22, 8'h11,
+                          8'hc3, 8'h9a, 8'h78, 8'h56,
+                          8'h02, 8'h00, 8'h00, 8'h20};
+        byte malformed[] = '{8'h80, 8'h77, 8'h66, 8'h55,
+                             8'h44, 8'h33, 8'h22, 8'h11,
+                             8'hc3, 8'h9a, 8'h78, 8'h56,
+                             8'h02, 8'h00, 8'h00, 8'he0};
+        byte empty[] = '{};
+        tlpq_route_metadata_t metadata;
+        tlpq_rx_desc desc;
+        gq_addr_t ring_addr;
+        gq_addr_t buffer_addresses[$];
+        int unsigned ring_free_before;
+        int unsigned buffer_free_before[$];
+        int unsigned report_before;
+        int unsigned callback_before;
+        longint unsigned epoch_before;
+        bit drain_done;
+
+        start_driver_engine(ERROR_HOST_ENGINE);
+        run_invalid_completion_case(
+            "changed address", golden, 16, 4, 1, 0);
+        run_invalid_completion_case(
+            "zero length", empty, 0, -1, 0, 0);
+        run_invalid_completion_case(
+            "oversize length", golden, 129, -1, 0, 0);
+        run_invalid_completion_case(
+            "malformed DPU bytes", malformed, 16, -1, 0, 1);
+
+        metadata = '{host_id:4'he, tlp_type:4'hf,
+                     primary_bus:8'he1, secondary_bus:8'he2,
+                     subordinate_bus:8'he3};
+        ring_addr = driver_engines[ERROR_HOST_ENGINE].ring_base();
+        ring_free_before = mem.free_count(ring_addr);
+        for (gq_logical_seq_t seq = 0; seq < 31; seq++) begin
+            if (!$cast(desc,
+                       driver_engines[ERROR_HOST_ENGINE].get_outstanding(seq)))
+                `uvm_fatal("TLPQ_DRIVER_RESET_QUERY",
+                           "could not snapshot reset-query ownership")
+            buffer_addresses.push_back(desc.buf_addr);
+            buffer_free_before.push_back(mem.free_count(desc.buf_addr));
+        end
+        if (!dut.complete_slot(driver_engines[ERROR_HOST_ENGINE], 0,
+                               golden, 16, metadata, -1))
+            `uvm_fatal("TLPQ_DRIVER_DUT",
+                       "reset-query completion injection failed")
+        report_before = driver_report_catcher.report_ids.size();
+        callback_before =
+            driver_collectors[ERROR_HOST_ENGINE].observations.size();
+        driver_completions[ERROR_HOST_ENGINE].block_next_query();
+        drain_done = 0;
+        fork
+            begin
+                driver_engines[ERROR_HOST_ENGINE].drain_completed();
+                drain_done = 1;
+            end
+        join_none
+        driver_completions[ERROR_HOST_ENGINE].query_blocked.wait_on();
+        epoch_before = driver_engines[ERROR_HOST_ENGINE].reset_epoch();
+        driver_engines[ERROR_HOST_ENGINE].begin_reset();
+        if (driver_engines[ERROR_HOST_ENGINE].reset_epoch() !=
+                epoch_before + 1)
+            `uvm_fatal("TLPQ_DRIVER_RESET_QUERY_EPOCH",
+                       "reset did not advance during blocked query")
+        driver_completions[ERROR_HOST_ENGINE].release_query();
+        wait (drain_done);
+        driver_engines[ERROR_HOST_ENGINE].finish_reset();
+        if (driver_report_catcher.report_ids.size() != report_before ||
+            driver_collectors[ERROR_HOST_ENGINE].observations.size() !=
+                callback_before ||
+            driver_engines[ERROR_HOST_ENGINE].outstanding_count() != 0 ||
+            driver_engines[ERROR_HOST_ENGINE].ring_base() != 0 ||
+            mem.free_count(ring_addr) != ring_free_before + 1)
+            `uvm_fatal("TLPQ_DRIVER_RESET_QUERY",
+                       "blocked query committed stale work or ring ownership")
+        foreach (buffer_addresses[i]) begin
+            if (mem.free_count(buffer_addresses[i]) !=
+                    buffer_free_before[i] + 1)
+                `uvm_fatal("TLPQ_DRIVER_RESET_QUERY",
+                           "blocked-query reset did not free each buffer once")
+        end
+        driver_engines[ERROR_HOST_ENGINE].cleanup();
+        if (mem.free_count(ring_addr) != ring_free_before + 1)
+            `uvm_fatal("TLPQ_DRIVER_RESET_QUERY",
+                       "cleanup double-freed reset-query ring")
+        foreach (buffer_addresses[i]) begin
+            if (mem.free_count(buffer_addresses[i]) !=
+                    buffer_free_before[i] + 1)
+                `uvm_fatal("TLPQ_DRIVER_RESET_QUERY",
+                           "cleanup double-freed reset-query buffer")
+        end
+    endtask
+
+    task run_cleanup_blocked_ack_scenario();
+        byte golden[] = '{8'h80, 8'h77, 8'h66, 8'h55,
+                          8'h44, 8'h33, 8'h22, 8'h11,
+                          8'hc3, 8'h9a, 8'h78, 8'h56,
+                          8'h02, 8'h00, 8'h00, 8'h20};
+        tlpq_route_metadata_t metadata;
+        tlpq_rx_desc desc;
+        gq_addr_t ring_addr;
+        gq_addr_t buffer_addresses[$];
+        int unsigned ring_free_before;
+        int unsigned buffer_free_before[$];
+        int unsigned switch_key;
+        int unsigned wait_before;
+        int unsigned ack_before;
+        int unsigned query_before;
+        int unsigned callback_before;
+        bit cleanup_done;
+
+        switch_key = int'(TLPQ_SWITCH);
+        metadata = '{host_id:4'hf, tlp_type:4'h1,
+                     primary_bus:8'hf1, secondary_bus:8'hf2,
+                     subordinate_bus:8'hf3};
+        wait_before =
+            driver_adapters[MAIN_ADAPTER_SLOT].wait_irq_count[switch_key];
+        wait_for_driver_irq_waits(MAIN_SWITCH_ENGINE, wait_before + 1,
+                                  "cleanup blocked ACK");
+        if (!dut.complete_slot(driver_engines[MAIN_SWITCH_ENGINE], 3,
+                               golden, 16, metadata, -1))
+            `uvm_fatal("TLPQ_DRIVER_DUT",
+                       "cleanup blocked-ACK completion injection failed")
+        ring_addr = driver_engines[MAIN_SWITCH_ENGINE].ring_base();
+        ring_free_before = mem.free_count(ring_addr);
+        for (gq_logical_seq_t seq =
+                 driver_engines[MAIN_SWITCH_ENGINE].head_seq();
+             seq < driver_engines[MAIN_SWITCH_ENGINE].tail_seq(); seq++) begin
+            if (!$cast(desc,
+                       driver_engines[MAIN_SWITCH_ENGINE].get_outstanding(seq)))
+                `uvm_fatal("TLPQ_DRIVER_CLEANUP_ACK",
+                           "could not snapshot blocked-ACK ownership")
+            buffer_addresses.push_back(desc.buf_addr);
+            buffer_free_before.push_back(mem.free_count(desc.buf_addr));
+        end
+        ack_before =
+            driver_adapters[MAIN_ADAPTER_SLOT].ack_irq_count[switch_key];
+        query_before =
+            driver_completions[MAIN_SWITCH_ENGINE].query_times.size();
+        callback_before =
+            driver_collectors[MAIN_SWITCH_ENGINE].observations.size();
+        driver_adapters[MAIN_ADAPTER_SLOT].block_next_irq_ack(TLPQ_SWITCH);
+        dut.trigger_irq(driver_adapters[MAIN_ADAPTER_SLOT], TLPQ_SWITCH);
+        driver_adapters[MAIN_ADAPTER_SLOT].irq_ack_blocked[switch_key].wait_on();
+        cleanup_done = 0;
+        fork
+            begin
+                driver_engines[MAIN_SWITCH_ENGINE].cleanup();
+                cleanup_done = 1;
+            end
+        join_none
+        #1ns;
+        if (cleanup_done)
+            `uvm_fatal("TLPQ_DRIVER_CLEANUP_ACK",
+                       "cleanup returned before the owned ACK completed")
+        driver_adapters[MAIN_ADAPTER_SLOT].release_irq_ack(TLPQ_SWITCH);
+        wait (cleanup_done);
+        if (driver_adapters[MAIN_ADAPTER_SLOT].ack_irq_count[switch_key] !=
+                ack_before + 1 ||
+            driver_completions[MAIN_SWITCH_ENGINE].query_times.size() !=
+                query_before ||
+            driver_collectors[MAIN_SWITCH_ENGINE].observations.size() !=
+                callback_before ||
+            driver_engines[MAIN_SWITCH_ENGINE].outstanding_count() != 0 ||
+            driver_engines[MAIN_SWITCH_ENGINE].ring_base() != 0 ||
+            mem.free_count(ring_addr) != ring_free_before + 1)
+            `uvm_fatal("TLPQ_DRIVER_CLEANUP_ACK",
+                       "blocked ACK queried stale work or leaked ring ownership")
+        foreach (buffer_addresses[i]) begin
+            if (mem.free_count(buffer_addresses[i]) !=
+                    buffer_free_before[i] + 1)
+                `uvm_fatal("TLPQ_DRIVER_CLEANUP_ACK",
+                           "cleanup did not free blocked-ACK buffer once")
+        end
+        driver_engines[MAIN_SWITCH_ENGINE].cleanup();
+        if (mem.free_count(ring_addr) != ring_free_before + 1)
+            `uvm_fatal("TLPQ_DRIVER_CLEANUP_ACK",
+                       "second cleanup double-freed blocked-ACK ring")
+        foreach (buffer_addresses[i]) begin
+            if (mem.free_count(buffer_addresses[i]) !=
+                    buffer_free_before[i] + 1)
+                `uvm_fatal("TLPQ_DRIVER_CLEANUP_ACK",
+                           "second cleanup double-freed blocked-ACK buffer")
+        end
+    endtask
+
+    task cleanup_driver_engines();
+        for (int unsigned engine_id = 0;
+             engine_id < DRIVER_ENGINE_COUNT; engine_id++)
+            driver_engines[engine_id].cleanup();
+        mem.leak_check(`__FILE__, `__LINE__);
+    endtask
+
     task run_phase(uvm_phase phase);
         string reason;
         tlpq_env_cfg duplicate_cfg;
@@ -651,9 +2073,6 @@ class tlpq_driver_conformance_test extends uvm_test;
         tlpq_wrong_adapter wrong_adapter;
 
         phase.raise_objection(this);
-        mem = new("mem");
-        mem.init_region(64'h0000_0001_e000_0000,
-                        64'h0000_0001_e0ff_ffff, MODE_LINEAR, 16);
         adapter = tlpq_mock_adapter::type_id::create("adapter");
         env_cfg = tlpq_env_cfg::type_id::create("env_cfg");
         env_cfg.mem = mem;
@@ -707,6 +2126,35 @@ class tlpq_driver_conformance_test extends uvm_test;
             wrong_cfg.validate(reason))
             `uvm_fatal("TLPQ_ADAPTER_TYPE",
                        "non-TLPQ adapter was accepted")
+
+        uvm_report_cb::add(null, driver_report_catcher);
+        fork : tlpq_conformance_watchdog
+            begin
+                #50us;
+                `uvm_fatal("TLPQ_DRIVER_TIMEOUT",
+                           "full dual-ring conformance scenario timed out")
+            end
+        join_none
+        run_main_dual_ring_scenario();
+        run_fixed_poll_scenario();
+        run_malformed_and_reset_query_scenario();
+        run_cleanup_blocked_ack_scenario();
+        cleanup_driver_engines();
+        if (driver_report_catcher.invalid_query_count != 1 ||
+            driver_report_catcher.parse_error_count != 3 ||
+            driver_report_catcher.report_ids.size() != 4)
+            `uvm_fatal("TLPQ_DRIVER_REPORTS", $sformatf(
+                "malformed report counts invalid/parse/total=%0d/%0d/%0d",
+                driver_report_catcher.invalid_query_count,
+                driver_report_catcher.parse_error_count,
+                driver_report_catcher.report_ids.size()))
+        disable tlpq_conformance_watchdog;
+        uvm_report_cb::delete(null, driver_report_catcher);
+        `uvm_info("TLPQ_DRIVER_EVIDENCE",
+            {"dual initial=31/tail=001f, batch-one refill/wrap=8000, ",
+             "Host/Switch fixed Poll+IRQ, 1us watchdog, malformed and ",
+             "reset/cleanup ACK races completed through real GQ engines"},
+            UVM_LOW)
 
         phase.drop_objection(this);
     endtask

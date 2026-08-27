@@ -18,6 +18,14 @@ class tlpq_mock_adapter extends tlpq_reg_adapter;
     int unsigned ack_irq_count[int];
     int unsigned trigger_irq_count[int];
     uvm_event irq_events[int];
+    uvm_event publish_events[int];
+    uvm_event irq_wait_events[int];
+    uvm_event irq_ack_blocked[int];
+    uvm_event irq_ack_release[int];
+    bit block_irq_ack_once[int];
+    time wait_irq_times[int][$];
+    time trigger_irq_times[int][$];
+    time ack_irq_times[int][$];
     int unsigned cancellation_epoch[int];
     bit block_configure_once[int];
     bit block_publish_once[int];
@@ -44,6 +52,20 @@ class tlpq_mock_adapter extends tlpq_reg_adapter;
         if (!irq_events.exists(channel_key))
             irq_events[channel_key] = new(
                 $sformatf("tlpq_%s_irq", channel_name(channel)));
+        if (!publish_events.exists(channel_key))
+            publish_events[channel_key] = new(
+                $sformatf("tlpq_%s_publish", channel_name(channel)));
+        if (!irq_wait_events.exists(channel_key))
+            irq_wait_events[channel_key] = new(
+                $sformatf("tlpq_%s_irq_wait", channel_name(channel)));
+        if (!irq_ack_blocked.exists(channel_key))
+            irq_ack_blocked[channel_key] = new(
+                $sformatf("tlpq_%s_irq_ack_blocked",
+                          channel_name(channel)));
+        if (!irq_ack_release.exists(channel_key))
+            irq_ack_release[channel_key] = new(
+                $sformatf("tlpq_%s_irq_ack_release",
+                          channel_name(channel)));
     endfunction
 
     protected function void ensure_barrier_events(tlpq_channel_e channel);
@@ -132,7 +154,26 @@ class tlpq_mock_adapter extends tlpq_reg_adapter;
         channel_key = int'(channel);
         ensure_irq_event(channel);
         trigger_irq_count[channel_key]++;
+        trigger_irq_times[channel_key].push_back($time);
         irq_events[channel_key].trigger();
+    endfunction
+
+    function void block_next_irq_ack(tlpq_channel_e channel);
+        int channel_key;
+
+        channel_key = int'(channel);
+        ensure_irq_event(channel);
+        block_irq_ack_once[channel_key] = 1;
+        irq_ack_blocked[channel_key].reset();
+        irq_ack_release[channel_key].reset();
+    endfunction
+
+    function void release_irq_ack(tlpq_channel_e channel);
+        int channel_key;
+
+        channel_key = int'(channel);
+        ensure_irq_event(channel);
+        irq_ack_release[channel_key].trigger();
     endfunction
 
     virtual task reset_tlpq_rx(tlpq_channel_e channel);
@@ -232,6 +273,7 @@ class tlpq_mock_adapter extends tlpq_reg_adapter;
         trace[channel_key].push_back($sformatf(
             "PUBLISH(channel=%s,tail=%0d)", channel_name(channel), tail));
         published_tails[channel_key].push_back(tail);
+        publish_events[channel_key].trigger();
     endtask
 
     virtual task wait_tlpq_rx_irq(tlpq_channel_e channel);
@@ -241,7 +283,9 @@ class tlpq_mock_adapter extends tlpq_reg_adapter;
         trace[channel_key].push_back($sformatf(
             "WAIT_IRQ(channel=%s)", channel_name(channel)));
         wait_irq_count[channel_key]++;
+        wait_irq_times[channel_key].push_back($time);
         ensure_irq_event(channel);
+        irq_wait_events[channel_key].trigger();
         irq_events[channel_key].wait_on();
     endtask
 
@@ -252,6 +296,14 @@ class tlpq_mock_adapter extends tlpq_reg_adapter;
         trace[channel_key].push_back($sformatf(
             "ACK_IRQ(channel=%s)", channel_name(channel)));
         ack_irq_count[channel_key]++;
+        ack_irq_times[channel_key].push_back($time);
+        ensure_irq_event(channel);
+        if (block_irq_ack_once.exists(channel_key) &&
+            block_irq_ack_once[channel_key]) begin
+            block_irq_ack_once[channel_key] = 0;
+            irq_ack_blocked[channel_key].trigger();
+            irq_ack_release[channel_key].wait_on();
+        end
         if (irq_events.exists(channel_key))
             irq_events[channel_key].reset();
     endtask
