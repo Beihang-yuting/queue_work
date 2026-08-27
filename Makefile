@@ -7,11 +7,14 @@ LIBS ?= mailbox
 comma := ,
 LIB_LIST := $(subst $(comma), ,$(LIBS))
 LIB_SOURCE_mailbox := src/mailbox/mailbox_pkg.sv
+LIB_SOURCE_msgq := src/msgq/msgq_pkg.sv
 LIB_SOURCES := $(foreach lib,$(LIB_LIST),$(LIB_SOURCE_$(lib)))
 LIB_INCDIRS := $(foreach lib,$(LIB_LIST),+incdir+src/$(lib))
 TEST_SUITE ?= gq
 TEST_PACKAGE_gq := tb/gq_test_pkg.sv
+TEST_PACKAGE_msgq := tb/msgq_test_pkg.sv
 TEST_DEFINE_gq := +define+QUEUE_TEST_GQ
+TEST_DEFINE_msgq := +define+QUEUE_TEST_MSGQ
 TEST_PACKAGE_SOURCE := $(TEST_PACKAGE_$(TEST_SUITE))
 UNKNOWN_LIBS := $(foreach lib,$(LIB_LIST),\
                   $(if $(LIB_SOURCE_$(lib)),,$(lib)))
