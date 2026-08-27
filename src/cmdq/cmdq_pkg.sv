@@ -13,6 +13,7 @@ package cmdq_pkg;
     `include "cmdq_tx_desc.sv"
     `include "cmdq_completion.sv"
     `include "cmdq_env.sv"
+    `include "cmdq_sequences.sv"
 endpackage
 
 `endif
