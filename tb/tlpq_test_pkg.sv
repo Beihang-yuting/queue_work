@@ -46,6 +46,8 @@ package tlpq_test_pkg;
     `include "tests/tlpq_bridge_test.sv"
     `include "mocks/tlpq_mock_adapter.sv"
     `include "tests/tlpq_driver_conformance_test.sv"
+    `include "mocks/tlpq_mock_tx_adapter.sv"
+    `include "tests/tlpq_tx_test.sv"
 endpackage
 
 `endif

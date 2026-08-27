@@ -1,6 +1,40 @@
 `ifndef TLPQ_SEQUENCES_SV
 `define TLPQ_SEQUENCES_SV
 
+class tlpq_tx_sequence extends uvm_sequence;
+    `uvm_object_utils(tlpq_tx_sequence)
+
+    tlpq_tx_reg_adapter tx_adapter;
+    tlpq_channel_e channel;
+    bit [2:0] host_id;
+    pcie_tl_tlp tlp;
+    time ready_timeout;
+    bit success;
+    string reason;
+
+    function new(string name = "tlpq_tx_sequence");
+        super.new(name);
+        tx_adapter = null;
+        channel = TLPQ_HOST;
+        host_id = '0;
+        tlp = null;
+        ready_timeout = 1us;
+        success = 0;
+        reason = "";
+    endfunction
+
+    task body();
+        success = 0;
+        reason = "";
+        if (tx_adapter == null) begin
+            reason = "TLPQ TX sequence requires a register adapter";
+            return;
+        end
+        tx_adapter.send_tlp(
+            channel, host_id, tlp, ready_timeout, success, reason);
+    endtask
+endclass
+
 class tlpq_rx_start_sequence extends uvm_sequence #(gq_request, gq_response);
     `uvm_object_utils(tlpq_rx_start_sequence)
 
