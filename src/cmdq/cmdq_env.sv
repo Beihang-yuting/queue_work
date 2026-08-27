@@ -27,6 +27,10 @@ class cmdq_env_cfg extends gq_env_cfg;
             reason = $sformatf("duplicate queue %s", key);
             return 0;
         end
+        if (queues.num() != 0) begin
+            reason = "CMDQ environment supports exactly one queue";
+            return 0;
+        end
 
         queue_cfg = gq_queue_cfg::type_id::create(
             $sformatf("tx_%0d_cfg", queue_id));

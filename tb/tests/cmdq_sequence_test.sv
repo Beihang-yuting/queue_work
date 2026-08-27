@@ -330,6 +330,7 @@ class cmdq_sequence_test extends uvm_test;
         cmdq_wrong_adapter wrong_adapter;
         cmdq_hw_cfg_t hw_cfg;
         cmdq_hw_cfg_t duplicate_hw_cfg;
+        cmdq_hw_cfg_t distinct_hw_cfg;
         gq_queue_cfg cfg;
         gq_queue_cfg irq_cfg;
         cmdq_ptr_codec installed_codec;
@@ -395,6 +396,21 @@ class cmdq_sequence_test extends uvm_test;
         if (env_cfg.queues.num() != queue_count || adapter.hw_cfg != hw_cfg)
             `uvm_fatal("CMDQ_PROFILE_DUPLICATE_STATE",
                        "duplicate rejection changed queue or metadata state")
+
+        distinct_hw_cfg.host_id     = 8'h3c;
+        distinct_hw_cfg.function_id = 16'h2468;
+        distinct_hw_cfg.msix_index  = 16'h1357;
+        distinct_hw_cfg.msix_valid  = 1'b1;
+        if (env_cfg.add_cmdq(1, distinct_hw_cfg, reason) || reason == "")
+            `uvm_fatal("CMDQ_PROFILE_CARDINALITY",
+                       "a second distinct standard CMDQ ring was accepted")
+        if (env_cfg.queues.num() != queue_count ||
+            !env_cfg.queues.exists(key) || env_cfg.queues[key] != cfg ||
+            env_cfg.queues.exists(gq_queue_key(GQ_TX, 1)) ||
+            adapter.hw_cfg != hw_cfg)
+            `uvm_fatal("CMDQ_PROFILE_CARDINALITY_STATE",
+                       {"distinct-ID rejection changed the original queue ",
+                        "map or adapter metadata"})
 
         null_adapter_cfg = cmdq_env_cfg::type_id::create("null_adapter_cfg");
         null_adapter_cfg.mem = mem;

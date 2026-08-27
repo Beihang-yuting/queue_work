@@ -528,6 +528,11 @@ has no IRQ watchdog; an explicit CMDQ `gq_queue_cfg` may instead select
 `GQ_IRQ` and a nonzero `irq_watchdog_interval` while retaining the CMDQ pointer
 and completion strategies. A real IRQ is acknowledged once, a watchdog query
 is not acknowledged, and the watchdog remains separate from the final timeout.
+One `cmdq_env_cfg` plus its adapter instance owns exactly one CMDQ ring. A
+second `add_cmdq()` call is rejected for both the same and a distinct queue ID
+before the original queue or adapter metadata changes. Advanced multi-ring use
+requires separate environment/adapter instances or a future explicitly
+queue-indexed metadata extension.
 
 `cmdq_reg_adapter` is the semantic hardware boundary. A user-derived adapter
 implements:
@@ -570,7 +575,10 @@ The repository helper copies the current working-tree contents to
 VCS, runs one test, and removes the remote temporary directory. Its `rsync`
 includes tracked working-tree modifications and untracked files except for the
 explicit `.git`, `.superpowers`, and `build` exclusions; it does not require or
-imply a committed or clean tree.
+imply a committed or clean tree. The streamed simulator output must include an
+authoritative final UVM report summary whose warning, error, and fatal counts
+are all zero; a missing/non-pristine summary or a failed remote command makes
+the helper fail.
 
 ```bash
 ./scripts/run_vcs_remote.sh gq_regression_test

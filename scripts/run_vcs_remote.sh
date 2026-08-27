@@ -30,9 +30,14 @@ fi
 
 remote_host=ubuntu@10.11.10.53
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+summary_checker="$repo_root/scripts/check_uvm_summary.sh"
+log_file=
 
 cleanup() {
     local status=$?
+    if [[ -n $log_file ]]; then
+        rm -f -- "$log_file"
+    fi
     ssh "$remote_host" "rm -rf -- '$remote_dir'" || true
     return "$status"
 }
@@ -43,6 +48,7 @@ if [[ ! $remote_dir =~ ^/tmp/gq_uvm\.[A-Za-z0-9]+$ ]]; then
     exit 1
 fi
 trap cleanup EXIT
+log_file=$(mktemp "${TMPDIR:-/tmp}/gq_uvm_summary.XXXXXX")
 
 rsync -a \
     --exclude='.git' \
@@ -52,5 +58,25 @@ rsync -a \
     -e ssh \
     "$repo_root/" "$remote_host:$remote_dir/"
 
+set +e
 ssh "$remote_host" \
-    "cd '$remote_dir' && bash -lc 'bash -ic \"make run TEST=$test_name LIBS=$libraries TEST_SUITE=$test_suite\"'"
+    "cd '$remote_dir' && bash -lc 'bash -ic \"make run TEST=$test_name LIBS=$libraries TEST_SUITE=$test_suite\"'" \
+    2>&1 | tee "$log_file"
+pipeline_status=("${PIPESTATUS[@]}")
+set -e
+
+remote_status=${pipeline_status[0]}
+tee_status=${pipeline_status[1]}
+summary_status=0
+"$summary_checker" "$log_file" || summary_status=$?
+
+if ((remote_status != 0)); then
+    printf 'remote VCS command failed with status %d\n' "$remote_status" >&2
+    exit "$remote_status"
+fi
+if ((tee_status != 0)); then
+    printf 'failed to capture remote VCS output (tee status %d)\n' \
+        "$tee_status" >&2
+    exit "$tee_status"
+fi
+exit "$summary_status"
