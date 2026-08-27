@@ -125,7 +125,7 @@ class gq_async_completion_test extends uvm_test;
         join_none
         reset_entered = 0;
         for (int unsigned poll = 0; poll < 20; poll++) begin
-            #1ns;
+            #10ns;
             if (engine.reset_epoch() == starting_epoch + 1) begin
                 reset_entered = 1;
                 break;
@@ -137,7 +137,7 @@ class gq_async_completion_test extends uvm_test;
 
         async_source.release_query.trigger();
         for (int unsigned poll = 0; poll < 20; poll++) begin
-            #1ns;
+            #10ns;
             if (drain_returned)
                 break;
         end
