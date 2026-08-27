@@ -25,6 +25,14 @@ for required_file in \
     src/gq/gq_desc_writeback_completion.sv \
     src/gq/gq_index_phase_ptr_codec.sv \
     src/mailbox/mailbox_pkg.sv \
+    src/cmdq/cmdq_pkg.sv \
+    src/cmdq/cmdq_types.sv \
+    src/cmdq/cmdq_tx_desc.sv \
+    src/cmdq/cmdq_completion.sv \
+    src/cmdq/cmdq_ptr_codec.sv \
+    src/cmdq/cmdq_reg_adapter.sv \
+    src/cmdq/cmdq_env.sv \
+    src/cmdq/cmdq_sequences.sv \
     src/msgq/msgq_pkg.sv \
     src/msgq/msgq_types.sv \
     src/msgq/msgq_entry_base.sv \

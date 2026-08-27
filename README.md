@@ -470,6 +470,74 @@ they expose only configured fixed-size raw bytes and the
 user-supplied, and the library assigns no protocol field semantics to those
 bytes.
 
+## Submit CMDQ commands and collect results
+
+The independent `cmdq` business library provides one depth-32 TX command ring.
+Each little-endian descriptor is exactly 32 bytes:
+
+| Offset | Size | Field | Post-publication contract |
+| --- | ---: | --- | --- |
+| `0x00` | 2 | `flags` | Hardware may update |
+| `0x02` | 2 | `tx_buf_len` | Stable |
+| `0x04` | 8 | `tx_buf_addr` | Stable |
+| `0x0c` | 2 | `dst_id` | Stable |
+| `0x0e` | 2 | `rx_buf_len` | Hardware may update |
+| `0x10` | 8 | `rx_buf_addr` | Stable |
+| `0x18` | 8 | `reserved` | Stable, zero |
+
+`cmdq_tx_desc::prepare()` allocates two distinct descriptor-owned
+`CMDQ_BUFFER_BYTES` (256-byte) host-memory blocks. It copies the raw request
+bytes into a zero-filled TX block, zeroes the RX block, and advertises the full
+256-byte RX capacity. Once the descriptor transfers to GQ, the engine owns
+cleanup of both allocations on completion, reset, or final cleanup. Hardware
+may change only `flags` and `rx_buf_len`; unpack rejects changes to TX length or
+address, destination, RX address, or the reserved field. Completion requires
+`CMDQ_DESC_USED`, and an RX length greater than 256 is rejected.
+
+`cmdq_command_sequence` is the synchronous raw-byte API. Set
+`request_payload[]` and `dst_id`, then read its copied `result[]` and
+`result_status` after `start()` returns. `CMDQ_DST_FSE` is destination 2 and
+`CMDQ_DST_PSTAT` is destination 3; the library assigns no field format to
+either payload. A completed result is copied out of host memory before those
+allocations are released. Each descriptor's `completion_event` is a persistent
+`uvm_event`, so `wait_on()` also observes a completion that arrived before the
+sequence began waiting. Submit failure returns `CMDQ_RESULT_SUBMIT_ERROR` with
+an empty result, accepted completion returns `CMDQ_RESULT_OK`, and the default
+inclusive 10 us wait returns `CMDQ_RESULT_TIMEOUT` with an empty result if
+completion does not arrive.
+
+`cmdq_env_cfg::add_cmdq()` installs the standard TX profile: depth 32,
+32-byte descriptors, `cmdq_ptr_codec`, writeback completion, and adaptive Poll
+at 10, 20, 40, 80, then 100 ns. Progress or new work resets the next interval
+to 10 ns. The queue's oldest-published diagnostic timeout and the synchronous
+command sequence's final timeout both default to 10 us. The standard profile
+has no IRQ watchdog; an explicit CMDQ `gq_queue_cfg` may instead select
+`GQ_IRQ` and a nonzero `irq_watchdog_interval` while retaining the CMDQ pointer
+and completion strategies. A real IRQ is acknowledged once, a watchdog query
+is not acknowledged, and the watchdog remains separate from the final timeout.
+
+`cmdq_reg_adapter` is the semantic hardware boundary. A user-derived adapter
+implements:
+
+```systemverilog
+pure virtual task reset_cmdq(int unsigned queue_id);
+pure virtual task configure_cmdq_registers(
+    int unsigned queue_id, gq_addr_t base, int unsigned depth,
+    int unsigned desc_size, cmdq_hw_cfg_t hw_cfg);
+pure virtual task enable_cmdq(int unsigned queue_id);
+pure virtual task disable_cmdq(int unsigned queue_id);
+pure virtual task write_cmdq_tail(
+    int unsigned queue_id, bit [15:0] tail);
+pure virtual task wait_cmdq_irq(int unsigned queue_id);
+pure virtual task ack_cmdq_irq(int unsigned queue_id);
+```
+
+The generic configure operation calls reset, configure, and enable in that
+order. `hw_cfg` carries host ID, function ID, MSI-X index, and MSI-X validity;
+the derived adapter owns register mapping and transport access. An
+adapter-internal transport retry never creates a second GQ publish: every retry
+remains behind the one `write_cmdq_tail()` semantic callback for that publish.
+
 ## Run with VCS
 
 On a machine where VCS and the UVM license environment are already loaded:
