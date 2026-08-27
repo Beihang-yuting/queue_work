@@ -140,8 +140,8 @@ endclass
 class msgq_driver_conformance_test extends uvm_test;
     `uvm_component_utils(msgq_driver_conformance_test)
 
-    localparam int unsigned MAC_POLL_Q = 0;
-    localparam int unsigned MAC_IRQ_Q = 1;
+    localparam int unsigned MAC_IRQ_Q = 0;
+    localparam int unsigned MAC_POLL_Q = 1;
     localparam int unsigned EMP_WATCHDOG_Q = 2;
     localparam int unsigned LINUX_SPURIOUS_Q = 3;
     localparam int unsigned INVALID_PTR_Q = 4;
@@ -644,7 +644,8 @@ class msgq_driver_conformance_test extends uvm_test;
                 reads_before)
                 break;
         end
-        if (adapter.read_current_ptr_count[LINUX_SPURIOUS_Q] !=
+        if (adapter.ack_irq_count[LINUX_SPURIOUS_Q] != ack_before + 1 ||
+            adapter.read_current_ptr_count[LINUX_SPURIOUS_Q] !=
                 reads_before + 1 ||
             collectors[LINUX_SPURIOUS_Q].observations.size() != 0 ||
             engines[LINUX_SPURIOUS_Q].head_seq() != 0)
@@ -797,8 +798,8 @@ class msgq_driver_conformance_test extends uvm_test;
             end
         join_none
 
-        run_mac_scenario(MAC_POLL_Q, GQ_POLL);
         run_mac_scenario(MAC_IRQ_Q, GQ_IRQ);
+        run_mac_scenario(MAC_POLL_Q, GQ_POLL);
         run_emp_watchdog_scenario();
         run_linux_spurious_scenario();
         run_invalid_query_scenarios();
