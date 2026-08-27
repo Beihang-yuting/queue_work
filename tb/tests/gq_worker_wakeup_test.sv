@@ -597,6 +597,48 @@ class gq_worker_wakeup_test extends uvm_test;
         check_expectation(adaptive_source.query_calls == query_before,
                $sformatf("TX worker did not enter idle gate after retirement: before=%0d after=%0d",
                          query_before, adaptive_source.query_calls));
+
+        tx_desc = make_tx("adaptive_reset_backoff", 6);
+        submit_one(adaptive_engine, tx_desc, "adaptive_reset_backoff");
+        query_before = adaptive_source.query_calls;
+        wait_for_query_count(adaptive_source, query_before + 1,
+                             "adaptive reset idle 1");
+        wait_for_query_count(adaptive_source, query_before + 2,
+                             "adaptive reset idle 2");
+        wait_for_query_count(adaptive_source, query_before + 3,
+                             "adaptive reset idle 3");
+        wait_for_query_count(adaptive_source, query_before + 4,
+                             "adaptive reset idle 4");
+        check_expectation(adaptive_engine.current_poll_interval() == 100ns,
+               $sformatf("pre-reset adaptive interval did not reach 100ns (got %0t)",
+                         adaptive_engine.current_poll_interval()));
+
+        adaptive_engine.assert_reset();
+        adaptive_engine.release_reset();
+        #10ns;
+        check_expectation(adaptive_engine.current_poll_interval() == 100ns,
+               $sformatf("reset/release changed adaptive interval before new work (got %0t)",
+                         adaptive_engine.current_poll_interval()));
+        tx_desc = make_tx("adaptive_post_reset", 7);
+        submit_one(adaptive_engine, tx_desc, "adaptive_post_reset");
+        publish_time = $time;
+        query_before = adaptive_source.query_calls;
+        #1ns;
+        check_expectation(adaptive_source.query_calls == query_before,
+               "post-reset publish queried immediately instead of beginning a fresh wait");
+        check_expectation(adaptive_engine.current_poll_interval() == 10ns,
+               $sformatf("idle-gate new work did not restore 10ns interval (got %0t)",
+                         adaptive_engine.current_poll_interval()));
+        wait_for_query_count(adaptive_source, query_before + 1,
+                             "adaptive post-reset new-work query");
+        check_expectation(adaptive_source.query_times[query_before] -
+                              publish_time == 10ns,
+               $sformatf("post-reset new work used stale adaptive interval: delta=%0t",
+                         adaptive_source.query_times[query_before] -
+                         publish_time));
+        `uvm_info("GQ_WORKER_TRACE", $sformatf(
+            "adaptive_reset pre_publish_interval=100ns post_publish_interval=10ns query_delta=%0t",
+            adaptive_source.query_times[query_before] - publish_time), UVM_LOW)
         adaptive_engine.cleanup();
         wait_for_worker_stop(adaptive_worker_returned, "adaptive TX");
         disable adaptive_worker;
