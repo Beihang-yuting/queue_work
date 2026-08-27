@@ -72,6 +72,9 @@ class cmdq_driver_report_catcher extends uvm_report_catcher;
     int unsigned invalid_query_count;
     int unsigned parse_error_count;
     int unsigned timeout_count;
+    uvm_severity report_severities[$];
+    string report_ids[$];
+    string report_messages[$];
     uvm_event timeout_event;
 
     function new(string name = "cmdq_driver_report_catcher");
@@ -83,22 +86,32 @@ class cmdq_driver_report_catcher extends uvm_report_catcher;
     endfunction
 
     virtual function action_e catch();
-        if (get_severity() == UVM_WARNING &&
-            get_id() == "GQ_COMPLETION_QUERY") begin
+        uvm_severity severity;
+        string id;
+
+        severity = get_severity();
+        id = get_id();
+        if (id != "GQ_COMPLETION_QUERY" &&
+            id != "GQ_COMPLETION_PARSE" &&
+            id != "GQ_COMPLETION_TIMEOUT")
+            return THROW;
+        report_severities.push_back(severity);
+        report_ids.push_back(id);
+        report_messages.push_back(get_message());
+        if (id == "GQ_COMPLETION_QUERY") begin
             invalid_query_count++;
-            return CAUGHT;
         end
-        if (get_severity() == UVM_ERROR &&
-            get_id() == "GQ_COMPLETION_PARSE") begin
+        if (id == "GQ_COMPLETION_PARSE") begin
             parse_error_count++;
-            return CAUGHT;
         end
-        if (get_severity() == UVM_ERROR &&
-            get_id() == "GQ_COMPLETION_TIMEOUT") begin
+        if (id == "GQ_COMPLETION_TIMEOUT") begin
             timeout_count++;
             timeout_event.trigger();
-            return CAUGHT;
         end
+        if ((id == "GQ_COMPLETION_QUERY" && severity == UVM_WARNING) ||
+            (id == "GQ_COMPLETION_PARSE" && severity == UVM_ERROR) ||
+            (id == "GQ_COMPLETION_TIMEOUT" && severity == UVM_ERROR))
+            return CAUGHT;
         return THROW;
     endfunction
 endclass
@@ -142,6 +155,35 @@ class cmdq_driver_conformance_test extends uvm_test;
                 return 0;
         end
         return 1;
+    endfunction
+
+    function bit report_matches(int unsigned index,
+                                uvm_severity severity,
+                                string id,
+                                string message);
+        return index < report_catcher.report_ids.size() &&
+               report_catcher.report_severities[index] == severity &&
+               report_catcher.report_ids[index] == id &&
+               report_catcher.report_messages[index] == message;
+    endfunction
+
+    function string bytes_to_hex(input byte data[]);
+        string result;
+        bit [7:0] value;
+
+        result = "";
+        foreach (data[i]) begin
+            if (i != 0)
+                result = {result, " "};
+            value = data[i];
+            result = {result, $sformatf("%02x", value)};
+        end
+        return result;
+    endfunction
+
+    function bit regions_do_not_overlap(gq_addr_t lhs, gq_addr_t rhs);
+        return lhs + gq_addr_t'(CMDQ_BUFFER_BYTES) <= rhs ||
+               rhs + gq_addr_t'(CMDQ_BUFFER_BYTES) <= lhs;
     endfunction
 
     function gq_queue_cfg make_cfg(int unsigned queue_id);
@@ -483,6 +525,19 @@ class cmdq_driver_conformance_test extends uvm_test;
             `uvm_fatal("CMDQ_DRIVER_PSTAT_DESC",
                        "PSTAT destination/descriptor/publication diverged")
         dut.decode_buffer_addresses(raw, tx_addr, rx_addr);
+        // Mutation caught: checking only the descriptor object's request
+        // misses an omitted/corrupt PSTAT DMA copy or nonzero TX padding.
+        dut.read_buffer(tx_addr, CMDQ_BUFFER_BYTES, storage);
+        if (storage.size() != CMDQ_BUFFER_BYTES ||
+            storage[0] !== 8'h81 || storage[1] !== 8'h00 ||
+            storage[2] !== 8'h5e)
+            `uvm_fatal("CMDQ_DRIVER_PSTAT_TX",
+                       "PSTAT TX literal payload bytes diverged")
+        for (int unsigned i = 3; i < CMDQ_BUFFER_BYTES; i++) begin
+            if (storage[i] !== 0)
+                `uvm_fatal("CMDQ_DRIVER_PSTAT_TX",
+                           "PSTAT TX padding was not zero")
+        end
         tx_free_before = mem.free_count(tx_addr);
         rx_free_before = mem.free_count(rx_addr);
         if (!dut.complete_slot(engines[SEQUENCE_Q], 1,
@@ -679,11 +734,19 @@ class cmdq_driver_conformance_test extends uvm_test;
         gq_addr_t rx_addr;
         int unsigned tx_free_before;
         int unsigned rx_free_before;
+        int unsigned report_before;
+        int unsigned invalid_before;
+        int unsigned parse_before;
+        int unsigned timeout_before;
 
         initialize_queue(ERROR_Q);
         // Mutation caught: accepting hardware corruption of a stable field
         // retires the wrong descriptor and exposes a fabricated result.
         submit_one(ERROR_Q, corrupt_payload, CMDQ_DST_FSE, desc, response);
+        report_before = report_catcher.report_ids.size();
+        invalid_before = report_catcher.invalid_query_count;
+        parse_before = report_catcher.parse_error_count;
+        timeout_before = report_catcher.timeout_count;
         tx_addr = desc.tx_buf_addr;
         rx_addr = desc.rx_buf_addr;
         tx_free_before = mem.free_count(tx_addr);
@@ -693,7 +756,15 @@ class cmdq_driver_conformance_test extends uvm_test;
             `uvm_fatal("CMDQ_DRIVER_DUT",
                        "stable-field corruption injection failed")
         engines[ERROR_Q].drain_completed();
-        if (report_catcher.invalid_query_count != 1 ||
+        // Mutation caught: a generic/global report count can be satisfied by
+        // the wrong scenario, severity, ID, or diagnostic message.
+        if (report_catcher.report_ids.size() != report_before + 1 ||
+            report_catcher.invalid_query_count != invalid_before + 1 ||
+            report_catcher.parse_error_count != parse_before ||
+            report_catcher.timeout_count != timeout_before ||
+            !report_matches(
+                report_before, UVM_WARNING, "GQ_COMPLETION_QUERY",
+                "completion source returned an invalid query") ||
             collectors[ERROR_Q].observations.size() != 0 ||
             desc.result.size() != 0 || engines[ERROR_Q].head_seq() != 0 ||
             engines[ERROR_Q].outstanding_count() != 1 ||
@@ -713,6 +784,10 @@ class cmdq_driver_conformance_test extends uvm_test;
         // 256-byte result buffer and incorrectly retires the descriptor.
         submit_one(ERROR_Q, oversized_payload, CMDQ_DST_PSTAT,
                    desc, response);
+        report_before = report_catcher.report_ids.size();
+        invalid_before = report_catcher.invalid_query_count;
+        parse_before = report_catcher.parse_error_count;
+        timeout_before = report_catcher.timeout_count;
         tx_addr = desc.tx_buf_addr;
         rx_addr = desc.rx_buf_addr;
         tx_free_before = mem.free_count(tx_addr);
@@ -722,7 +797,13 @@ class cmdq_driver_conformance_test extends uvm_test;
             `uvm_fatal("CMDQ_DRIVER_DUT",
                        "oversized RX-length injection failed")
         engines[ERROR_Q].drain_completed();
-        if (report_catcher.parse_error_count != 1 ||
+        if (report_catcher.report_ids.size() != report_before + 1 ||
+            report_catcher.invalid_query_count != invalid_before ||
+            report_catcher.parse_error_count != parse_before + 1 ||
+            report_catcher.timeout_count != timeout_before ||
+            !report_matches(
+                report_before, UVM_ERROR, "GQ_COMPLETION_PARSE",
+                "completion parse failed at logical sequence 0") ||
             collectors[ERROR_Q].observations.size() != 0 ||
             desc.result.size() != 0 || engines[ERROR_Q].head_seq() != 0 ||
             engines[ERROR_Q].outstanding_count() != 1 ||
@@ -742,27 +823,83 @@ class cmdq_driver_conformance_test extends uvm_test;
         byte payload_0[] = '{8'h40};
         byte payload_1[] = '{8'h41};
         byte empty_result[] = '{};
+        byte raw_0[];
+        byte raw_1[];
         cmdq_tx_desc desc_0;
         cmdq_tx_desc desc_1;
         gq_response response;
+        gq_addr_t tx_addr_0;
+        gq_addr_t rx_addr_0;
+        gq_addr_t tx_addr_1;
+        gq_addr_t rx_addr_1;
+        int unsigned report_before;
+        int unsigned invalid_before;
+        int unsigned parse_before;
+        int unsigned timeout_before;
+        string expected_timeout_message;
 
         initialize_queue(TIMEOUT_Q);
         submit_one(TIMEOUT_Q, payload_0, CMDQ_DST_FSE, desc_0, response);
         submit_one(TIMEOUT_Q, payload_1, CMDQ_DST_FSE, desc_1, response);
+        report_before = report_catcher.report_ids.size();
+        invalid_before = report_catcher.invalid_query_count;
+        parse_before = report_catcher.parse_error_count;
+        timeout_before = report_catcher.timeout_count;
+        dut.read_slot(engines[TIMEOUT_Q], 0, raw_0);
+        dut.read_slot(engines[TIMEOUT_Q], 1, raw_1);
+        if (raw_0.size() != CMDQ_DESC_BYTES ||
+            raw_1.size() != CMDQ_DESC_BYTES)
+            `uvm_fatal("CMDQ_DRIVER_TIMEOUT_DESC",
+                       "timeout descriptors were not readable")
+        dut.decode_buffer_addresses(raw_0, tx_addr_0, rx_addr_0);
+        dut.decode_buffer_addresses(raw_1, tx_addr_1, rx_addr_1);
+        // Mutation caught: reusing any TX/RX allocation between two
+        // outstanding descriptors aliases data or completion ownership.
+        if (tx_addr_0 == 0 || tx_addr_0 == '1 ||
+            rx_addr_0 == 0 || rx_addr_0 == '1 ||
+            tx_addr_1 == 0 || tx_addr_1 == '1 ||
+            rx_addr_1 == 0 || rx_addr_1 == '1 ||
+            tx_addr_0 == rx_addr_0 || tx_addr_0 == tx_addr_1 ||
+            tx_addr_0 == rx_addr_1 || rx_addr_0 == tx_addr_1 ||
+            rx_addr_0 == rx_addr_1 || tx_addr_1 == rx_addr_1 ||
+            !regions_do_not_overlap(tx_addr_0, rx_addr_0) ||
+            !regions_do_not_overlap(tx_addr_0, tx_addr_1) ||
+            !regions_do_not_overlap(tx_addr_0, rx_addr_1) ||
+            !regions_do_not_overlap(rx_addr_0, tx_addr_1) ||
+            !regions_do_not_overlap(rx_addr_0, rx_addr_1) ||
+            !regions_do_not_overlap(tx_addr_1, rx_addr_1))
+            `uvm_fatal("CMDQ_DRIVER_TIMEOUT_REGIONS",
+                       "timeout TX/RX regions overlapped or were reused")
+        expected_timeout_message = $sformatf(
+            {"oldest outstanding completion exceeded timeout=%0t; ",
+             "role=TX queue_id=%0d head=0 tail=2 slot=0 phase=1 ",
+             "ring_addr=0x%016h slot_addr=0x%016h descriptor=%s"},
+            cfgs[TIMEOUT_Q].completion_timeout, TIMEOUT_Q,
+            engines[TIMEOUT_Q].ring_base(),
+            engines[TIMEOUT_Q].ring_base(), bytes_to_hex(raw_0));
         start_worker(TIMEOUT_Q);
-        // Mutation caught: per-query timeout spam or timing the newest entry
-        // reports more than once instead of reserving the published oldest.
-        while (report_catcher.timeout_count < 1) begin
+        // Mutation caught: per-query timeout spam, timing the newest entry,
+        // or reporting a descriptor other than logical sequence zero cannot
+        // satisfy this scenario-local record and exact descriptor identity.
+        while (report_catcher.timeout_count < timeout_before + 1) begin
             report_catcher.timeout_event.reset();
-            if (report_catcher.timeout_count < 1)
+            if (report_catcher.timeout_count < timeout_before + 1)
                 report_catcher.timeout_event.wait_on();
         end
         #250ns;
-        if (report_catcher.timeout_count != 1 ||
+        if (report_catcher.report_ids.size() != report_before + 1 ||
+            report_catcher.invalid_query_count != invalid_before ||
+            report_catcher.parse_error_count != parse_before ||
+            report_catcher.timeout_count != timeout_before + 1 ||
+            !report_matches(report_before, UVM_ERROR,
+                            "GQ_COMPLETION_TIMEOUT",
+                            expected_timeout_message) ||
             engines[TIMEOUT_Q].head_seq() != 0 ||
             engines[TIMEOUT_Q].outstanding_count() != 2)
-            `uvm_fatal("CMDQ_DRIVER_TIMEOUT_ONCE",
-                       "oldest published descriptor did not time out once")
+            `uvm_fatal("CMDQ_DRIVER_TIMEOUT_ONCE", $sformatf(
+                {"oldest published descriptor did not time out once; ",
+                 "expected='%s' actual='%s'"}, expected_timeout_message,
+                report_catcher.report_messages[report_before]))
         if (!dut.complete_slot(engines[TIMEOUT_Q], 0,
                                empty_result, 0, -1) ||
             !dut.complete_slot(engines[TIMEOUT_Q], 1,
@@ -770,7 +907,10 @@ class cmdq_driver_conformance_test extends uvm_test;
             `uvm_fatal("CMDQ_DRIVER_DUT",
                        "timeout recovery completions were rejected")
         wait_for_observations(TIMEOUT_Q, 2, "timeout recovery");
-        if (report_catcher.timeout_count != 1 ||
+        if (report_catcher.report_ids.size() != report_before + 1 ||
+            report_catcher.invalid_query_count != invalid_before ||
+            report_catcher.parse_error_count != parse_before ||
+            report_catcher.timeout_count != timeout_before + 1 ||
             engines[TIMEOUT_Q].outstanding_count() != 0)
             `uvm_fatal("CMDQ_DRIVER_TIMEOUT_RECOVERY",
                        "timeout recovery changed one-shot outcome")
