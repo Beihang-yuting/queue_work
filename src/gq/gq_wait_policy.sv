@@ -8,22 +8,89 @@ virtual class gq_wait_policy extends uvm_object;
 
     pure virtual task wait_for_wakeup(gq_queue_cfg cfg,
                                       gq_hw_adapter adapter,
-                                      output bit completion_wakeup);
+                                      uvm_event cancel_event,
+                                      uvm_event new_work_event,
+                                      output gq_wakeup_e wakeup);
+
+    virtual function void note_progress();
+    endfunction
+
+    virtual function void note_idle();
+    endfunction
 endclass
 
 class gq_poll_wait_policy extends gq_wait_policy;
     `uvm_object_utils(gq_poll_wait_policy)
 
+    time current_interval;
+
+    protected time poll_min_interval;
+    protected time poll_max_interval;
+    protected int unsigned poll_backoff_factor;
+
     function new(string name = "gq_poll_wait_policy");
         super.new(name);
+        current_interval    = 0;
+        poll_min_interval   = 0;
+        poll_max_interval   = 0;
+        poll_backoff_factor = 1;
     endfunction
 
     virtual task wait_for_wakeup(gq_queue_cfg cfg,
                                  gq_hw_adapter adapter,
-                                 output bit completion_wakeup);
-        #(cfg.poll_min_interval);
-        completion_wakeup = 1;
+                                 uvm_event cancel_event,
+                                 uvm_event new_work_event,
+                                 output gq_wakeup_e wakeup);
+        time wait_interval;
+
+        poll_min_interval   = cfg.poll_min_interval;
+        poll_max_interval   = cfg.poll_max_interval;
+        poll_backoff_factor = cfg.poll_backoff_factor;
+        if (current_interval == 0)
+            current_interval = poll_min_interval;
+        wait_interval = current_interval;
+
+        // The wrapper keeps disable fork local to this invocation. Without it,
+        // one concurrent policy call can terminate a sibling invocation.
+        fork
+            begin
+                fork
+                    begin
+                        #(wait_interval);
+                        wakeup = GQ_WAKE_POLL;
+                    end
+                    begin
+                        cancel_event.wait_on();
+                        wakeup = GQ_WAKE_CANCELLED;
+                    end
+                    begin
+                        new_work_event.wait_on();
+                        wakeup = GQ_WAKE_NEW_WORK;
+                    end
+                join_any
+                disable fork;
+            end
+        join
     endtask
+
+    virtual function void note_progress();
+        if (poll_min_interval != 0)
+            current_interval = poll_min_interval;
+    endfunction
+
+    virtual function void note_idle();
+        if (current_interval == 0 || poll_max_interval == 0)
+            return;
+
+        if (poll_backoff_factor <= 1)
+            return;
+
+        if (current_interval >= poll_max_interval ||
+            current_interval > (poll_max_interval / poll_backoff_factor))
+            current_interval = poll_max_interval;
+        else
+            current_interval *= poll_backoff_factor;
+    endfunction
 endclass
 
 class gq_irq_wait_policy extends gq_wait_policy;
@@ -35,18 +102,36 @@ class gq_irq_wait_policy extends gq_wait_policy;
 
     virtual task wait_for_wakeup(gq_queue_cfg cfg,
                                  gq_hw_adapter adapter,
-                                 output bit completion_wakeup);
-        completion_wakeup = 0;
-        // Isolate disable fork from other concurrent policy invocations.
+                                 uvm_event cancel_event,
+                                 uvm_event new_work_event,
+                                 output gq_wakeup_e wakeup);
+        time watchdog_interval;
+
+        watchdog_interval = cfg.irq_watchdog_interval;
+        // The wrapper keeps disable fork local to this invocation. No policy
+        // state is locked while the adapter callback is blocked.
         fork
             begin
                 fork
                     begin
                         adapter.wait_irq(cfg.role, cfg.queue_id);
-                        completion_wakeup = 1;
+                        wakeup = GQ_WAKE_IRQ;
                     end
                     begin
-                        #(cfg.completion_timeout);
+                        cancel_event.wait_on();
+                        wakeup = GQ_WAKE_CANCELLED;
+                    end
+                    begin
+                        new_work_event.wait_on();
+                        wakeup = GQ_WAKE_NEW_WORK;
+                    end
+                    begin
+                        if (watchdog_interval == 0)
+                            wait (watchdog_interval != 0);
+                        else begin
+                            #(watchdog_interval);
+                            wakeup = GQ_WAKE_WATCHDOG;
+                        end
                     end
                 join_any
                 disable fork;

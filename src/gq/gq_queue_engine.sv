@@ -580,7 +580,9 @@ class gq_queue_engine extends uvm_component;
         bit wait_registered;
         bit ack_required;
         longint unsigned wait_epoch;
+        gq_wakeup_e wakeup;
         uvm_event wait_cancel;
+        uvm_event new_work;
         uvm_event wait_done;
         uvm_event ack_done;
         uvm_event conflicting_done;
@@ -588,6 +590,8 @@ class gq_queue_engine extends uvm_component;
         if (wait_policy == null)
             `uvm_fatal("GQ_WAIT_POLICY", "completion wait policy is not initialized")
         wait_cancel = new({get_name(), "_active_wait_cancel"});
+        // Task 5 replaces this inert event with engine new-work scheduling.
+        new_work = new({get_name(), "_inert_new_work"});
         wait_done = new({get_name(), "_active_wait_done"});
         ack_done = new({get_name(), "_active_ack_done"});
         wait_registered = 0;
@@ -618,6 +622,7 @@ class gq_queue_engine extends uvm_component;
             return;
         end
         completion_wakeup = 0;
+        wakeup = GQ_WAKE_CANCELLED;
         // Run the race from an isolated child process so disable fork cannot
         // terminate waits belonging to another engine invocation.
         fork
@@ -625,7 +630,10 @@ class gq_queue_engine extends uvm_component;
                 fork
                     begin
                         wait_policy.wait_for_wakeup(cfg, adapter,
-                                                    completion_wakeup);
+                                                    wait_cancel, new_work,
+                                                    wakeup);
+                        completion_wakeup = wakeup == GQ_WAKE_POLL ||
+                                            wakeup == GQ_WAKE_IRQ;
                     end
                     begin
                         wait_cancel.wait_on();

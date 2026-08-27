@@ -12,6 +12,7 @@ class mailbox_mock_adapter extends gq_hw_adapter;
     int unsigned configure_count[string];
     int unsigned disable_count[string];
     int unsigned publish_count[string];
+    int unsigned wait_irq_count[string];
     gq_addr_t configured_base[string];
     int unsigned configured_depth[string];
     int unsigned configured_desc_size[string];
@@ -72,6 +73,7 @@ class mailbox_mock_adapter extends gq_hw_adapter;
 
         key = gq_queue_key(role, queue_id);
         wait_irq_calls++;
+        wait_irq_count[key]++;
         if (!irq_events.exists(key))
             irq_events[key] = new({key, "_irq"});
         irq_events[key].wait_on();
