@@ -743,6 +743,7 @@ class gq_queue_engine extends uvm_component;
         bit ready_snapshot;
         bit shutdown_snapshot;
         bit published_snapshot;
+        bit progress_feedback_snapshot;
 
         worker_active = 0;
         forever begin
@@ -767,17 +768,19 @@ class gq_queue_engine extends uvm_component;
                 new_work_event.wait_on();
                 new_work_event.reset();
                 state_lock.get(1);
-                if (ready_value && !reset_requested_value &&
+                progress_feedback_snapshot =
+                    ready_value && !reset_requested_value &&
                     !shutdown_requested &&
                     logical_tail_seq != logical_head_seq &&
                     outstanding_published.exists(logical_head_seq) &&
-                    outstanding_published[logical_head_seq])
+                    outstanding_published[logical_head_seq];
+                state_lock.put(1);
+                if (progress_feedback_snapshot)
                     // The idle gate consumed the real publish wake, so it owns
                     // the same minimum-interval feedback as NEW_WORK returned
                     // by the active policy wait. Lifecycle-only wakes fail the
                     // locked readiness/published check and preserve backoff.
                     wait_policy.note_progress();
-                state_lock.put(1);
             end else begin
                 worker_state_event.wait_on();
                 worker_state_event.reset();
