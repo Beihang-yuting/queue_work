@@ -10,6 +10,9 @@ module tb_top;
 `ifdef QUEUE_TEST_MSGQ
     import msgq_test_pkg::*;
 `endif
+`ifdef QUEUE_TEST_CMDQ
+    import cmdq_test_pkg::*;
+`endif
 
     initial run_test();
 endmodule
