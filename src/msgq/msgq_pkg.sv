@@ -10,6 +10,8 @@ package msgq_pkg;
     `include "msgq_types.sv"
     `include "msgq_entry_base.sv"
     `include "msgq_raw_entry.sv"
+    `include "msgq_mac_age_entry.sv"
+    `include "msgq_1588_entry.sv"
 endpackage
 
 `endif

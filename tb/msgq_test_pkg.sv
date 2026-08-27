@@ -9,6 +9,7 @@ package msgq_test_pkg;
     `include "uvm_macros.svh"
 
     `include "tests/msgq_profile_test.sv"
+    `include "tests/msgq_entry_test.sv"
 endpackage
 
 `endif
