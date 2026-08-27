@@ -13,5 +13,8 @@ package tlpq_pkg;
     `include "tlpq_refill_profile.sv"
     `include "tlpq_completion.sv"
     `include "tlpq_ptr_codec.sv"
+    `include "tlpq_reg_adapter.sv"
+    `include "tlpq_env.sv"
+    `include "tlpq_sequences.sv"
 endpackage
 `endif
