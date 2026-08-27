@@ -264,7 +264,8 @@ class gq_completion_test extends uvm_test;
         cfg.alignment          = 64;
         cfg.status_area_size   = 0;
         cfg.wait_mode          = GQ_POLL;
-        cfg.poll_interval      = 10ns;
+        cfg.poll_min_interval  = 10ns;
+        cfg.poll_max_interval  = 10ns;
         cfg.completion_timeout = 1us;
         cfg.ptr_codec          = ptr_codec;
         cfg.completion_source  = mailbox_completion::type_id::create(
@@ -285,7 +286,8 @@ class gq_completion_test extends uvm_test;
         tail_cfg.alignment          = 64;
         tail_cfg.status_area_size   = 8;
         tail_cfg.wait_mode          = GQ_POLL;
-        tail_cfg.poll_interval      = 10ns;
+        tail_cfg.poll_min_interval  = 10ns;
+        tail_cfg.poll_max_interval  = 10ns;
         tail_cfg.completion_timeout = 1us;
         tail_cfg.ptr_codec          = ptr_codec;
         tail_source = new("tail_source", ptr_codec, 4, GQ_LITTLE_ENDIAN);
@@ -311,7 +313,8 @@ class gq_completion_test extends uvm_test;
         protocol_cfg.alignment          = 64;
         protocol_cfg.status_area_size   = 0;
         protocol_cfg.wait_mode          = GQ_POLL;
-        protocol_cfg.poll_interval      = 10ns;
+        protocol_cfg.poll_min_interval  = 10ns;
+        protocol_cfg.poll_max_interval  = 10ns;
         protocol_cfg.completion_timeout = 1us;
         protocol_cfg.ptr_codec          = ptr_codec;
         protocol_cfg.completion_source  =
@@ -337,7 +340,8 @@ class gq_completion_test extends uvm_test;
         poll_cfg.alignment          = 64;
         poll_cfg.status_area_size   = 0;
         poll_cfg.wait_mode          = GQ_POLL;
-        poll_cfg.poll_interval      = 10ns;
+        poll_cfg.poll_min_interval  = 10ns;
+        poll_cfg.poll_max_interval  = 10ns;
         poll_cfg.completion_timeout = 1us;
         poll_cfg.ptr_codec          = ptr_codec;
         poll_cfg.completion_source  = mailbox_completion::type_id::create(
@@ -362,7 +366,8 @@ class gq_completion_test extends uvm_test;
         irq_cfg.alignment          = 64;
         irq_cfg.status_area_size   = 0;
         irq_cfg.wait_mode          = GQ_IRQ;
-        irq_cfg.poll_interval      = 10ns;
+        irq_cfg.poll_min_interval  = 10ns;
+        irq_cfg.poll_max_interval  = 10ns;
         irq_cfg.completion_timeout = 1us;
         irq_cfg.ptr_codec          = ptr_codec;
         irq_cfg.completion_source  = mailbox_completion::type_id::create(
@@ -405,7 +410,8 @@ class gq_completion_test extends uvm_test;
         rx_cfg.alignment          = 64;
         rx_cfg.status_area_size   = 0;
         rx_cfg.wait_mode          = GQ_POLL;
-        rx_cfg.poll_interval      = 10ns;
+        rx_cfg.poll_min_interval  = 10ns;
+        rx_cfg.poll_max_interval  = 10ns;
         rx_cfg.completion_timeout = 1us;
         rx_cfg.ptr_codec          = ptr_codec;
         rx_cfg.completion_source  = mailbox_completion::type_id::create(
@@ -435,7 +441,8 @@ class gq_completion_test extends uvm_test;
         cleanup_cfg.alignment          = 64;
         cleanup_cfg.status_area_size   = 4;
         cleanup_cfg.wait_mode          = GQ_POLL;
-        cleanup_cfg.poll_interval      = 10ns;
+        cleanup_cfg.poll_min_interval  = 10ns;
+        cleanup_cfg.poll_max_interval  = 10ns;
         cleanup_cfg.completion_timeout = 1us;
         cleanup_cfg.ptr_codec          = ptr_codec;
         cleanup_cfg.completion_source  = cleanup_source;
@@ -582,7 +589,8 @@ class gq_completion_test extends uvm_test;
         missing_source_cfg.desc_size          = 64;
         missing_source_cfg.alignment          = 64;
         missing_source_cfg.wait_mode          = GQ_POLL;
-        missing_source_cfg.poll_interval      = 10ns;
+        missing_source_cfg.poll_min_interval  = 10ns;
+        missing_source_cfg.poll_max_interval  = 10ns;
         missing_source_cfg.completion_timeout = 1us;
         missing_source_cfg.ptr_codec          = ptr_codec;
         missing_source_cfg.completion_source  = null;
@@ -600,7 +608,8 @@ class gq_completion_test extends uvm_test;
         tail_validation_cfg.alignment          = 64;
         tail_validation_cfg.status_area_size   = 7;
         tail_validation_cfg.wait_mode          = GQ_POLL;
-        tail_validation_cfg.poll_interval      = 10ns;
+        tail_validation_cfg.poll_min_interval  = 10ns;
+        tail_validation_cfg.poll_max_interval  = 10ns;
         tail_validation_cfg.completion_timeout = 1us;
         tail_validation_cfg.ptr_codec          = ptr_codec;
         validation_source = new("short_tail_source", ptr_codec, 4,
@@ -643,7 +652,8 @@ class gq_completion_test extends uvm_test;
         generic_mailbox_queue.desc_size          = 64;
         generic_mailbox_queue.alignment          = 64;
         generic_mailbox_queue.wait_mode          = GQ_POLL;
-        generic_mailbox_queue.poll_interval      = 10ns;
+        generic_mailbox_queue.poll_min_interval  = 10ns;
+        generic_mailbox_queue.poll_max_interval  = 10ns;
         generic_mailbox_queue.completion_timeout = 1us;
         generic_mailbox_queue.ptr_codec          = ptr_codec;
         generic_mailbox_queue.completion_source  = null;
@@ -847,8 +857,8 @@ class gq_completion_test extends uvm_test;
         if (target_cfg.wait_mode == GQ_POLL) begin
             wait_start = $time;
             target_engine.wait_and_drain_once();
-            if (($time - wait_start) < target_cfg.poll_interval)
-                `uvm_fatal("WAIT_POLL", "poll wake did not wait poll_interval")
+            if (($time - wait_start) < target_cfg.poll_min_interval)
+                `uvm_fatal("WAIT_POLL", "poll wake did not wait the configured minimum")
         end else begin
             irq_wait_returned = 0;
             irq_wait_timeout  = target_cfg.completion_timeout;
@@ -1073,7 +1083,7 @@ class gq_completion_test extends uvm_test;
         join_none
         #1ns;
         cleanup_engine.cleanup();
-        #(cleanup_cfg.poll_interval + 1ns);
+        #(cleanup_cfg.poll_min_interval + 1ns);
         if (!worker_returned)
             `uvm_fatal("CLEANUP_WORKER", "poll worker did not stop after cleanup")
         if (cleanup_source.query_calls != 0)

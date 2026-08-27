@@ -47,7 +47,8 @@ class gq_config_test extends uvm_test;
         queue_cfg.alignment          = 64;
         queue_cfg.status_area_size   = 0;
         queue_cfg.wait_mode          = GQ_POLL;
-        queue_cfg.poll_interval      = 10ns;
+        queue_cfg.poll_min_interval  = 10ns;
+        queue_cfg.poll_max_interval  = 10ns;
         queue_cfg.completion_timeout = 1us;
         queue_cfg.ptr_codec          = ptr_codec;
         queue_cfg.completion_source  = mailbox_completion::type_id::create(
@@ -117,7 +118,8 @@ class gq_config_test extends uvm_test;
         cfg.alignment          = 16;
         cfg.status_area_size   = 64;
         cfg.wait_mode          = GQ_POLL;
-        cfg.poll_interval      = 10ns;
+        cfg.poll_min_interval  = 10ns;
+        cfg.poll_max_interval  = 10ns;
         cfg.completion_timeout = 1us;
         cfg.completion_source  = mailbox_completion::type_id::create(
             "cfg_completion");
@@ -141,9 +143,9 @@ class gq_config_test extends uvm_test;
         expect_invalid(cfg, "zero alignment");
         cfg.alignment = 16;
 
-        cfg.poll_interval = 0;
+        cfg.poll_min_interval = 0;
         expect_invalid(cfg, "zero poll interval");
-        cfg.poll_interval = 10ns;
+        cfg.poll_min_interval = 10ns;
 
         cfg.completion_timeout = 0;
         expect_invalid(cfg, "zero completion timeout");

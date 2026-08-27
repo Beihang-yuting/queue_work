@@ -196,7 +196,8 @@ class gq_submit_test extends uvm_test;
         cfg.alignment          = 64;
         cfg.status_area_size   = 0;
         cfg.wait_mode          = GQ_POLL;
-        cfg.poll_interval      = 10ns;
+        cfg.poll_min_interval  = 10ns;
+        cfg.poll_max_interval  = 10ns;
         cfg.completion_timeout = 1us;
         cfg.ptr_codec          = ptr_codec;
         cfg.completion_source  = mailbox_completion::type_id::create(

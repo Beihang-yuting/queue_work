@@ -210,7 +210,8 @@ class gq_regression_test extends uvm_test;
         queue_cfg.alignment          = 64;
         queue_cfg.status_area_size   = 0;
         queue_cfg.wait_mode          = wait_mode;
-        queue_cfg.poll_interval      = 10ns;
+        queue_cfg.poll_min_interval  = 10ns;
+        queue_cfg.poll_max_interval  = 10ns;
         queue_cfg.completion_timeout = 100us;
         queue_cfg.ptr_codec          = ptr_codec;
         queue_cfg.completion_source  = mailbox_completion::type_id::create(
@@ -361,7 +362,8 @@ class gq_regression_test extends uvm_test;
         timeout_cfg.alignment          = 64;
         timeout_cfg.status_area_size   = 0;
         timeout_cfg.wait_mode          = GQ_POLL;
-        timeout_cfg.poll_interval      = 10ns;
+        timeout_cfg.poll_min_interval  = 10ns;
+        timeout_cfg.poll_max_interval  = 10ns;
         timeout_cfg.completion_timeout = 50ns;
         timeout_cfg.ptr_codec          = ptr_codec;
         timeout_source = gq_regression_zero_completion::type_id::create(
@@ -383,7 +385,8 @@ class gq_regression_test extends uvm_test;
         protocol_cfg.alignment          = 64;
         protocol_cfg.status_area_size   = 0;
         protocol_cfg.wait_mode          = GQ_POLL;
-        protocol_cfg.poll_interval      = 10ns;
+        protocol_cfg.poll_min_interval  = 10ns;
+        protocol_cfg.poll_max_interval  = 10ns;
         protocol_cfg.completion_timeout = 50ns;
         protocol_cfg.ptr_codec          = ptr_codec;
         protocol_cfg.completion_source  =
@@ -405,7 +408,8 @@ class gq_regression_test extends uvm_test;
         irq_timeout_cfg.alignment          = 64;
         irq_timeout_cfg.status_area_size   = 0;
         irq_timeout_cfg.wait_mode          = GQ_IRQ;
-        irq_timeout_cfg.poll_interval      = 10ns;
+        irq_timeout_cfg.poll_min_interval  = 10ns;
+        irq_timeout_cfg.poll_max_interval  = 10ns;
         irq_timeout_cfg.completion_timeout = 50ns;
         irq_timeout_cfg.ptr_codec          = ptr_codec;
         irq_timeout_cfg.completion_source  =

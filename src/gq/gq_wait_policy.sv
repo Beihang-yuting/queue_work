@@ -21,7 +21,7 @@ class gq_poll_wait_policy extends gq_wait_policy;
     virtual task wait_for_wakeup(gq_queue_cfg cfg,
                                  gq_hw_adapter adapter,
                                  output bit completion_wakeup);
-        #(cfg.poll_interval);
+        #(cfg.poll_min_interval);
         completion_wakeup = 1;
     endtask
 endclass

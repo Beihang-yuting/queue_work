@@ -5,6 +5,7 @@ virtual class gq_refill_profile extends uvm_object;
     int unsigned initial_post_count;
     int unsigned low_watermark;
     int unsigned high_watermark;
+    int unsigned max_refill_batch;
     bit          restart_after_reset;
 
     function new(string name = "gq_refill_profile");
@@ -12,6 +13,7 @@ virtual class gq_refill_profile extends uvm_object;
         initial_post_count = 0;
         low_watermark      = 0;
         high_watermark     = 1;
+        max_refill_batch   = 0;
         restart_after_reset = 0;
     endfunction
 
@@ -45,6 +47,7 @@ virtual class gq_refill_profile extends uvm_object;
         initial_post_count  = rhs_profile.initial_post_count;
         low_watermark       = rhs_profile.low_watermark;
         high_watermark      = rhs_profile.high_watermark;
+        max_refill_batch    = rhs_profile.max_refill_batch;
         restart_after_reset = rhs_profile.restart_after_reset;
     endfunction
 

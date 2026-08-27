@@ -13,6 +13,7 @@ package gq_test_pkg;
     `include "mocks/mailbox_mock_adapter.sv"
     `include "mocks/mailbox_mock_dut.sv"
     `include "mocks/gq_async_completion_source.sv"
+    `include "tests/gq_timing_config_test.sv"
     `include "tests/gq_config_test.sv"
     `include "tests/gq_index_phase_ptr_codec_test.sv"
     `include "tests/mailbox_desc_test.sv"

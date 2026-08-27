@@ -414,7 +414,8 @@ class gq_reset_test extends uvm_test;
         irq_cfg.alignment          = 64;
         irq_cfg.status_area_size   = 0;
         irq_cfg.wait_mode          = GQ_IRQ;
-        irq_cfg.poll_interval      = 1ns;
+        irq_cfg.poll_min_interval  = 1ns;
+        irq_cfg.poll_max_interval  = 1ns;
         irq_cfg.completion_timeout = 20ns;
         irq_cfg.ptr_codec          = ptr_codec;
         irq_cfg.completion_source  = mailbox_completion::type_id::create(
@@ -443,7 +444,8 @@ class gq_reset_test extends uvm_test;
         stale_cfg.alignment          = 64;
         stale_cfg.status_area_size   = 0;
         stale_cfg.wait_mode          = GQ_POLL;
-        stale_cfg.poll_interval      = 1ns;
+        stale_cfg.poll_min_interval  = 1ns;
+        stale_cfg.poll_max_interval  = 1ns;
         stale_cfg.completion_timeout = 20ns;
         stale_cfg.ptr_codec          = ptr_codec;
         stale_cfg.completion_source  = mailbox_completion::type_id::create(
@@ -473,7 +475,8 @@ class gq_reset_test extends uvm_test;
         repost_cfg.alignment          = 64;
         repost_cfg.status_area_size   = 0;
         repost_cfg.wait_mode          = GQ_POLL;
-        repost_cfg.poll_interval      = 1ns;
+        repost_cfg.poll_min_interval  = 1ns;
+        repost_cfg.poll_max_interval  = 1ns;
         repost_cfg.completion_timeout = 20ns;
         repost_cfg.ptr_codec          = ptr_codec;
         repost_cfg.completion_source  = mailbox_completion::type_id::create(
@@ -503,7 +506,8 @@ class gq_reset_test extends uvm_test;
         publish_reset_cfg.alignment          = 64;
         publish_reset_cfg.status_area_size   = 0;
         publish_reset_cfg.wait_mode          = GQ_POLL;
-        publish_reset_cfg.poll_interval      = 1ns;
+        publish_reset_cfg.poll_min_interval  = 1ns;
+        publish_reset_cfg.poll_max_interval  = 1ns;
         publish_reset_cfg.completion_timeout = 20ns;
         publish_reset_cfg.ptr_codec          = ptr_codec;
         publish_reset_cfg.completion_source =

@@ -89,7 +89,8 @@ class mailbox_env_cfg extends gq_env_cfg;
         queue_cfg.alignment          = 64;
         queue_cfg.status_area_size   = 0;
         queue_cfg.wait_mode          = GQ_POLL;
-        queue_cfg.poll_interval      = 10ns;
+        queue_cfg.poll_min_interval  = 10ns;
+        queue_cfg.poll_max_interval  = 10ns;
         queue_cfg.completion_timeout = 1us;
         queue_cfg.ptr_codec          = ptr_codec;
         queue_cfg.completion_source  = mailbox_completion::type_id::create(

@@ -10,9 +10,14 @@ class gq_queue_cfg extends uvm_object;
     int unsigned   desc_size;
     int unsigned   alignment;
     int unsigned   status_area_size;
-    gq_wait_mode_e wait_mode;
-    time           poll_interval;
-    time           completion_timeout;
+    gq_wait_mode_e    wait_mode;
+    gq_poll_policy_e  poll_policy;
+    time              poll_min_interval;
+    time              poll_max_interval;
+    int unsigned      poll_backoff_factor;
+    time              irq_watchdog_interval;
+    time              completion_timeout;
+    gq_rx_slot_mode_e rx_slot_mode;
 
     gq_ptr_codec         ptr_codec;
     gq_completion_source completion_source;
@@ -25,11 +30,16 @@ class gq_queue_cfg extends uvm_object;
         desc_size          = 0;
         alignment          = 0;
         status_area_size   = 0;
-        wait_mode          = GQ_POLL;
-        poll_interval      = 0;
-        completion_timeout = 0;
-        ptr_codec          = null;
-        completion_source  = null;
+        wait_mode             = GQ_POLL;
+        poll_policy           = GQ_POLL_FIXED;
+        poll_min_interval     = 10ns;
+        poll_max_interval     = 10ns;
+        poll_backoff_factor   = 2;
+        irq_watchdog_interval = 0;
+        completion_timeout    = 0;
+        rx_slot_mode           = GQ_RX_EXPLICIT_REFILL;
+        ptr_codec             = null;
+        completion_source     = null;
     endfunction
 
     function bit validate(output string reason);
@@ -61,15 +71,42 @@ class gq_queue_cfg extends uvm_object;
             return 0;
         end
 
-        if (wait_mode == GQ_POLL && poll_interval == 0) begin
-            reason = "poll interval must be non-zero in poll mode";
+        if (poll_min_interval == 0) begin
+            reason = "poll minimum interval must be non-zero";
             return 0;
         end
 
-        if (completion_timeout == 0) begin
-            reason = "completion timeout must be non-zero";
+        if (poll_max_interval < poll_min_interval) begin
+            reason = "poll maximum interval must not be below the minimum";
             return 0;
         end
+
+        if (poll_backoff_factor < 1) begin
+            reason = "poll backoff factor must be at least one";
+            return 0;
+        end
+
+        if (poll_policy == GQ_POLL_FIXED &&
+            poll_min_interval != poll_max_interval) begin
+            reason = "fixed polling requires equal minimum and maximum intervals";
+            return 0;
+        end
+
+        if (role == GQ_TX && completion_timeout == 0) begin
+            reason = "TX completion timeout must be non-zero";
+            return 0;
+        end
+
+        if (role == GQ_TX && completion_timeout <= poll_max_interval) begin
+            reason = "TX completion timeout must be greater than the poll maximum interval";
+            return 0;
+        end
+
+        if (completion_timeout != 0 &&
+            (completion_timeout / 4) < poll_max_interval)
+            `uvm_warning("GQ_CFG_TIMEOUT", $sformatf(
+                "completion timeout %0t is below four poll maximum intervals (%0t)",
+                completion_timeout, poll_max_interval))
 
         reason = "";
         return 1;
