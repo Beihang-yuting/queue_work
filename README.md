@@ -494,6 +494,13 @@ may change only `flags` and `rx_buf_len`; unpack rejects changes to TX length or
 address, destination, RX address, or the reserved field. Completion requires
 `CMDQ_DESC_USED`, and an RX length greater than 256 is rejected.
 
+Submission calls `mark_available()` to write `flags=16'h0001`, exactly
+`AVAIL=1, USED=0`; the descriptor flag does not carry the ring phase. The
+`cmdq_ptr_codec` carries that phase in published tail bit 15 and the slot index
+in the low bits. For the standard depth-32 ring, logical tails 31, 32, and 64
+encode as `16'h001f`, `16'h8000`, and `16'h0000`, respectively, so bit 15
+toggles at each ring wrap.
+
 `cmdq_command_sequence` is the synchronous raw-byte API. Set
 `request_payload[]` and `dst_id`, then read its copied `result[]` and
 `result_status` after `start()` returns. `CMDQ_DST_FSE` is destination 2 and
@@ -501,10 +508,16 @@ address, destination, RX address, or the reserved field. Completion requires
 either payload. A completed result is copied out of host memory before those
 allocations are released. Each descriptor's `completion_event` is a persistent
 `uvm_event`, so `wait_on()` also observes a completion that arrived before the
-sequence began waiting. Submit failure returns `CMDQ_RESULT_SUBMIT_ERROR` with
-an empty result, accepted completion returns `CMDQ_RESULT_OK`, and the default
-inclusive 10 us wait returns `CMDQ_RESULT_TIMEOUT` with an empty result if
-completion does not arrive.
+sequence began waiting. The exported `cmdq_result_status_e` values are:
+
+- `CMDQ_RESULT_OK`: the current sequence accepted completion and copied the
+  result;
+- `CMDQ_RESULT_SUBMIT_ERROR`: its one-descriptor GQ submission failed, with an
+  empty result;
+- `CMDQ_RESULT_TIMEOUT`: completion missed the inclusive deadline, which is
+  10 us by default, with an empty result;
+- `CMDQ_RESULT_PARSE_ERROR`: reserved for user or derived flows and not emitted
+  by the current `cmdq_command_sequence`.
 
 `cmdq_env_cfg::add_cmdq()` installs the standard TX profile: depth 32,
 32-byte descriptors, `cmdq_ptr_codec`, writeback completion, and adaptive Poll
