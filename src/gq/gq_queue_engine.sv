@@ -441,8 +441,11 @@ class gq_queue_engine extends uvm_component;
         gq_desc_base desc;
         gq_logical_seq_t query_head;
         gq_logical_seq_t current_outstanding;
+        gq_addr_t query_ring_base;
+        gq_addr_t query_status_addr;
         int unsigned count;
         int unsigned retired_count;
+        bit query_valid;
         bit protocol_violation;
         bit timeout_violation;
         bit stale_completion;
@@ -458,24 +461,17 @@ class gq_queue_engine extends uvm_component;
         end
         query_head = logical_head_seq;
         query_epoch = reset_epoch_value;
+        query_ring_base = ring_base_value;
+        query_status_addr = status_addr_value;
         for (gq_logical_seq_t seq = logical_head_seq;
              seq < logical_tail_seq; seq++)
             pending.push_back(outstanding[seq]);
         state_lock.put(1);
 
-        count = cfg.completion_source.completed_count(
-            mem, ring_base_value, status_addr_value, cfg.depth, cfg.desc_size,
-            query_head, pending);
+        cfg.completion_source.query_completed(
+            mem, adapter, query_ring_base, query_status_addr, cfg.depth,
+            cfg.desc_size, query_head, pending, query_valid, count);
         completion_query_returned();
-        state_lock.get(1);
-        stale_completion = !ready_value || reset_requested_value ||
-                           shutdown_requested ||
-                           reset_epoch_value != query_epoch;
-        state_lock.put(1);
-        if (stale_completion) begin
-            completion_serialization.put(1);
-            return;
-        end
 
         // Diagnostics and retirement share the lifecycle commit boundary.
         // Reset or cleanup may win while the external completion query is in
@@ -489,11 +485,13 @@ class gq_queue_engine extends uvm_component;
                            shutdown_requested ||
                            reset_epoch_value != query_epoch;
         protocol_violation = !stale_completion &&
+                             query_valid &&
                              (query_head != logical_head_seq ||
                               count > pending.size() ||
                               count > current_outstanding);
         diagnostic_state = "";
-        timeout_violation = !stale_completion && !protocol_violation &&
+        timeout_violation = !stale_completion && query_valid &&
+                            !protocol_violation &&
                             count == 0 && current_outstanding != 0 &&
                             outstanding_since.exists(logical_head_seq) &&
                             outstanding_published.exists(logical_head_seq) &&
@@ -511,6 +509,13 @@ class gq_queue_engine extends uvm_component;
         end
         state_lock.put(1);
         if (stale_completion) begin
+            completion_commit_boundary.put(1);
+            completion_serialization.put(1);
+            return;
+        end
+        if (!query_valid) begin
+            `uvm_warning("GQ_COMPLETION_QUERY",
+                         "completion source returned an invalid query")
             completion_commit_boundary.put(1);
             completion_serialization.put(1);
             return;

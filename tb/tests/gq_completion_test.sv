@@ -8,16 +8,20 @@ class gq_overcount_completion extends gq_completion_source;
         super.new(name);
     endfunction
 
-    virtual function int unsigned completed_count(
+    virtual task query_completed(
         host_mem_api mem,
+        gq_hw_adapter adapter,
         gq_addr_t ring_base,
         gq_addr_t status_addr,
         int unsigned depth,
         int unsigned desc_size,
         gq_logical_seq_t logical_head,
-        input gq_desc_base pending[$]);
-        return pending.size() + 1;
-    endfunction
+        input gq_desc_base pending[$],
+        output bit valid,
+        output int unsigned completed_count);
+        valid = 1;
+        completed_count = pending.size() + 1;
+    endtask
 endclass
 
 class gq_counting_completion extends gq_completion_source;
@@ -30,17 +34,21 @@ class gq_counting_completion extends gq_completion_source;
         query_calls = 0;
     endfunction
 
-    virtual function int unsigned completed_count(
+    virtual task query_completed(
         host_mem_api mem,
+        gq_hw_adapter adapter,
         gq_addr_t ring_base,
         gq_addr_t status_addr,
         int unsigned depth,
         int unsigned desc_size,
         gq_logical_seq_t logical_head,
-        input gq_desc_base pending[$]);
+        input gq_desc_base pending[$],
+        output bit valid,
+        output int unsigned completed_count);
         query_calls++;
-        return 0;
-    endfunction
+        valid = 1;
+        completed_count = 0;
+    endtask
 endclass
 
 class gq_completion_read_guard_mem extends host_mem_manager;
@@ -460,7 +468,7 @@ class gq_completion_test extends uvm_test;
         end
     endfunction
 
-    function void check_tail_memory_endian();
+    task check_tail_memory_endian();
         gq_tail_mem_completion little_source;
         gq_tail_mem_completion big_source;
         gq_tail_mem_completion zero_offset_source;
@@ -471,6 +479,7 @@ class gq_completion_test extends uvm_test;
         gq_raw_ptr_t raw;
         gq_addr_t status_base;
         byte raw_bytes[];
+        bit valid;
         int unsigned count;
 
         status_base = mem.alloc(16, 4, `__FILE__, `__LINE__);
@@ -489,9 +498,9 @@ class gq_completion_test extends uvm_test;
         for (int unsigned i = 0; i < 4; i++)
             raw_bytes[i] = byte'(raw >> (8 * i));
         mem.write_mem(status_base + 4, raw_bytes, `__FILE__, `__LINE__);
-        count = little_source.completed_count(mem, 0, status_base, 32, 64,
-                                              7, pending);
-        if (count != 3)
+        little_source.query_completed(mem, adapter, 0, status_base, 32, 64,
+                                      7, pending, valid, count);
+        if (!valid || count != 3)
             `uvm_fatal("TAIL_ENDIAN", $sformatf(
                 "little-endian count got %0d expected 3", count))
 
@@ -499,9 +508,9 @@ class gq_completion_test extends uvm_test;
         for (int unsigned i = 0; i < 4; i++)
             raw_bytes[i] = byte'(raw >> (8 * (3 - i)));
         mem.write_mem(status_base + 8, raw_bytes, `__FILE__, `__LINE__);
-        count = big_source.completed_count(mem, 0, status_base, 32, 64,
-                                           7, pending);
-        if (count != 3)
+        big_source.query_completed(mem, adapter, 0, status_base, 32, 64,
+                                   7, pending, valid, count);
+        if (!valid || count != 3)
             `uvm_fatal("TAIL_ENDIAN", $sformatf(
                 "big-endian count got %0d expected 3", count))
 
@@ -509,26 +518,26 @@ class gq_completion_test extends uvm_test;
         for (int unsigned i = 0; i < 4; i++)
             raw_bytes[i] = byte'(raw >> (8 * i));
         mem.write_mem(status_base + 4, raw_bytes, `__FILE__, `__LINE__);
-        count = little_source.completed_count(mem, 0, status_base, 32, 64,
-                                              7, pending);
-        if (count != 0)
+        little_source.query_completed(mem, adapter, 0, status_base, 32, 64,
+                                      7, pending, valid, count);
+        if (valid || count != 0)
             `uvm_fatal("TAIL_DECODE", "decode failure did not return zero")
 
         raw = ptr_codec.encode_publish(65534, 65538, 32);
         for (int unsigned i = 0; i < 4; i++)
             raw_bytes[i] = byte'(raw >> (8 * i));
         mem.write_mem(status_base + 4, raw_bytes, `__FILE__, `__LINE__);
-        count = little_source.completed_count(mem, 0, status_base, 32, 64,
-                                              65534, pending);
-        if (count != 4)
+        little_source.query_completed(mem, adapter, 0, status_base, 32, 64,
+                                      65534, pending, valid, count);
+        if (!valid || count != 4)
             `uvm_fatal("TAIL_WRAP", $sformatf(
                 "little-endian 16-bit wrap count got %0d expected 4", count))
         for (int unsigned i = 0; i < 4; i++)
             raw_bytes[i] = byte'(raw >> (8 * (3 - i)));
         mem.write_mem(status_base + 8, raw_bytes, `__FILE__, `__LINE__);
-        count = big_source.completed_count(mem, 0, status_base, 32, 64,
-                                           65534, pending);
-        if (count != 4)
+        big_source.query_completed(mem, adapter, 0, status_base, 32, 64,
+                                   65534, pending, valid, count);
+        if (!valid || count != 4)
             `uvm_fatal("TAIL_WRAP", $sformatf(
                 "big-endian 16-bit wrap count got %0d expected 4", count))
 
@@ -537,13 +546,15 @@ class gq_completion_test extends uvm_test;
                                  GQ_LITTLE_ENDIAN);
         addr_catcher = new("addr_catcher");
         uvm_report_cb::add(null, addr_catcher);
-        count = little_source.completed_count(
-            guard_mem, 0, 64'hffff_ffff_ffff_fffe, 32, 64, 0, pending);
-        if (count != 0)
+        little_source.query_completed(
+            guard_mem, adapter, 0, 64'hffff_ffff_ffff_fffe, 32, 64, 0,
+            pending, valid, count);
+        if (valid || count != 0)
             `uvm_fatal("TAIL_ADDR", "status base plus offset overflow was accepted")
-        count = zero_offset_source.completed_count(
-            guard_mem, 0, 64'hffff_ffff_ffff_fffe, 32, 64, 0, pending);
-        if (count != 0)
+        zero_offset_source.query_completed(
+            guard_mem, adapter, 0, 64'hffff_ffff_ffff_fffe, 32, 64, 0,
+            pending, valid, count);
+        if (valid || count != 0)
             `uvm_fatal("TAIL_ADDR", "four-byte status read overflow was accepted")
         uvm_report_cb::delete(null, addr_catcher);
         if (addr_catcher.caught_addr_errors != 2 || guard_mem.read_calls != 0)
@@ -552,7 +563,7 @@ class gq_completion_test extends uvm_test;
                 addr_catcher.caught_addr_errors, guard_mem.read_calls))
 
         mem.free(status_base, `__FILE__, `__LINE__);
-    endfunction
+    endtask
 
     function void check_completion_validation();
         gq_queue_cfg missing_source_cfg;

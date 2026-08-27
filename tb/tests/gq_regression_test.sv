@@ -11,20 +11,24 @@ class gq_regression_zero_completion extends gq_completion_source;
         forced_count = 0;
     endfunction
 
-    virtual function int unsigned completed_count(
+    virtual task query_completed(
         host_mem_api mem,
+        gq_hw_adapter adapter,
         gq_addr_t ring_base,
         gq_addr_t status_addr,
         int unsigned depth,
         int unsigned desc_size,
         gq_logical_seq_t logical_head,
-        input gq_desc_base pending[$]);
+        input gq_desc_base pending[$],
+        output bit valid,
+        output int unsigned completed_count);
         int unsigned result;
 
         result = forced_count;
         forced_count = 0;
-        return result;
-    endfunction
+        valid = 1;
+        completed_count = result;
+    endtask
 endclass
 
 class gq_regression_overcount_completion extends gq_completion_source;
@@ -34,16 +38,20 @@ class gq_regression_overcount_completion extends gq_completion_source;
         super.new(name);
     endfunction
 
-    virtual function int unsigned completed_count(
+    virtual task query_completed(
         host_mem_api mem,
+        gq_hw_adapter adapter,
         gq_addr_t ring_base,
         gq_addr_t status_addr,
         int unsigned depth,
         int unsigned desc_size,
         gq_logical_seq_t logical_head,
-        input gq_desc_base pending[$]);
-        return pending.size() + 1;
-    endfunction
+        input gq_desc_base pending[$],
+        output bit valid,
+        output int unsigned completed_count);
+        valid = 1;
+        completed_count = pending.size() + 1;
+    endtask
 endclass
 
 class gq_regression_diagnostic_catcher extends uvm_report_catcher;

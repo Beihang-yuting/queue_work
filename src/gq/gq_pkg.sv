@@ -13,6 +13,7 @@ package gq_pkg;
     `include "gq_ptr_codec.sv"
     `include "gq_hw_adapter.sv"
     `include "gq_completion_source.sv"
+    `include "gq_desc_writeback_completion.sv"
     `include "gq_tail_mem_completion.sv"
     `include "gq_queue_cfg.sv"
     `include "gq_wait_policy.sv"
