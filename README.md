@@ -3,8 +3,9 @@
 This repository provides a sparse, reset-aware UVM queue environment plus a
 mailbox specialization. Queue rings use 64-bit host addresses, hardware tail
 pointers are 32-bit encoded values, and software head/tail positions are
-64-bit logical sequences. The availability phase changes once per queue-depth
-lap, so long-running tests do not need to truncate logical sequence numbers.
+64-bit logical sequences. The generic core keeps wrap/phase information for
+protocols that need it; the mailbox specialization follows the DPU mailbox
+contract with fixed descriptor ownership and a 16-bit index/wrap tail value.
 
 ## Configure memory and sparse queues
 
@@ -13,10 +14,10 @@ Inject one shared `host_mem_api` implementation and one DUT-specific
 added to `queues` get agents or preallocated rings.
 
 In the example below, `my_mailbox_adapter` is a concrete class supplied by the
-user project that extends `gq_hw_adapter` and implements queue register/IRQ
-access. `my_mailbox_ptr_codec` is likewise a user-project concrete
-`gq_ptr_codec` for the DUT's raw pointer layout. Neither name is a testbench
-mock from this repository.
+user project that extends `mailbox_reg_adapter` and implements queue
+register/IRQ access. `mailbox_env_cfg` creates the production
+`mailbox_ptr_codec` by default; its public `ptr_codec` handle remains
+replaceable when another DUT needs a different pointer layout.
 
 ```systemverilog
 function gq_queue_cfg make_mailbox_queue_cfg(
@@ -48,7 +49,6 @@ endfunction
 
 host_mem_manager mem;
 my_mailbox_adapter adapter;
-my_mailbox_ptr_codec codec;
 mailbox_env_cfg cfg;
 mailbox_env env;
 gq_queue_cfg tx_1_cfg;
@@ -61,21 +61,19 @@ mem = new("mem");
 mem.init_region(64'h0000_0001_0000_0000,
                 64'h0000_0001_00ff_ffff, MODE_LINEAR, 16);
 adapter = my_mailbox_adapter::type_id::create("adapter");
-codec = my_mailbox_ptr_codec::type_id::create("codec");
 
 cfg = mailbox_env_cfg::type_id::create("cfg");
 cfg.mem       = mem;
 cfg.adapter   = adapter;
-cfg.ptr_codec = codec;
 
 tx_1_cfg = make_mailbox_queue_cfg(
-    "tx_1_cfg", GQ_TX, 1, 32, GQ_POLL, 100ns, 10us, codec);
+    "tx_1_cfg", GQ_TX, 1, 32, GQ_POLL, 100ns, 10us, cfg.ptr_codec);
 tx_4095_cfg = make_mailbox_queue_cfg(
-    "tx_4095_cfg", GQ_TX, 4095, 32, GQ_IRQ, 100ns, 10us, codec);
+    "tx_4095_cfg", GQ_TX, 4095, 32, GQ_IRQ, 100ns, 10us, cfg.ptr_codec);
 rx_2_cfg = make_mailbox_queue_cfg(
-    "rx_2_cfg", GQ_RX, 2, 32, GQ_POLL, 100ns, 10us, codec);
+    "rx_2_cfg", GQ_RX, 2, 32, GQ_POLL, 100ns, 10us, cfg.ptr_codec);
 rx_3000_cfg = make_mailbox_queue_cfg(
-    "rx_3000_cfg", GQ_RX, 3000, 32, GQ_IRQ, 100ns, 10us, codec);
+    "rx_3000_cfg", GQ_RX, 3000, 32, GQ_IRQ, 100ns, 10us, cfg.ptr_codec);
 
 if (!cfg.add_queue(tx_1_cfg, reason) ||
     !cfg.add_queue(tx_4095_cfg, reason) ||
@@ -88,7 +86,9 @@ env = mailbox_env::type_id::create("env", this);
 ```
 
 The mailbox configuration validates IDs in `0..4095`, power-of-two depths in
-`32..65536`, 64-byte TX descriptors, and 16-byte RX descriptors. A successful
+`32..32768`, 64-byte TX descriptors, and 16-byte RX descriptors. The DPU
+driver on `10.11.10.53` currently configures depth 256, which lies within this
+range. A successful
 `add_queue` transfers ownership of that queue configuration to the environment.
 Set every field and strategy before calling it, and do not mutate the queue
 configuration through either the original handle or `cfg.queues` afterward.
@@ -104,6 +104,12 @@ writeback data. Allocate transaction buffers with `alloc_owned()` so completion,
 reset, and final cleanup can release them exactly once. See
 `mailbox_tx_desc` and `mailbox_rx_desc` for concrete 64-byte and 16-byte
 implementations.
+
+Mailbox does not phase its descriptor ownership flags. Both TX and RX always
+publish `flags=16'h0001` (`AVAIL=1`, `USED=0`) and complete only after the DUT
+writes `USED=1`. Their `mark_available(phase)` and `is_complete(phase)` methods
+therefore intentionally ignore the phase argument. Other descriptor protocols
+may still use the generic `gq_phase(sequence, depth)` value.
 
 Completion storage/writeback is a design-level mechanism and strategy type
 across roles and queues, not a per-queue hardware-mode switch. The source still
@@ -131,13 +137,76 @@ virtual function bit decode_completion(
     output gq_logical_seq_t completed_tail);
 ```
 
-Keep all wrap decisions in the codec and use `gq_phase(sequence, depth)` for
-the descriptor phase. The concrete codec belongs to the user project because
-the raw head/tail representation is DUT-specific.
+The default `mailbox_ptr_codec` encodes the published tail as follows:
+
+| Bits | Meaning |
+| --- | --- |
+| `[14:0]` | Ring index, `new_tail % depth` |
+| `[15]` | Wrap parity, `(new_tail / depth) & 1` |
+| `[31:16]` | Zero |
+
+This layout supports mailbox depths through 32768. For example, a depth-32
+queue publishes logical tail 32 as `16'h8000` and logical tail 33 as
+`16'h8001`. Keep all wrap decisions in the codec; replace `cfg.ptr_codec`
+with a derived `gq_ptr_codec` only when the target hardware uses another raw
+pointer representation.
+
+## Adapt mailbox register access
+
+`mailbox_reg_adapter` is the register-access seam. It converts the generic
+queue callbacks into mailbox-specific callbacks and narrows the production
+tail value to 16 bits, but deliberately contains no register addresses or
+access mechanism. A user adapter can use UVM RAL, PCIe transactions, or a DUT
+backdoor, for example:
+
+```systemverilog
+class my_mailbox_adapter extends mailbox_reg_adapter;
+    `uvm_object_utils(my_mailbox_adapter)
+
+    my_mailbox_regs ral;
+
+    function new(string name = "my_mailbox_adapter");
+        super.new(name);
+    endfunction
+
+    virtual task configure_mailbox_registers(
+        gq_role_e role, int unsigned queue_id, gq_addr_t base,
+        int unsigned depth, int unsigned desc_size);
+        int unsigned local_qid = map_local_qid(role, queue_id);
+        // Program the user project's RAL/PCIe/backdoor registers here.
+    endtask
+
+    virtual task disable_mailbox_registers(
+        gq_role_e role, int unsigned queue_id);
+        // Disable or cancel this logical queue here.
+    endtask
+
+    virtual task write_mailbox_notify(
+        gq_role_e role, int unsigned queue_id, bit [15:0] raw_tail);
+        // Write the mapped RX/TX notify register here.
+    endtask
+
+    virtual task wait_mailbox_irq(
+        gq_role_e role, int unsigned queue_id);
+        // Wait through the user project's interrupt mechanism here.
+    endtask
+
+    virtual task ack_mailbox_irq(
+        gq_role_e role, int unsigned queue_id);
+        // Acknowledge the mapped interrupt here.
+    endtask
+endclass
+```
+
+The environment treats `queue_id` as a user-defined logical identifier. The
+adapter owns the mapping from `(role, queue_id)` to physical/local RX or TX
+queue IDs and registers; the generic and mailbox packages do not assume the
+DPU driver's local numbering.
 
 ## Implement publish cancellation in the hardware adapter
 
-A concrete `gq_hw_adapter` may block inside `publish(role, queue_id, raw_tail)`.
+A concrete `gq_hw_adapter` (including `mailbox_reg_adapter`) may block inside
+`publish(role, queue_id, raw_tail)`.
 For the same role and queue ID, `disable_queue(role, queue_id)` is the
 cancellation operation for an in-flight blocked `publish()`. The adapter must
 allow the two tasks to run concurrently. Every overlap must linearize in
@@ -249,10 +318,12 @@ Poll and IRQ modes share the same ordered drain path. Select `wait_mode`,
 successful `add_queue`, as shown in the configuration example above. Do not
 change those values through `cfg.queues` after ownership transfers.
 
-In IRQ mode the adapter implements `wait_irq()` and `ack_irq()`. The timeout
-also bounds an IRQ wait. Completion diagnostics start their age after the tail
-publish returns and report an oldest-outstanding episode once, including role,
-queue ID, head, tail, slot, phase, ring/slot addresses, and descriptor bytes.
+In IRQ mode a generic adapter implements `wait_irq()` and `ack_irq()`; a
+`mailbox_reg_adapter` subclass implements `wait_mailbox_irq()` and
+`ack_mailbox_irq()`, which the base class forwards. The timeout also bounds an
+IRQ wait. Completion diagnostics start their age after the tail publish returns
+and report an oldest-outstanding episode once, including role, queue ID, head,
+tail, slot, phase, ring/slot addresses, and descriptor bytes.
 
 ## Drive reset and final cleanup
 
@@ -307,6 +378,9 @@ Run the complete checked regression with these exact commands:
 ```bash
 ./scripts/run_vcs_remote.sh gq_config_test
 ./scripts/run_vcs_remote.sh mailbox_desc_test
+./scripts/run_vcs_remote.sh mailbox_ptr_codec_test
+./scripts/run_vcs_remote.sh mailbox_reg_adapter_test
+./scripts/run_vcs_remote.sh mailbox_wrap_test
 ./scripts/run_vcs_remote.sh gq_submit_test
 ./scripts/run_vcs_remote.sh gq_completion_test
 ./scripts/run_vcs_remote.sh gq_refill_test

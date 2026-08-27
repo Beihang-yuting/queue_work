@@ -22,40 +22,40 @@ scripts/run_vcs_remote.sh
 host_mem/
 
 src/gq/gq_pkg.sv
-src/gq/gq_types.svh
-src/gq/gq_desc_base.svh
-src/gq/gq_ptr_codec.svh
-src/gq/gq_hw_adapter.svh
-src/gq/gq_completion_source.svh
-src/gq/gq_tail_mem_completion.svh
-src/gq/gq_wait_policy.svh
-src/gq/gq_queue_cfg.svh
-src/gq/gq_refill_profile.svh
-src/gq/gq_request.svh
-src/gq/gq_queue_engine.svh
-src/gq/gq_agent.svh
-src/gq/gq_reset_controller.svh
-src/gq/gq_env_cfg.svh
-src/gq/gq_env.svh
+src/gq/gq_types.sv
+src/gq/gq_desc_base.sv
+src/gq/gq_ptr_codec.sv
+src/gq/gq_hw_adapter.sv
+src/gq/gq_completion_source.sv
+src/gq/gq_tail_mem_completion.sv
+src/gq/gq_wait_policy.sv
+src/gq/gq_queue_cfg.sv
+src/gq/gq_refill_profile.sv
+src/gq/gq_request.sv
+src/gq/gq_queue_engine.sv
+src/gq/gq_agent.sv
+src/gq/gq_reset_controller.sv
+src/gq/gq_env_cfg.sv
+src/gq/gq_env.sv
 
 src/mailbox/mailbox_pkg.sv
-src/mailbox/mailbox_tx_desc.svh
-src/mailbox/mailbox_rx_desc.svh
-src/mailbox/mailbox_completion.svh
-src/mailbox/mailbox_refill_profile.svh
-src/mailbox/mailbox_sequences.svh
-src/mailbox/mailbox_env.svh
+src/mailbox/mailbox_tx_desc.sv
+src/mailbox/mailbox_rx_desc.sv
+src/mailbox/mailbox_completion.sv
+src/mailbox/mailbox_refill_profile.sv
+src/mailbox/mailbox_sequences.sv
+src/mailbox/mailbox_env.sv
 
-tb/mocks/gq_test_ptr_codec.svh
-tb/mocks/mailbox_mock_adapter.svh
-tb/mocks/mailbox_mock_dut.svh
-tb/tests/gq_config_test.svh
-tb/tests/mailbox_desc_test.svh
-tb/tests/gq_submit_test.svh
-tb/tests/gq_completion_test.svh
-tb/tests/gq_refill_test.svh
-tb/tests/gq_reset_test.svh
-tb/tests/gq_regression_test.svh
+tb/mocks/gq_test_ptr_codec.sv
+tb/mocks/mailbox_mock_adapter.sv
+tb/mocks/mailbox_mock_dut.sv
+tb/tests/gq_config_test.sv
+tb/tests/mailbox_desc_test.sv
+tb/tests/gq_submit_test.sv
+tb/tests/gq_completion_test.sv
+tb/tests/gq_refill_test.sv
+tb/tests/gq_reset_test.sv
+tb/tests/gq_regression_test.sv
 tb/gq_test_pkg.sv
 tb/tb_top.sv
 ```
@@ -233,13 +233,13 @@ git commit -m "build: add host memory dependency and VCS harness"
 ## Task 2: Common Types, Strategy Contracts, and Configuration
 
 **Files:**
-- Create: `src/gq/gq_types.svh`
-- Create: `src/gq/gq_ptr_codec.svh`
-- Create: `src/gq/gq_hw_adapter.svh`
-- Create: `src/gq/gq_completion_source.svh`
-- Create: `src/gq/gq_queue_cfg.svh`
+- Create: `src/gq/gq_types.sv`
+- Create: `src/gq/gq_ptr_codec.sv`
+- Create: `src/gq/gq_hw_adapter.sv`
+- Create: `src/gq/gq_completion_source.sv`
+- Create: `src/gq/gq_queue_cfg.sv`
 - Modify: `src/gq/gq_pkg.sv`
-- Create: `tb/tests/gq_config_test.svh`
+- Create: `tb/tests/gq_config_test.sv`
 - Modify: `tb/gq_test_pkg.sv`
 
 - [ ] **Step 1: Write failing width, phase, and validation tests**
@@ -268,7 +268,7 @@ Expected: compilation fails because types/classes do not exist.
 
 - [ ] **Step 2: Implement widths and helpers**
 
-Create `gq_types.svh`:
+Create `gq_types.sv`:
 
 ```systemverilog
 typedef bit [63:0] gq_addr_t;
@@ -337,18 +337,18 @@ failed validation into `UVM_FATAL` before memory allocation.
 
 ```bash
 scripts/run_vcs_remote.sh gq_config_test
-git add src/gq tb/tests/gq_config_test.svh tb/gq_test_pkg.sv
+git add src/gq tb/tests/gq_config_test.sv tb/gq_test_pkg.sv
 git commit -m "feat: define generic queue contracts and configuration"
 ```
 
 ## Task 3: Descriptor Ownership and Mailbox Packing
 
 **Files:**
-- Create: `src/gq/gq_desc_base.svh`
-- Create: `src/mailbox/mailbox_tx_desc.svh`
-- Create: `src/mailbox/mailbox_rx_desc.svh`
+- Create: `src/gq/gq_desc_base.sv`
+- Create: `src/mailbox/mailbox_tx_desc.sv`
+- Create: `src/mailbox/mailbox_rx_desc.sv`
 - Modify: package include files
-- Create: `tb/tests/mailbox_desc_test.svh`
+- Create: `tb/tests/mailbox_desc_test.sv`
 
 - [ ] **Step 1: Write failing little-endian descriptor tests**
 
@@ -401,8 +401,9 @@ Define virtual `prepare`, `mark_available`, `pack`, `unpack`,
 
 Use `bit [511:0] raw` and copy `raw[i*8 +: 8]` into `data[i]`. Constrain
 `data_len<=44`. Allocate/write external randomized data only when
-`buf_len!=0`. Set `avail=phase` and `used=!phase`. Completion is
-`used==phase`.
+`buf_len!=0`. Mailbox publishes fixed `avail=1, used=0` ownership flags on
+every traversal and completes when `used==1`; the generic phase argument is
+ignored by mailbox descriptors.
 
 - [ ] **Step 4: Implement mailbox RX**
 
@@ -419,21 +420,21 @@ and run `mem.leak_check()`. Expected: no double-free fatal and no leak warning.
 
 ```bash
 scripts/run_vcs_remote.sh mailbox_desc_test
-git add src/gq src/mailbox tb/tests/mailbox_desc_test.svh tb/gq_test_pkg.sv
+git add src/gq src/mailbox tb/tests/mailbox_desc_test.sv tb/gq_test_pkg.sv
 git commit -m "feat: add mailbox descriptor formats and owned buffers"
 ```
 
 ## Task 4: Sparse Environment and Up-Front Ring Allocation
 
 **Files:**
-- Create: `src/gq/gq_queue_engine.svh`
-- Create: `src/gq/gq_agent.svh`
-- Create: `src/gq/gq_env_cfg.svh`
-- Create: `src/gq/gq_env.svh`
-- Create: `src/mailbox/mailbox_env.svh`
-- Create: `tb/mocks/gq_test_ptr_codec.svh`
-- Create: `tb/mocks/mailbox_mock_adapter.svh`
-- Modify: `tb/tests/gq_config_test.svh`
+- Create: `src/gq/gq_queue_engine.sv`
+- Create: `src/gq/gq_agent.sv`
+- Create: `src/gq/gq_env_cfg.sv`
+- Create: `src/gq/gq_env.sv`
+- Create: `src/mailbox/mailbox_env.sv`
+- Create: `tb/mocks/gq_test_ptr_codec.sv`
+- Create: `tb/mocks/mailbox_mock_adapter.sv`
+- Modify: `tb/tests/gq_config_test.sv`
 
 - [ ] **Step 1: Write failing sparse allocation test**
 
@@ -460,7 +461,7 @@ Create a minimal `gq_queue_agent` that owns one `gq_queue_engine`; submission
 driver/sequencer support is added in Task 5. Require a non-null pointer codec
 before creating the engine.
 `mailbox_env_cfg.add_tx` forces 64-byte descriptors; `add_rx` forces 16-byte
-descriptors. Reject IDs above 4095 and depths outside inclusive 32..65536 or
+descriptors. Reject IDs above 4095 and depths outside inclusive 32..32768 or
 not power-of-two.
 
 - [ ] **Step 4: Allocate exact ring capacity**
@@ -484,18 +485,18 @@ wait for that event. Expose read-only test accessors.
 
 ```bash
 scripts/run_vcs_remote.sh gq_config_test
-git add src/gq src/mailbox tb/mocks tb/tests/gq_config_test.svh
+git add src/gq src/mailbox tb/mocks tb/tests/gq_config_test.sv
 git commit -m "feat: allocate sparse enabled queue rings"
 ```
 
 ## Task 5: Single Submit and Atomic Batch Publish
 
 **Files:**
-- Create: `src/gq/gq_request.svh`
-- Modify: `src/gq/gq_queue_engine.svh`
-- Modify: `src/gq/gq_agent.svh`
-- Create: `src/mailbox/mailbox_sequences.svh`
-- Create: `tb/tests/gq_submit_test.svh`
+- Create: `src/gq/gq_request.sv`
+- Modify: `src/gq/gq_queue_engine.sv`
+- Modify: `src/gq/gq_agent.sv`
+- Create: `src/mailbox/mailbox_sequences.sv`
+- Create: `tb/tests/gq_submit_test.sv`
 - Modify: package include files
 
 - [ ] **Step 1: Write failing single/batch tests**
@@ -544,20 +545,20 @@ descriptors give one atomic batch publish.
 
 ```bash
 scripts/run_vcs_remote.sh gq_submit_test
-git add src/gq tb/tests/gq_submit_test.svh tb/gq_test_pkg.sv
+git add src/gq tb/tests/gq_submit_test.sv tb/gq_test_pkg.sv
 git commit -m "feat: submit descriptors with atomic batch publish"
 ```
 
 ## Task 6: Ordered Completion, Poll/IRQ, and Phase Wrap
 
 **Files:**
-- Complete: `src/gq/gq_completion_source.svh`
-- Create: `src/gq/gq_tail_mem_completion.svh`
-- Create: `src/gq/gq_wait_policy.svh`
-- Create: `src/mailbox/mailbox_completion.svh`
-- Create: `tb/mocks/mailbox_mock_dut.svh`
-- Create: `tb/tests/gq_completion_test.svh`
-- Modify: `src/gq/gq_queue_engine.svh`
+- Complete: `src/gq/gq_completion_source.sv`
+- Create: `src/gq/gq_tail_mem_completion.sv`
+- Create: `src/gq/gq_wait_policy.sv`
+- Create: `src/mailbox/mailbox_completion.sv`
+- Create: `tb/mocks/mailbox_mock_dut.sv`
+- Create: `tb/tests/gq_completion_test.sv`
+- Modify: `src/gq/gq_queue_engine.sv`
 
 - [ ] **Step 1: Write failing ordered completion test**
 
@@ -620,19 +621,19 @@ under poll and IRQ and compare order.
 
 ```bash
 scripts/run_vcs_remote.sh gq_completion_test
-git add src/gq src/mailbox tb/mocks tb/tests/gq_completion_test.svh
+git add src/gq src/mailbox tb/mocks tb/tests/gq_completion_test.sv
 git commit -m "feat: drain ordered completions in poll and IRQ modes"
 ```
 
 ## Task 7: One-Shot RX Startup and DUT-Driven Refill
 
 **Files:**
-- Create: `src/gq/gq_refill_profile.svh`
-- Create: `src/mailbox/mailbox_refill_profile.svh`
-- Modify: `src/mailbox/mailbox_sequences.svh`
-- Modify: `src/gq/gq_request.svh`
-- Modify: `src/gq/gq_queue_engine.svh`
-- Create: `tb/tests/gq_refill_test.svh`
+- Create: `src/gq/gq_refill_profile.sv`
+- Create: `src/mailbox/mailbox_refill_profile.sv`
+- Modify: `src/mailbox/mailbox_sequences.sv`
+- Modify: `src/gq/gq_request.sv`
+- Modify: `src/gq/gq_queue_engine.sv`
+- Create: `tb/tests/gq_refill_test.sv`
 
 - [ ] **Step 1: Write failing startup test**
 
@@ -678,18 +679,18 @@ and exactly one additional publish. Verify old buffers free before replacements.
 
 ```bash
 scripts/run_vcs_remote.sh gq_refill_test
-git add src/gq src/mailbox tb/tests/gq_refill_test.svh
+git add src/gq src/mailbox tb/tests/gq_refill_test.sv
 git commit -m "feat: refill RX queues from DUT completion progress"
 ```
 
 ## Task 8: Runtime Reset and RX Recovery Choice
 
 **Files:**
-- Modify: `src/gq/gq_queue_engine.svh`
-- Modify: `src/gq/gq_env.svh`
-- Modify: `src/gq/gq_agent.svh`
-- Create: `src/gq/gq_reset_controller.svh`
-- Create: `tb/tests/gq_reset_test.svh`
+- Modify: `src/gq/gq_queue_engine.sv`
+- Modify: `src/gq/gq_env.sv`
+- Modify: `src/gq/gq_agent.sv`
+- Create: `src/gq/gq_reset_controller.sv`
+- Create: `tb/tests/gq_reset_test.sv`
 
 - [ ] **Step 1: Write failing reset-abort test**
 
@@ -723,16 +724,16 @@ until another startup request.
 
 ```bash
 scripts/run_vcs_remote.sh gq_reset_test
-git add src/gq tb/tests/gq_reset_test.svh tb/gq_test_pkg.sv
+git add src/gq tb/tests/gq_reset_test.sv tb/gq_test_pkg.sv
 git commit -m "feat: recover queue engines across runtime reset"
 ```
 
 ## Task 9: Diagnostics, Cleanup, and Integrated Regression
 
 **Files:**
-- Modify: `src/gq/gq_queue_engine.svh`
-- Modify: `src/gq/gq_env.svh`
-- Create: `tb/tests/gq_regression_test.svh`
+- Modify: `src/gq/gq_queue_engine.sv`
+- Modify: `src/gq/gq_env.sv`
+- Create: `tb/tests/gq_regression_test.sv`
 - Modify: `tb/gq_test_pkg.sv`
 - Create: `README.md`
 

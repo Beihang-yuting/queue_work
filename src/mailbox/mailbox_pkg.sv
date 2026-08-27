@@ -7,12 +7,14 @@ package mailbox_pkg;
     import gq_pkg::*;
     `include "uvm_macros.svh"
 
-    `include "mailbox_tx_desc.svh"
-    `include "mailbox_rx_desc.svh"
-    `include "mailbox_completion.svh"
-    `include "mailbox_refill_profile.svh"
-    `include "mailbox_sequences.svh"
-    `include "mailbox_env.svh"
+    `include "mailbox_ptr_codec.sv"
+    `include "mailbox_reg_adapter.sv"
+    `include "mailbox_tx_desc.sv"
+    `include "mailbox_rx_desc.sv"
+    `include "mailbox_completion.sv"
+    `include "mailbox_refill_profile.sv"
+    `include "mailbox_sequences.sv"
+    `include "mailbox_env.sv"
 endpackage
 
 `endif

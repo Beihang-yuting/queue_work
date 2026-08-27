@@ -12,22 +12,22 @@
 
 ## File Map
 
-- Modify `src/gq/gq_hw_adapter.svh`: document disable-driven publish cancellation.
-- Modify `src/gq/gq_queue_engine.svh`: add publish operation ownership, split install from external publish, and reorder teardown.
-- Modify `tb/tests/gq_submit_test.svh`: prove publish owns no engine semaphore and later submits cannot overtake it.
-- Modify `tb/tests/gq_reset_test.svh`: block publish until disable and prove reset/cleanup cannot deadlock.
+- Modify `src/gq/gq_hw_adapter.sv`: document disable-driven publish cancellation.
+- Modify `src/gq/gq_queue_engine.sv`: add publish operation ownership, split install from external publish, and reorder teardown.
+- Modify `tb/tests/gq_submit_test.sv`: prove publish owns no engine semaphore and later submits cannot overtake it.
+- Modify `tb/tests/gq_reset_test.sv`: block publish until disable and prove reset/cleanup cannot deadlock.
 - Modify `README.md`: document the concrete-adapter cancellation requirement.
-- Verify `tb/mocks/mailbox_mock_adapter.svh`: its zero-time operations already satisfy the contract; change it only if the focused tests need common observable state.
-- Verify `tb/tests/gq_regression_test.svh`: retain its 10 us global watchdog and automatic-finalization assertions without weakening them.
+- Verify `tb/mocks/mailbox_mock_adapter.sv`: its zero-time operations already satisfy the contract; change it only if the focused tests need common observable state.
+- Verify `tb/tests/gq_regression_test.sv`: retain its 10 us global watchdog and automatic-finalization assertions without weakening them.
 
 ## Task 1: Ordered Publish Ownership and Disable-First Teardown
 
 **Files:**
 
-- Modify: `src/gq/gq_hw_adapter.svh`
-- Modify: `src/gq/gq_queue_engine.svh`
-- Modify: `tb/tests/gq_submit_test.svh`
-- Modify: `tb/tests/gq_reset_test.svh`
+- Modify: `src/gq/gq_hw_adapter.sv`
+- Modify: `src/gq/gq_queue_engine.sv`
+- Modify: `tb/tests/gq_submit_test.sv`
+- Modify: `tb/tests/gq_reset_test.sv`
 
 - [ ] **Step 1: Add the failing no-lock publish test**
 
@@ -191,7 +191,7 @@ publish owns `submit_serialization`, reset waits for that semaphore, and
 
 - [ ] **Step 5: Define the internal publish operation and owner state**
 
-At package scope in `src/gq/gq_queue_engine.svh`, before `gq_queue_engine`, add
+At package scope in `src/gq/gq_queue_engine.sv`, before `gq_queue_engine`, add
 the non-factory internal operation:
 
 ```systemverilog
@@ -379,7 +379,7 @@ cannot race the old publish.
 - [ ] **Step 10: Document the adapter cancellation contract**
 
 Add this contract immediately above the pure virtual methods in
-`src/gq/gq_hw_adapter.svh`:
+`src/gq/gq_hw_adapter.sv`:
 
 ```systemverilog
 // publish() may block in a concrete bus/DUT adapter. disable_queue() must be
@@ -408,8 +408,8 @@ plus one cleanup-canceled publish.
 
 ```bash
 git diff --check
-git add src/gq/gq_hw_adapter.svh src/gq/gq_queue_engine.svh \
-        tb/tests/gq_submit_test.svh tb/tests/gq_reset_test.svh
+git add src/gq/gq_hw_adapter.sv src/gq/gq_queue_engine.sv \
+        tb/tests/gq_submit_test.sv tb/tests/gq_reset_test.sv
 git commit -m "fix: cancel blocked publishes during queue teardown"
 ```
 
