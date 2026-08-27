@@ -67,6 +67,10 @@ class tlpq_dual_rx_start_sequence extends uvm_sequence;
             reason = "dual RX start requires an environment and two sequencers";
             return 0;
         end
+        if (host_sequencer == switch_sequencer) begin
+            reason = "dual RX start requires distinct Host and Switch sequencers";
+            return 0;
+        end
         host_refill_profile = env_cfg.get_refill_profile(TLPQ_HOST);
         switch_refill_profile = env_cfg.get_refill_profile(TLPQ_SWITCH);
         if (host_refill_profile == null || switch_refill_profile == null) begin

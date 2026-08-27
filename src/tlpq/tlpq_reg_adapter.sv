@@ -14,6 +14,12 @@ virtual class tlpq_reg_adapter extends gq_hw_adapter;
     protected int unsigned channel_queue_ids[int];
     protected bit enable_armed[int unsigned];
     protected longint unsigned configuration_generation[int unsigned];
+    protected bit queue_configured[int unsigned];
+    protected bit queue_enabled[int unsigned];
+    protected bit disable_in_progress[int unsigned];
+    protected uvm_event disable_done[int unsigned];
+    protected semaphore operation_lock[int unsigned];
+    protected semaphore disable_lock[int unsigned];
 
     function new(string name = "tlpq_reg_adapter");
         super.new(name);
@@ -26,6 +32,10 @@ virtual class tlpq_reg_adapter extends gq_hw_adapter;
         int unsigned desc_size, tlpq_rx_hw_cfg_t hw_cfg);
 
     pure virtual task enable_tlpq_rx(tlpq_channel_e channel);
+
+    // disable_tlpq_rx() is the cancellation callback for every concurrent
+    // timed semantic operation on this channel. When it returns, an older
+    // reset/configure/tail/enable callback must no longer become visible.
     pure virtual task disable_tlpq_rx(tlpq_channel_e channel);
 
     pure virtual task write_tlpq_rx_tail(
@@ -54,6 +64,13 @@ virtual class tlpq_reg_adapter extends gq_hw_adapter;
         channel_queue_ids[channel_key] = queue_id;
         enable_armed[queue_id] = 0;
         configuration_generation[queue_id] = 0;
+        queue_configured[queue_id] = 0;
+        queue_enabled[queue_id] = 0;
+        disable_in_progress[queue_id] = 0;
+        disable_done[queue_id] = new($sformatf(
+            "tlpq_queue_%0d_disable_done", queue_id));
+        operation_lock[queue_id] = new(1);
+        disable_lock[queue_id] = new(1);
         reason = "";
         return 1;
     endfunction
@@ -90,6 +107,15 @@ virtual class tlpq_reg_adapter extends gq_hw_adapter;
         return 0;
     endfunction
 
+    protected task wait_for_disable(int unsigned queue_id);
+        uvm_event observed_done;
+
+        while (disable_in_progress[queue_id]) begin
+            observed_done = disable_done[queue_id];
+            observed_done.wait_on();
+        end
+    endtask
+
     virtual task configure_queue(
         gq_role_e role,
         int unsigned queue_id,
@@ -98,16 +124,37 @@ virtual class tlpq_reg_adapter extends gq_hw_adapter;
         int unsigned desc_size);
         tlpq_channel_e channel;
         tlpq_rx_hw_cfg_t hw_cfg;
+        longint unsigned configure_generation;
 
         if (!require_rx(role, queue_id, "configure_queue") ||
             !resolve_queue(queue_id, "configure_queue", channel, hw_cfg))
             return;
 
         configuration_generation[queue_id]++;
+        configure_generation = configuration_generation[queue_id];
         enable_armed[queue_id] = 0;
+        queue_configured[queue_id] = 0;
+        queue_enabled[queue_id] = 0;
+
+        operation_lock[queue_id].get(1);
+        wait_for_disable(queue_id);
+        if (configuration_generation[queue_id] != configure_generation) begin
+            operation_lock[queue_id].put(1);
+            return;
+        end
         reset_tlpq_rx(channel);
+        if (configuration_generation[queue_id] != configure_generation) begin
+            operation_lock[queue_id].put(1);
+            return;
+        end
         configure_tlpq_rx(channel, base, depth, desc_size, hw_cfg);
+        if (configuration_generation[queue_id] != configure_generation) begin
+            operation_lock[queue_id].put(1);
+            return;
+        end
+        queue_configured[queue_id] = 1;
         enable_armed[queue_id] = 1;
+        operation_lock[queue_id].put(1);
     endtask
 
     virtual task disable_queue(gq_role_e role, int unsigned queue_id);
@@ -120,9 +167,17 @@ virtual class tlpq_reg_adapter extends gq_hw_adapter;
 
         // Invalidate a blocked pre-disable publish before asking the derived
         // adapter to cancel its bus operation.
+        disable_lock[queue_id].get(1);
         configuration_generation[queue_id]++;
         enable_armed[queue_id] = 0;
+        queue_configured[queue_id] = 0;
+        queue_enabled[queue_id] = 0;
+        disable_in_progress[queue_id] = 1;
+        disable_done[queue_id].reset();
         disable_tlpq_rx(channel);
+        disable_in_progress[queue_id] = 0;
+        disable_done[queue_id].trigger();
+        disable_lock[queue_id].put(1);
     endtask
 
     virtual task publish(
@@ -143,15 +198,39 @@ virtual class tlpq_reg_adapter extends gq_hw_adapter;
             return;
         end
 
+        operation_lock[queue_id].get(1);
+        wait_for_disable(queue_id);
+        if (!queue_configured[queue_id]) begin
+            `uvm_error("TLPQ_REG_STATE", $sformatf(
+                "publish requires a configured queue_id=%0d", queue_id))
+            operation_lock[queue_id].put(1);
+            return;
+        end
+        if (enable_armed[queue_id] && raw_tail[15:0] != 16'h001f) begin
+            `uvm_error("TLPQ_REG_INITIAL_TAIL", $sformatf(
+                "queue_id=%0d initial tail must be 31 (got %0d)",
+                queue_id, raw_tail[15:0]))
+            operation_lock[queue_id].put(1);
+            return;
+        end
+
         publish_generation = configuration_generation[queue_id];
         write_tlpq_rx_tail(channel, raw_tail[15:0]);
-        if (enable_armed[queue_id] &&
-            configuration_generation[queue_id] == publish_generation) begin
+        if (configuration_generation[queue_id] != publish_generation ||
+            !queue_configured[queue_id]) begin
+            operation_lock[queue_id].put(1);
+            return;
+        end
+        if (enable_armed[queue_id]) begin
             // Clear before the timed callback so another publish cannot
             // observe the arm while enable_tlpq_rx() is in progress.
             enable_armed[queue_id] = 0;
             enable_tlpq_rx(channel);
+            if (configuration_generation[queue_id] == publish_generation &&
+                queue_configured[queue_id])
+                queue_enabled[queue_id] = 1;
         end
+        operation_lock[queue_id].put(1);
     endtask
 
     virtual task wait_irq(gq_role_e role, int unsigned queue_id);
