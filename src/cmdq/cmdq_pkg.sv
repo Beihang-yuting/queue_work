@@ -8,7 +8,10 @@ package cmdq_pkg;
     `include "uvm_macros.svh"
 
     `include "cmdq_types.sv"
+    `include "cmdq_ptr_codec.sv"
+    `include "cmdq_reg_adapter.sv"
     `include "cmdq_tx_desc.sv"
+    `include "cmdq_completion.sv"
 endpackage
 
 `endif

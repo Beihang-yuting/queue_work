@@ -9,6 +9,7 @@ package cmdq_test_pkg;
     `include "uvm_macros.svh"
 
     `include "host_mem_manager.sv"
+    `include "mocks/cmdq_mock_adapter.sv"
     `include "tests/cmdq_desc_test.sv"
 endpackage
 

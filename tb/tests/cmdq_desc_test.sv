@@ -20,6 +20,31 @@ class cmdq_alloc_error_catcher extends uvm_report_catcher;
     endfunction
 endclass
 
+class cmdq_reg_error_catcher extends uvm_report_catcher;
+    `uvm_object_utils(cmdq_reg_error_catcher)
+
+    int unsigned role_errors;
+    int unsigned pointer_errors;
+
+    function new(string name = "cmdq_reg_error_catcher");
+        super.new(name);
+        role_errors = 0;
+        pointer_errors = 0;
+    endfunction
+
+    virtual function action_e catch();
+        if (get_severity() == UVM_ERROR && get_id() == "CMDQ_REG_ROLE") begin
+            role_errors++;
+            return CAUGHT;
+        end
+        if (get_severity() == UVM_ERROR && get_id() == "CMDQ_REG_PTR") begin
+            pointer_errors++;
+            return CAUGHT;
+        end
+        return THROW;
+    endfunction
+endclass
+
 class cmdq_desc_test extends uvm_test;
     `uvm_component_utils(cmdq_desc_test)
 
@@ -335,6 +360,224 @@ class cmdq_desc_test extends uvm_test;
                 "completion event did not survive buffer release")
     endfunction
 
+    function cmdq_tx_desc make_strategy_desc(
+        string name, host_mem_manager mem, byte request_byte);
+        cmdq_tx_desc desc;
+
+        desc = cmdq_tx_desc::type_id::create(name);
+        desc.request = new[1];
+        desc.request[0] = request_byte;
+        desc.dst_id = CMDQ_DST_FSE;
+        desc.attach_mem(mem);
+        if (!desc.prepare())
+            `uvm_fatal("CMDQ_STRATEGY_SETUP", {name, " preparation failed"})
+        desc.mark_available(1'b0);
+        return desc;
+    endfunction
+
+    task check_pointer_and_queue_validation();
+        cmdq_ptr_codec codec;
+        cmdq_completion completion;
+        gq_queue_cfg cfg;
+        string reason;
+
+        codec = cmdq_ptr_codec::type_id::create("codec");
+        if (codec.encode_publish(0, 1, CMDQ_DEPTH) != 32'h0000_0001 ||
+            codec.encode_publish(1, 31, CMDQ_DEPTH) != 32'h0000_001f ||
+            codec.encode_publish(31, 32, CMDQ_DEPTH) != 32'h0000_8000 ||
+            codec.encode_publish(32, 64, CMDQ_DEPTH) != 32'h0000_0000)
+            `uvm_fatal("CMDQ_PTR", "bit-15 pointer vectors did not match")
+
+        completion = cmdq_completion::type_id::create("cfg_completion");
+        cfg = gq_queue_cfg::type_id::create("cfg");
+        cfg.role = GQ_TX;
+        cfg.depth = 32'h0001_0000;
+        cfg.desc_size = CMDQ_DESC_BYTES;
+        cfg.alignment = CMDQ_DESC_BYTES;
+        cfg.completion_timeout = 100ns;
+        cfg.poll_min_interval = 10ns;
+        cfg.poll_max_interval = 10ns;
+        cfg.ptr_codec = codec;
+        cfg.completion_source = completion;
+        if (cfg.validate(reason) ||
+            reason != "pointer codec: depth must be between 1 and 32768 (got 65536)")
+            `uvm_fatal("CMDQ_PTR_VALIDATE", $sformatf(
+                "unsupported queue depth was not rejected before programming: %s",
+                reason))
+    endtask
+
+    task check_completion_strategy();
+        host_mem_manager mem;
+        cmdq_mock_adapter adapter;
+        cmdq_completion completion;
+        cmdq_tx_desc first;
+        cmdq_tx_desc second;
+        gq_desc_base pending[$];
+        gq_addr_t ring_base;
+        byte first_bytes[];
+        byte second_bytes[];
+        byte first_tx_before[];
+        byte first_tx_after[];
+        byte first_rx_before[];
+        byte first_rx_after[];
+        byte second_tx_before[];
+        byte second_tx_after[];
+        byte second_rx_before[];
+        byte second_rx_after[];
+        byte first_after[];
+        byte second_after[];
+        bit valid;
+        int unsigned count;
+
+        mem = new("strategy_mem");
+        mem.init_region(64'h3000_0000, 64'h3000_ffff,
+                        MODE_LINEAR, 16);
+        ring_base = mem.alloc(2 * CMDQ_DESC_BYTES, CMDQ_DESC_BYTES,
+                              `__FILE__, `__LINE__);
+        if (ring_base == '1)
+            `uvm_fatal("CMDQ_STRATEGY_SETUP", "ring allocation failed")
+
+        first = make_strategy_desc("first", mem, 8'ha1);
+        second = make_strategy_desc("second", mem, 8'hb2);
+        first.pack(first_bytes);
+        second.pack(second_bytes);
+        first_bytes[0] = byte'(CMDQ_DESC_AVAIL | CMDQ_DESC_USED);
+        mem.write_mem(ring_base, first_bytes, `__FILE__, `__LINE__);
+        mem.write_mem(ring_base + CMDQ_DESC_BYTES, second_bytes,
+                      `__FILE__, `__LINE__);
+        mem.read_mem(first.tx_buf_addr, CMDQ_BUFFER_BYTES, first_tx_before,
+                     `__FILE__, `__LINE__);
+        mem.read_mem(first.rx_buf_addr, CMDQ_BUFFER_BYTES, first_rx_before,
+                     `__FILE__, `__LINE__);
+        mem.read_mem(second.tx_buf_addr, CMDQ_BUFFER_BYTES, second_tx_before,
+                     `__FILE__, `__LINE__);
+        mem.read_mem(second.rx_buf_addr, CMDQ_BUFFER_BYTES, second_rx_before,
+                     `__FILE__, `__LINE__);
+
+        pending.push_back(first);
+        pending.push_back(second);
+        adapter = cmdq_mock_adapter::type_id::create("completion_adapter");
+        completion = cmdq_completion::type_id::create("completion");
+        completion.query_completed(mem, adapter, ring_base, 0, 2,
+                                   CMDQ_DESC_BYTES, 0, pending, valid, count);
+        if (!valid || count != 1)
+            `uvm_fatal("CMDQ_COMPLETION_STRATEGY", $sformatf(
+                "got valid=%0b count=%0d expected valid=1 count=1",
+                valid, count))
+        if ((first.flags & CMDQ_DESC_USED) == 0 ||
+            (second.flags & CMDQ_DESC_USED) != 0 ||
+            first.tx_buf_addr == second.tx_buf_addr ||
+            first.rx_buf_addr == second.rx_buf_addr)
+            `uvm_fatal("CMDQ_COMPLETION_STABLE",
+                "writeback changed stable descriptor ownership or ordering")
+        first.pack(first_after);
+        second.pack(second_after);
+        expect_bytes_equal("first completion descriptor",
+                           first_after, first_bytes);
+        expect_bytes_equal("second incomplete descriptor",
+                           second_after, second_bytes);
+        mem.read_mem(first.tx_buf_addr, CMDQ_BUFFER_BYTES, first_tx_after,
+                     `__FILE__, `__LINE__);
+        mem.read_mem(first.rx_buf_addr, CMDQ_BUFFER_BYTES, first_rx_after,
+                     `__FILE__, `__LINE__);
+        mem.read_mem(second.tx_buf_addr, CMDQ_BUFFER_BYTES, second_tx_after,
+                     `__FILE__, `__LINE__);
+        mem.read_mem(second.rx_buf_addr, CMDQ_BUFFER_BYTES, second_rx_after,
+                     `__FILE__, `__LINE__);
+        expect_bytes_equal("first completion TX buffer",
+                           first_tx_after, first_tx_before);
+        expect_bytes_equal("first completion RX buffer",
+                           first_rx_after, first_rx_before);
+        expect_bytes_equal("second completion TX buffer",
+                           second_tx_after, second_tx_before);
+        expect_bytes_equal("second completion RX buffer",
+                           second_rx_after, second_rx_before);
+
+        first.release_owned();
+        second.release_owned();
+        mem.free(ring_base, `__FILE__, `__LINE__);
+        mem.leak_check(`__FILE__, `__LINE__);
+    endtask
+
+    task check_semantic_adapter();
+        localparam int unsigned QUEUE_ID = 0;
+        localparam gq_addr_t RING_BASE = 64'h0000_0000_4000_0000;
+        cmdq_hw_cfg_t hw_cfg;
+        cmdq_mock_adapter adapter;
+        cmdq_reg_error_catcher catcher;
+        string expected_trace[$] = '{"RESET(queue=0)",
+                                     {"CONFIGURE(queue=0,base=0x0000000040000000,",
+                                      "depth=32,size=32,hid=0x5a,fid=0x1234,",
+                                      "msix=0x0042,valid=1)"},
+                                     "ENABLE(queue=0)",
+                                     "PUBLISH(queue=0,tail=0x801f)"};
+        string expected_control_trace[$] = '{"WAIT_IRQ(queue=0)",
+                                             "ACK_IRQ(queue=0)",
+                                             "DISABLE(queue=0)"};
+
+        hw_cfg.host_id = 8'h5a;
+        hw_cfg.function_id = 16'h1234;
+        hw_cfg.msix_index = 16'h0042;
+        hw_cfg.msix_valid = 1'b1;
+        adapter = new("adapter", hw_cfg);
+
+        adapter.configure_queue(GQ_TX, QUEUE_ID, RING_BASE,
+                                CMDQ_DEPTH, CMDQ_DESC_BYTES);
+        adapter.publish(GQ_TX, QUEUE_ID, 32'h0000_801f);
+        if (adapter.trace != expected_trace)
+            `uvm_fatal("CMDQ_ADAPTER_TRACE", "semantic event order changed")
+        if (adapter.reset_count[QUEUE_ID] != 1 ||
+            adapter.configure_count[QUEUE_ID] != 1 ||
+            adapter.enable_count[QUEUE_ID] != 1 ||
+            adapter.publish_count[QUEUE_ID] != 1 ||
+            adapter.configured_base[QUEUE_ID] != RING_BASE ||
+            adapter.configured_depth[QUEUE_ID] != CMDQ_DEPTH ||
+            adapter.configured_desc_size[QUEUE_ID] != CMDQ_DESC_BYTES ||
+            adapter.configured_hw_cfg[QUEUE_ID] != hw_cfg ||
+            adapter.published_tails[QUEUE_ID].size() != 1 ||
+            adapter.published_tails[QUEUE_ID][0] != 16'h801f)
+            `uvm_fatal("CMDQ_ADAPTER_ARGS",
+                "semantic metadata, counters, or tail were not preserved")
+
+        adapter.clear_trace();
+        adapter.trigger_irq(QUEUE_ID);
+        adapter.wait_irq(GQ_TX, QUEUE_ID);
+        adapter.ack_irq(GQ_TX, QUEUE_ID);
+        adapter.disable_queue(GQ_TX, QUEUE_ID);
+        if (adapter.trace != expected_control_trace ||
+            adapter.wait_irq_count[QUEUE_ID] != 1 ||
+            adapter.ack_irq_count[QUEUE_ID] != 1 ||
+            adapter.disable_count[QUEUE_ID] != 1)
+            `uvm_fatal("CMDQ_ADAPTER_CONTROL",
+                "semantic IRQ/disable callbacks were not queue-indexed")
+
+        adapter.clear_trace();
+        catcher = cmdq_reg_error_catcher::type_id::create("reg_catcher");
+        uvm_report_cb::add(null, catcher);
+        adapter.configure_queue(GQ_RX, QUEUE_ID, RING_BASE,
+                                CMDQ_DEPTH, CMDQ_DESC_BYTES);
+        adapter.disable_queue(GQ_RX, QUEUE_ID);
+        adapter.publish(GQ_RX, QUEUE_ID, 32'h0000_0001);
+        adapter.wait_irq(GQ_RX, QUEUE_ID);
+        adapter.ack_irq(GQ_RX, QUEUE_ID);
+        adapter.publish(GQ_TX, QUEUE_ID, 32'h0001_0001);
+        uvm_report_cb::delete(null, catcher);
+        if (catcher.role_errors != 5 || catcher.pointer_errors != 1)
+            `uvm_fatal("CMDQ_ADAPTER_REJECT", $sformatf(
+                "got role/pointer errors %0d/%0d expected 5/1",
+                catcher.role_errors, catcher.pointer_errors))
+        if (adapter.trace.size() != 0 ||
+            adapter.reset_count[QUEUE_ID] != 1 ||
+            adapter.configure_count[QUEUE_ID] != 1 ||
+            adapter.enable_count[QUEUE_ID] != 1 ||
+            adapter.disable_count[QUEUE_ID] != 1 ||
+            adapter.publish_count[QUEUE_ID] != 1 ||
+            adapter.wait_irq_count[QUEUE_ID] != 1 ||
+            adapter.ack_irq_count[QUEUE_ID] != 1)
+            `uvm_fatal("CMDQ_ADAPTER_LEAK",
+                "rejected generic operation reached a semantic callback")
+    endtask
+
     function void build_phase(uvm_phase phase);
         host_mem_manager mem;
         cmdq_tx_desc desc;
@@ -352,6 +595,14 @@ class cmdq_desc_test extends uvm_test;
         check_completion(mem, desc, submitted);
         mem.leak_check(`__FILE__, `__LINE__);
     endfunction
+
+    task run_phase(uvm_phase phase);
+        phase.raise_objection(this);
+        check_pointer_and_queue_validation();
+        check_completion_strategy();
+        check_semantic_adapter();
+        phase.drop_objection(this);
+    endtask
 endclass
 
 `endif

@@ -14,4 +14,11 @@ typedef enum int { CMDQ_RESULT_OK, CMDQ_RESULT_SUBMIT_ERROR,
                    CMDQ_RESULT_TIMEOUT, CMDQ_RESULT_PARSE_ERROR }
                  cmdq_result_status_e;
 
+typedef struct packed {
+    bit [7:0]  host_id;
+    bit [15:0] function_id;
+    bit [15:0] msix_index;
+    bit        msix_valid;
+} cmdq_hw_cfg_t;
+
 `endif
