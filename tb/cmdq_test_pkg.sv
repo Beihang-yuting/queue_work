@@ -11,6 +11,7 @@ package cmdq_test_pkg;
     `include "host_mem_manager.sv"
     `include "mocks/cmdq_mock_adapter.sv"
     `include "tests/cmdq_desc_test.sv"
+    `include "tests/cmdq_sequence_test.sv"
 endpackage
 
 `endif

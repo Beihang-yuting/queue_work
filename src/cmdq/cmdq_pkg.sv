@@ -12,6 +12,7 @@ package cmdq_pkg;
     `include "cmdq_reg_adapter.sv"
     `include "cmdq_tx_desc.sv"
     `include "cmdq_completion.sv"
+    `include "cmdq_env.sv"
 endpackage
 
 `endif
