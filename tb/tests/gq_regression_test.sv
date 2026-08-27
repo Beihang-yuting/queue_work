@@ -410,6 +410,7 @@ class gq_regression_test extends uvm_test;
         irq_timeout_cfg.wait_mode          = GQ_IRQ;
         irq_timeout_cfg.poll_min_interval  = 10ns;
         irq_timeout_cfg.poll_max_interval  = 10ns;
+        irq_timeout_cfg.irq_watchdog_interval = 50ns;
         irq_timeout_cfg.completion_timeout = 50ns;
         irq_timeout_cfg.ptr_codec          = ptr_codec;
         irq_timeout_cfg.completion_source  =
@@ -898,6 +899,9 @@ class gq_regression_test extends uvm_test;
         // Separately cover the normal cleanup-cancellation path while a
         // completion wait is active. Cleanup must make the engine stale before
         // the poll interval can enter the drain path.
+        // Consume the earlier RX publish wake so the fork below enters the
+        // configured poll wait instead of returning through GQ_WAKE_NEW_WORK.
+        protocol_engine.wait_and_drain_once();
         cleanup_wait_returned = 0;
         fork : cleanup_wait_cancellation
             begin
@@ -906,6 +910,9 @@ class gq_regression_test extends uvm_test;
             end
         join_none
         #1ns;
+        if (cleanup_wait_returned)
+            `uvm_fatal("REG_DIAG_STALE",
+                       "completion wait returned before cleanup cancellation")
         protocol_engine.cleanup();
         for (int unsigned poll = 0; poll < 20; poll++) begin
             #1ns;

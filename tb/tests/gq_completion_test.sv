@@ -861,6 +861,9 @@ class gq_completion_test extends uvm_test;
         target_engine.submit_batch(request, response);
         if (response.status != GQ_OK)
             `uvm_fatal("WAIT_SUBMIT", "wait-mode setup submit failed")
+        // A direct caller consumes the publish wake exactly as one outer
+        // completion-worker iteration would before beginning the timed wait.
+        target_engine.wait_and_drain_once();
 
         target_dut.complete_slot(target_engine, 0, 32, 64);
         target_dut.complete_slot(target_engine, 2, 32, 64);

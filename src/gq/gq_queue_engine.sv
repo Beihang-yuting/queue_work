@@ -37,6 +37,7 @@ class gq_queue_engine extends uvm_component;
     protected longint unsigned reset_epoch_value;
     protected uvm_event ready_event;
     protected uvm_event worker_state_event;
+    protected uvm_event new_work_event;
     protected uvm_event active_completion_wait_cancel;
     protected uvm_event active_completion_wait_done;
     protected uvm_event active_completion_ack_done;
@@ -81,6 +82,7 @@ class gq_queue_engine extends uvm_component;
         reset_epoch_value     = 0;
         ready_event       = new({name, "_ready"});
         worker_state_event = new({name, "_worker_state"});
+        new_work_event    = new({name, "_new_work"});
         active_completion_wait_cancel = null;
         active_completion_wait_done = null;
         active_completion_ack_done = null;
@@ -437,6 +439,15 @@ class gq_queue_engine extends uvm_component;
     endfunction
 
     task drain_completed();
+        bit query_valid;
+        int unsigned retired_count;
+
+        drain_completed_once(query_valid, retired_count);
+    endtask
+
+    protected task drain_completed_once(
+        output bit query_valid,
+        output int unsigned retired_count);
         gq_desc_base pending[$];
         gq_desc_base desc;
         gq_logical_seq_t query_head;
@@ -444,14 +455,14 @@ class gq_queue_engine extends uvm_component;
         gq_addr_t query_ring_base;
         gq_addr_t query_status_addr;
         int unsigned count;
-        int unsigned retired_count;
-        bit query_valid;
         bit protocol_violation;
         bit timeout_violation;
         bit stale_completion;
         longint unsigned query_epoch;
         string diagnostic_state;
 
+        query_valid = 0;
+        retired_count = 0;
         completion_serialization.get(1);
         state_lock.get(1);
         if (!ready_value) begin
@@ -492,6 +503,7 @@ class gq_queue_engine extends uvm_component;
         diagnostic_state = "";
         timeout_violation = !stale_completion && query_valid &&
                             !protocol_violation &&
+                            cfg.completion_timeout != 0 &&
                             count == 0 && current_outstanding != 0 &&
                             outstanding_since.exists(logical_head_seq) &&
                             outstanding_published.exists(logical_head_seq) &&
@@ -509,6 +521,7 @@ class gq_queue_engine extends uvm_component;
         end
         state_lock.put(1);
         if (stale_completion) begin
+            query_valid = 0;
             completion_commit_boundary.put(1);
             completion_serialization.put(1);
             return;
@@ -521,6 +534,7 @@ class gq_queue_engine extends uvm_component;
             return;
         end
         if (protocol_violation) begin
+            query_valid = 0;
             `uvm_error("GQ_COMPLETION_PROTOCOL", $sformatf(
                 "completion count %0d exceeds pending=%0d/outstanding=%0d or query head changed; %s",
                 count, pending.size(), current_outstanding,
@@ -534,7 +548,6 @@ class gq_queue_engine extends uvm_component;
                 "oldest outstanding completion exceeded timeout=%0t; %s",
                 cfg.completion_timeout, diagnostic_state))
 
-        retired_count = 0;
         for (int unsigned i = 0; i < count; i++) begin
             desc = pending[i];
             if (!desc.parse_completion()) begin
@@ -576,13 +589,13 @@ class gq_queue_engine extends uvm_component;
 
     task wait_and_drain_once();
         bit ready_snapshot;
-        bit completion_wakeup;
         bit wait_registered;
         bit ack_required;
+        bit query_valid;
+        int unsigned retired_count;
         longint unsigned wait_epoch;
         gq_wakeup_e wakeup;
         uvm_event wait_cancel;
-        uvm_event new_work;
         uvm_event wait_done;
         uvm_event ack_done;
         uvm_event conflicting_done;
@@ -590,8 +603,6 @@ class gq_queue_engine extends uvm_component;
         if (wait_policy == null)
             `uvm_fatal("GQ_WAIT_POLICY", "completion wait policy is not initialized")
         wait_cancel = new({get_name(), "_active_wait_cancel"});
-        // Task 5 replaces this inert event with engine new-work scheduling.
-        new_work = new({get_name(), "_inert_new_work"});
         wait_done = new({get_name(), "_active_wait_done"});
         ack_done = new({get_name(), "_active_ack_done"});
         wait_registered = 0;
@@ -621,27 +632,30 @@ class gq_queue_engine extends uvm_component;
             conflicting_done.wait_on();
             return;
         end
-        completion_wakeup = 0;
         wakeup = GQ_WAKE_CANCELLED;
-        // Run the race from an isolated child process so disable fork cannot
-        // terminate waits belonging to another engine invocation.
-        fork
-            begin
-                fork
-                    begin
-                        wait_policy.wait_for_wakeup(cfg, adapter,
-                                                    wait_cancel, new_work,
-                                                    wakeup);
-                        completion_wakeup = wakeup == GQ_WAKE_POLL ||
-                                            wakeup == GQ_WAKE_IRQ;
-                    end
-                    begin
-                        wait_cancel.wait_on();
-                    end
-                join_any
-                disable fork;
-            end
-        join
+        if (new_work_event.is_on()) begin
+            // Consume work published before this waiter armed without first
+            // entering an adapter wait that is immediately discarded.
+            wakeup = GQ_WAKE_NEW_WORK;
+        end else begin
+            // Run the race from an isolated child process so disable fork
+            // cannot terminate waits belonging to another engine invocation.
+            fork
+                begin
+                    fork
+                        begin
+                            wait_policy.wait_for_wakeup(
+                                cfg, adapter, wait_cancel, new_work_event,
+                                wakeup);
+                        end
+                        begin
+                            wait_cancel.wait_on();
+                        end
+                    join_any
+                    disable fork;
+                end
+            join
+        end
         completion_commit_boundary.get(1);
         state_lock.get(1);
         if (active_completion_wait_cancel == wait_cancel &&
@@ -652,24 +666,28 @@ class gq_queue_engine extends uvm_component;
         ready_snapshot = ready_value && !reset_requested_value &&
                          !shutdown_requested &&
                          reset_epoch_value == wait_epoch;
-        ack_required = ready_snapshot && completion_wakeup &&
-                       cfg.wait_mode == GQ_IRQ;
+        ack_required = ready_snapshot && wakeup == GQ_WAKE_IRQ;
         if (ack_required)
             active_completion_ack_done = ack_done;
         state_lock.put(1);
         completion_commit_boundary.put(1);
         wait_done.trigger();
+        if (wakeup == GQ_WAKE_NEW_WORK)
+            new_work_event.reset();
         if (!ready_snapshot)
             return;
-        if (!completion_wakeup) begin
-            // An IRQ watchdog expiry still checks ordered completion state so
-            // the shared oldest-outstanding timeout diagnostic is not starved
-            // by a missing interrupt. Reset/cleanup cancellation is excluded
-            // by the epoch/readiness check above and never reaches this drain.
-            if (cfg.wait_mode == GQ_IRQ)
-                drain_completed();
+        if (wakeup == GQ_WAKE_CANCELLED)
+            return;
+        if (wakeup == GQ_WAKE_NEW_WORK) begin
+            // The worker loop immediately begins another wait at the restored
+            // minimum interval. New work never bypasses that interval with an
+            // immediate completion query.
+            wait_policy.note_progress();
             return;
         end
+        if (wakeup != GQ_WAKE_IRQ && wakeup != GQ_WAKE_WATCHDOG &&
+            wakeup != GQ_WAKE_POLL)
+            return;
 
         if (ack_required) begin
             // ACK ownership was committed under the reset boundary, but the
@@ -688,7 +706,11 @@ class gq_queue_engine extends uvm_component;
             if (!ready_snapshot)
                 return;
         end
-        drain_completed();
+        drain_completed_once(query_valid, retired_count);
+        if (retired_count != 0)
+            wait_policy.note_progress();
+        else if (query_valid)
+            wait_policy.note_idle();
     endtask
 
     // Lifecycle control captures these persistent handles with the state
@@ -720,21 +742,34 @@ class gq_queue_engine extends uvm_component;
     protected task wait_for_worker_ready(output bit worker_active);
         bit ready_snapshot;
         bit shutdown_snapshot;
+        bit published_snapshot;
 
         worker_active = 0;
         forever begin
             state_lock.get(1);
             ready_snapshot    = ready_value;
             shutdown_snapshot = shutdown_requested;
+            published_snapshot = cfg.role != GQ_TX ||
+                (logical_tail_seq != logical_head_seq &&
+                 outstanding_published.exists(logical_head_seq) &&
+                 outstanding_published[logical_head_seq]);
             state_lock.put(1);
             if (shutdown_snapshot)
                 return;
-            if (ready_snapshot) begin
+            if (ready_snapshot && published_snapshot) begin
                 worker_active = 1;
                 return;
             end
-            worker_state_event.wait_on();
-            worker_state_event.reset();
+            if (ready_snapshot) begin
+                // A TX queue without hardware-visible work has nothing to
+                // query or acknowledge. The persistent event closes the
+                // publish-versus-wait race without a zero-time retry loop.
+                new_work_event.wait_on();
+                new_work_event.reset();
+            end else begin
+                worker_state_event.wait_on();
+                worker_state_event.reset();
+            end
         end
     endtask
 
@@ -872,9 +907,11 @@ class gq_queue_engine extends uvm_component;
         gq_logical_seq_t seq;
         bit operation_current;
         bit lifecycle_current;
+        bit published_work;
 
         if (publish_op == null)
             return;
+        published_work = 0;
 
         state_lock.get(1);
         operation_current = publish_in_progress &&
@@ -925,6 +962,7 @@ class gq_queue_engine extends uvm_component;
             response.committed_count = int'(publish_op.new_tail -
                                              publish_op.old_tail);
             response.reset_epoch     = publish_op.request_epoch;
+            published_work = 1;
         end else
             abort_response_by_reset(response);
         if (operation_current) begin
@@ -933,6 +971,8 @@ class gq_queue_engine extends uvm_component;
                 active_publish_done = null;
         end
         state_lock.put(1);
+        if (published_work)
+            new_work_event.trigger();
         publish_op.done.trigger();
     endtask
 
@@ -1310,6 +1350,7 @@ class gq_queue_engine extends uvm_component;
         worker_state_event.trigger();
         if (wait_cancel != null)
             wait_cancel.trigger();
+        new_work_event.trigger();
     endtask
 
     task finish_reset();
@@ -1529,6 +1570,9 @@ class gq_queue_engine extends uvm_component;
 
         space_available.trigger();
         worker_state_event.trigger();
+        if (wait_cancel != null)
+            wait_cancel.trigger();
+        new_work_event.trigger();
         quiesce_completion_activity(wait_cancel, wait_done, ack_done);
         if (reset_teardown_done != null)
             reset_teardown_done.wait_on();
