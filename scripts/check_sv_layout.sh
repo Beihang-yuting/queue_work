@@ -25,6 +25,18 @@ for required_file in \
     src/gq/gq_desc_writeback_completion.sv \
     src/gq/gq_index_phase_ptr_codec.sv \
     src/mailbox/mailbox_pkg.sv \
+    src/msgq/msgq_pkg.sv \
+    src/msgq/msgq_types.sv \
+    src/msgq/msgq_entry_base.sv \
+    src/msgq/msgq_raw_entry.sv \
+    src/msgq/msgq_mac_age_entry.sv \
+    src/msgq/msgq_1588_entry.sv \
+    src/msgq/msgq_completion.sv \
+    src/msgq/msgq_ptr_codec.sv \
+    src/msgq/msgq_refill_profile.sv \
+    src/msgq/msgq_reg_adapter.sv \
+    src/msgq/msgq_env.sv \
+    src/msgq/msgq_sequences.sv \
     tb/gq_test_pkg.sv; do
     if [[ ! -f "$required_file" ]]; then
         printf 'required package file not found: %s\n' "$required_file" >&2

@@ -421,6 +421,55 @@ join the same idempotent finalization.
 phase.drop_objection(this);
 ```
 
+## Configure MSGQ receive queues
+
+The independent `msgq` business library supplies these standard RX profiles:
+
+| Profile | Depth | Entry size |
+| --- | ---: | ---: |
+| MAC-age | 128 | 16 bytes |
+| 1588 active EMP | 32 | 8 bytes |
+| 1588 Linux header | 128 | 8 bytes |
+
+`msgq_env_cfg::add_msgq()` installs IRQ detection, adaptive polling with a
+50 ns minimum, 500 ns maximum, and backoff factor 2, a 1 us lost-IRQ
+watchdog, and `completion_timeout=0`. The disabled completion timeout allows
+an RX event queue to remain empty indefinitely. Each profile uses
+`GQ_RX_AUTO_RECYCLE` with an outstanding window of `depth-1` entries.
+
+MSGQ progress comes from the hardware current index rather than descriptor
+ownership bits. For logical head `logical_head`, the completion source uses:
+
+```text
+completed_count = (current_ptr - (logical_head % depth) + depth) % depth
+```
+
+The `depth-1` outstanding window makes zero progress distinct from every
+permitted completion count. Initialization clears the fixed ring slots and
+publishes the initial tail `depth-1` once through
+`write_msgq_initial_tail()`. Normal auto-recycle completion advances the
+logical head and tail, creates fresh logical entry objects for the rotating
+slots, and neither rewrites ring bytes nor publishes another tail.
+
+`msgq_reg_adapter` keeps addresses and access mechanisms in a user-derived
+adapter. Its semantic callbacks are:
+
+```systemverilog
+configure_msgq_registers(queue_id, base, depth, entry_size);
+disable_msgq_registers(queue_id);
+write_msgq_initial_tail(queue_id, tail);
+wait_msgq_irq(queue_id);
+ack_msgq_irq(queue_id);
+read_msgq_current_ptr(queue_id, valid, current_ptr);
+```
+
+MAC-age and the two 1588 profiles have concrete parsers. FSE, IACL, EACL,
+vDPA, and notify are explicitly outside that field-level conformance claim:
+they expose only configured fixed-size raw bytes and the
+`msgq_entry_factory::create_entry()` seam. Their depth and entry size are
+user-supplied, and the library assigns no protocol field semantics to those
+bytes.
+
 ## Run with VCS
 
 On a machine where VCS and the UVM license environment are already loaded:
