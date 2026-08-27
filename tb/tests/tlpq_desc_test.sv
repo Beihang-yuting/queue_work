@@ -20,11 +20,117 @@ class tlpq_alloc_error_catcher extends uvm_report_catcher;
     endfunction
 endclass
 
+class tlpq_desc_engine_adapter extends gq_hw_adapter;
+    `uvm_object_utils(tlpq_desc_engine_adapter)
+
+    bit configured;
+    bit disabled;
+    gq_role_e configured_role;
+    int unsigned configured_queue_id;
+    int unsigned configured_depth;
+    int unsigned configured_desc_size;
+    int unsigned publish_count;
+
+    function new(string name = "tlpq_desc_engine_adapter");
+        super.new(name);
+        configured = 0;
+        disabled = 0;
+        configured_role = GQ_TX;
+        configured_queue_id = 0;
+        configured_depth = 0;
+        configured_desc_size = 0;
+        publish_count = 0;
+    endfunction
+
+    virtual task configure_queue(
+        gq_role_e role, int unsigned queue_id, gq_addr_t base,
+        int unsigned depth, int unsigned desc_size);
+        configured = 1;
+        configured_role = role;
+        configured_queue_id = queue_id;
+        configured_depth = depth;
+        configured_desc_size = desc_size;
+    endtask
+
+    virtual task disable_queue(gq_role_e role, int unsigned queue_id);
+        disabled = 1;
+    endtask
+
+    virtual task publish(
+        gq_role_e role, int unsigned queue_id, gq_raw_ptr_t raw_tail);
+        publish_count++;
+    endtask
+
+    virtual task wait_irq(gq_role_e role, int unsigned queue_id);
+    endtask
+
+    virtual task ack_irq(gq_role_e role, int unsigned queue_id);
+    endtask
+endclass
+
+class tlpq_desc_test_engine extends gq_queue_engine;
+    `uvm_component_utils(tlpq_desc_test_engine)
+
+    function new(string name = "tlpq_desc_test_engine",
+                 uvm_component parent = null);
+        super.new(name, parent);
+    endfunction
+
+    function gq_rx_slot_mode_e actual_rx_slot_mode();
+        return cfg.rx_slot_mode;
+    endfunction
+endclass
+
 class tlpq_desc_test extends uvm_test;
     `uvm_component_utils(tlpq_desc_test)
 
+    host_mem_manager engine_mem;
+    gq_queue_cfg engine_cfg;
+    tlpq_desc_engine_adapter engine_adapter;
+    tlpq_desc_test_engine refill_engine;
+
     function new(string name = "tlpq_desc_test", uvm_component parent = null);
         super.new(name, parent);
+    endfunction
+
+    function void build_phase(uvm_phase phase);
+        tlpq_ptr_codec ptr_codec;
+        tlpq_completion completion_source;
+
+        super.build_phase(phase);
+        engine_mem = new("engine_mem");
+        engine_mem.init_region(64'h0000_0000_5000_0000,
+                               64'h0000_0000_5000_ffff,
+                               MODE_LINEAR, 16);
+        engine_adapter = tlpq_desc_engine_adapter::type_id::create(
+            "engine_adapter");
+        ptr_codec = tlpq_ptr_codec::type_id::create("engine_ptr_codec");
+        completion_source = tlpq_completion::type_id::create(
+            "engine_completion");
+        engine_cfg = gq_queue_cfg::type_id::create("engine_cfg");
+        engine_cfg.queue_id = 9;
+        engine_cfg.role = GQ_RX;
+        engine_cfg.depth = TLPQ_DEPTH;
+        engine_cfg.desc_size = TLPQ_DESC_BYTES;
+        engine_cfg.alignment = 16;
+        engine_cfg.status_area_size = 0;
+        engine_cfg.wait_mode = GQ_POLL;
+        engine_cfg.poll_policy = GQ_POLL_FIXED;
+        engine_cfg.poll_min_interval = 10ns;
+        engine_cfg.poll_max_interval = 10ns;
+        engine_cfg.completion_timeout = 0;
+        engine_cfg.rx_slot_mode = GQ_RX_EXPLICIT_REFILL;
+        engine_cfg.ptr_codec = ptr_codec;
+        engine_cfg.completion_source = completion_source;
+
+        uvm_config_db#(gq_queue_cfg)::set(
+            this, "refill_engine", "cfg", engine_cfg);
+        uvm_config_db#(host_mem_api)::set(
+            this, "refill_engine", "mem", engine_mem);
+        uvm_config_db#(gq_hw_adapter)::set(
+            this, "refill_engine", "adapter", engine_adapter);
+        refill_engine = tlpq_desc_test_engine::type_id::create(
+            "refill_engine", this);
     endfunction
 
     function void expect_byte(string field_name, byte actual, byte expected);
@@ -481,8 +587,6 @@ class tlpq_desc_test extends uvm_test;
         gq_desc_base second_base;
         tlpq_rx_desc first;
         tlpq_rx_desc second;
-        host_mem_manager mem;
-        gq_queue_cfg queue_cfg;
         string reason;
 
         profile_object = uvm_factory::get().create_object_by_name(
@@ -510,27 +614,67 @@ class tlpq_desc_test extends uvm_test;
             `uvm_fatal("TLPQ_REFILL_PREP",
                 "profile allocated buffers before normal GQ preparation")
 
-        mem = new("refill_mem");
-        mem.init_region(64'h0000_0000_5000_0000,
-                        64'h0000_0000_5000_ffff, MODE_LINEAR, 16);
-        first.attach_mem(mem);
-        second.attach_mem(mem);
-        if (!first.prepare() || !second.prepare() ||
+        first.release_owned();
+        second.release_owned();
+    endfunction
+
+    // Mutations caught: bypassing engine preparation, failing the ownership
+    // transfer into outstanding[], reusing a prepared buffer, or installing
+    // the profile on an auto-recycle engine configuration.
+    task check_engine_refill_ownership();
+        tlpq_refill_profile profile;
+        gq_request request;
+        gq_response response;
+        tlpq_rx_desc first;
+        tlpq_rx_desc second;
+
+        if (refill_engine == null || engine_cfg == null ||
+            engine_mem == null || engine_adapter == null)
+            `uvm_fatal("TLPQ_ENGINE_WIRING",
+                "real GQ engine preparation harness is not wired")
+
+        refill_engine.initialize();
+        profile = tlpq_refill_profile::type_id::create("engine_profile");
+        profile.initial_post_count = 2;
+        request = gq_request::type_id::create("engine_start_request");
+        request.kind = GQ_START_RX;
+        request.set_refill_profile(profile);
+        refill_engine.start_rx(request, response);
+
+        if (response == null || response.status != GQ_OK ||
+            response.committed_count != 2 ||
+            refill_engine.outstanding_count() != 2 ||
+            refill_engine.tail_seq() != 2)
+            `uvm_fatal("TLPQ_ENGINE_START",
+                "GQ engine did not accept and own two profile descriptors")
+        if (!$cast(first, refill_engine.get_outstanding(0)) ||
+            !$cast(second, refill_engine.get_outstanding(1)) ||
+            first == null || second == null || first == second)
+            `uvm_fatal("TLPQ_ENGINE_DESC",
+                "engine outstanding table lacks two fresh TLPQ descriptors")
+        if (first.mem != engine_mem || second.mem != engine_mem ||
             first.owned_allocation_count() != 1 ||
             second.owned_allocation_count() != 1 ||
             first.buf_addr == second.buf_addr)
-            `uvm_fatal("TLPQ_REFILL_OWNER",
-                "prepared refill descriptors do not own distinct buffers")
+            `uvm_fatal("TLPQ_ENGINE_OWNER",
+                "engine-prepared descriptors do not own distinct buffers")
+        if (refill_engine.actual_rx_slot_mode() !=
+                GQ_RX_EXPLICIT_REFILL ||
+            !engine_adapter.configured ||
+            engine_adapter.configured_role != GQ_RX ||
+            engine_adapter.configured_queue_id != 9 ||
+            engine_adapter.configured_depth != TLPQ_DEPTH ||
+            engine_adapter.configured_desc_size != TLPQ_DESC_BYTES ||
+            engine_adapter.publish_count != 1)
+            `uvm_fatal("TLPQ_ENGINE_CFG",
+                "actual engine configuration is not explicit-refill TLPQ RX")
 
-        queue_cfg = gq_queue_cfg::type_id::create("queue_cfg");
-        if (queue_cfg.rx_slot_mode != GQ_RX_EXPLICIT_REFILL)
-            `uvm_fatal("TLPQ_REFILL_MODE",
-                "TLPQ refill requires explicit-refill queue ownership")
-
-        first.release_owned();
-        second.release_owned();
-        mem.leak_check(`__FILE__, `__LINE__);
-    endfunction
+        refill_engine.cleanup();
+        if (!engine_adapter.disabled)
+            `uvm_fatal("TLPQ_ENGINE_CLEANUP",
+                "engine cleanup did not disable the configured queue")
+        engine_mem.leak_check(`__FILE__, `__LINE__);
+    endtask
 
     task check_generic_completion();
         host_mem_manager mem;
@@ -636,6 +780,7 @@ class tlpq_desc_test extends uvm_test;
         check_layout_ownership_and_stability();
         check_prepare_failures_are_one_shot();
         check_refill_profile();
+        check_engine_refill_ownership();
         check_descriptor_completion_parsing();
         check_pointer_vectors();
         check_generic_completion();
