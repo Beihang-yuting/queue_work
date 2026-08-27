@@ -573,7 +573,7 @@ class gq_queue_engine extends uvm_component;
         completion_commit_boundary.put(1);
         completion_serialization.put(1);
         if (retired_count != 0)
-            refill_after_progress();
+            refill_after_progress(retired_count);
     endtask
 
     // Protected synchronization seam for completion sources that need to
@@ -867,6 +867,20 @@ class gq_queue_engine extends uvm_component;
             descs[i].attach_mem(mem);
             if (!descs[i].prepare()) begin
                 release_attempted(descs, attempted_count);
+                if (activate_rx && cfg.role == GQ_RX &&
+                    cfg.rx_slot_mode == GQ_RX_AUTO_RECYCLE)
+                    `uvm_error("GQ_RX_AUTO_RECYCLE_ALLOC", $sformatf(
+                        "queue_id=%0d could not prepare auto-recycle descriptor at logical sequence %0d",
+                        cfg.queue_id, seq))
+                return;
+            end
+            if (activate_rx && cfg.role == GQ_RX &&
+                cfg.rx_slot_mode == GQ_RX_AUTO_RECYCLE &&
+                descs[i].owned_allocation_count() != 0) begin
+                release_attempted(descs, attempted_count);
+                `uvm_error("GQ_RX_AUTO_RECYCLE_ALLOC", $sformatf(
+                    "queue_id=%0d auto-recycle descriptor at logical sequence %0d owns a separate allocation",
+                    cfg.queue_id, seq))
                 return;
             end
             descs[i].mark_available(gq_phase(seq, cfg.depth));
@@ -1106,12 +1120,26 @@ class gq_queue_engine extends uvm_component;
             user_request_ordering.put(1);
             return;
         end
+        if (cfg.rx_slot_mode == GQ_RX_AUTO_RECYCLE &&
+            cloned_profile.initial_post_count != cfg.depth - 1) begin
+            `uvm_error("GQ_RX_AUTO_RECYCLE_ALLOC", $sformatf(
+                "queue_id=%0d auto-recycle initial post count %0d must equal depth minus one (%0d)",
+                cfg.queue_id, cloned_profile.initial_post_count,
+                cfg.depth - 1))
+            submit_serialization.put(1);
+            user_request_ordering.put(1);
+            return;
+        end
 
         for (int unsigned i = 0;
              i < cloned_profile.initial_post_count; i++) begin
             desc = cloned_profile.create_desc(cfg.queue_id, first_seq + i);
             if (desc == null) begin
                 release_generated(generated_descs);
+                if (cfg.rx_slot_mode == GQ_RX_AUTO_RECYCLE)
+                    `uvm_error("GQ_RX_AUTO_RECYCLE_ALLOC", $sformatf(
+                        "queue_id=%0d could not create auto-recycle descriptor at logical sequence %0d",
+                        cfg.queue_id, first_seq + i))
                 submit_serialization.put(1);
                 user_request_ordering.put(1);
                 return;
@@ -1153,10 +1181,104 @@ class gq_queue_engine extends uvm_component;
             release_generated(generated_descs);
     endtask
 
+    // Auto-recycle preserves the hardware ring and published tail. Each fresh
+    // logical descriptor is prepared without the state lock, then installed as
+    // hardware-visible only after lifecycle and tail revalidation.
+    protected task recycle_after_progress(input int unsigned retired_count);
+        gq_refill_profile active_profile;
+        gq_desc_base desc;
+        gq_logical_seq_t install_seq;
+        longint unsigned recycle_epoch;
+        bit recycle_active;
+        bit duplicate_desc;
+
+        if (retired_count == 0)
+            return;
+
+        submit_serialization.get(1);
+        state_lock.get(1);
+        active_profile = refill_profile;
+        recycle_epoch = reset_epoch_value;
+        recycle_active = cfg.role == GQ_RX &&
+                         cfg.rx_slot_mode == GQ_RX_AUTO_RECYCLE &&
+                         ready_value && rx_started &&
+                         active_profile != null &&
+                         !reset_requested_value && !shutdown_requested;
+        state_lock.put(1);
+
+        for (int unsigned i = 0;
+             recycle_active && i < retired_count; i++) begin
+            state_lock.get(1);
+            recycle_active = cfg.role == GQ_RX &&
+                             cfg.rx_slot_mode == GQ_RX_AUTO_RECYCLE &&
+                             ready_value && rx_started &&
+                             refill_profile == active_profile &&
+                             reset_epoch_value == recycle_epoch &&
+                             !reset_requested_value && !shutdown_requested;
+            install_seq = logical_tail_seq;
+            state_lock.put(1);
+            if (!recycle_active)
+                break;
+
+            desc = active_profile.create_desc(cfg.queue_id, install_seq);
+            if (desc == null) begin
+                `uvm_error("GQ_RX_AUTO_RECYCLE_ALLOC", $sformatf(
+                    "queue_id=%0d could not create auto-recycle descriptor at logical sequence %0d",
+                    cfg.queue_id, install_seq))
+                break;
+            end
+            desc.attach_mem(mem);
+            if (!desc.prepare()) begin
+                desc.release_owned();
+                `uvm_error("GQ_RX_AUTO_RECYCLE_ALLOC", $sformatf(
+                    "queue_id=%0d could not prepare auto-recycle descriptor at logical sequence %0d",
+                    cfg.queue_id, install_seq))
+                break;
+            end
+            if (desc.owned_allocation_count() != 0) begin
+                desc.release_owned();
+                `uvm_error("GQ_RX_AUTO_RECYCLE_ALLOC", $sformatf(
+                    "queue_id=%0d auto-recycle descriptor at logical sequence %0d owns a separate allocation",
+                    cfg.queue_id, install_seq))
+                break;
+            end
+            desc.mark_available(gq_phase(install_seq, cfg.depth));
+
+            state_lock.get(1);
+            recycle_active = ready_value && rx_started &&
+                             refill_profile == active_profile &&
+                             reset_epoch_value == recycle_epoch &&
+                             !reset_requested_value && !shutdown_requested &&
+                             logical_tail_seq == install_seq;
+            duplicate_desc = recycle_active &&
+                             outstanding_ids.exists(desc.get_inst_id());
+            if (recycle_active && !duplicate_desc) begin
+                install_outstanding(install_seq, desc);
+                outstanding_published[install_seq] = 1;
+                logical_tail_seq++;
+                check_state_invariants("auto-recycle commit");
+            end
+            state_lock.put(1);
+
+            if (!recycle_active) begin
+                desc.release_owned();
+                break;
+            end
+            if (duplicate_desc) begin
+                desc.release_owned();
+                `uvm_error("GQ_RX_AUTO_RECYCLE_ALLOC", $sformatf(
+                    "queue_id=%0d returned a duplicate auto-recycle descriptor at logical sequence %0d",
+                    cfg.queue_id, install_seq))
+                break;
+            end
+        end
+        submit_serialization.put(1);
+    endtask
+
     // Called only after at least one descriptor was actually retired. It
     // deliberately acquires neither completion_serialization nor state_lock
     // across descriptor creation, preparation, or publication.
-    protected task refill_after_progress();
+    protected task refill_after_progress(input int unsigned retired_count);
         gq_refill_profile active_profile;
         gq_desc_base generated_descs[$];
         gq_desc_base desc;
@@ -1169,9 +1291,15 @@ class gq_queue_engine extends uvm_component;
         bit capacity_wait_required;
         bit publish_wait_required;
         bit refill_active;
+        bit refill_triggered;
         bit should_refill;
         bit ownership_transferred;
         longint unsigned refill_epoch;
+
+        if (cfg.rx_slot_mode == GQ_RX_AUTO_RECYCLE) begin
+            recycle_after_progress(retired_count);
+            return;
+        end
 
         state_lock.get(1);
         refill_active = cfg.role == GQ_RX && ready_value && rx_started &&
@@ -1181,6 +1309,7 @@ class gq_queue_engine extends uvm_component;
         state_lock.put(1);
         if (!refill_active)
             return;
+        refill_triggered = 0;
 
         forever begin
             generated_descs.delete();
@@ -1200,10 +1329,20 @@ class gq_queue_engine extends uvm_component;
             if (should_refill && wait_publish_done == null) begin
                 posted        = logical_tail_seq - logical_head_seq;
                 first_seq     = logical_tail_seq;
-                should_refill = posted <= active_profile.low_watermark;
-                if (should_refill)
+                if (refill_triggered)
+                    should_refill = posted < active_profile.high_watermark;
+                else
+                    should_refill = posted <= active_profile.low_watermark;
+                if (should_refill &&
+                    posted < active_profile.high_watermark) begin
+                    refill_triggered = 1;
                     refill_count = int'(
                         active_profile.high_watermark - posted);
+                    if (active_profile.max_refill_batch != 0 &&
+                        refill_count > active_profile.max_refill_batch)
+                        refill_count = active_profile.max_refill_batch;
+                end else
+                    should_refill = 0;
             end
             state_lock.put(1);
 
@@ -1265,7 +1404,8 @@ class gq_queue_engine extends uvm_component;
                         "role=RX queue_id=%0d failed to publish %0d refill descriptors after DUT progress",
                         cfg.queue_id, refill_count))
             end
-            return;
+            if (response.status != GQ_OK)
+                return;
         end
     endtask
 

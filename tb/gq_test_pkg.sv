@@ -26,6 +26,8 @@ package gq_test_pkg;
     `include "tests/gq_completion_test.sv"
     `include "tests/gq_async_completion_test.sv"
     `include "tests/gq_refill_test.sv"
+    `include "tests/gq_auto_recycle_test.sv"
+    `include "tests/gq_refill_batch_test.sv"
     `include "tests/gq_reset_test.sv"
     `include "tests/gq_regression_test.sv"
 
