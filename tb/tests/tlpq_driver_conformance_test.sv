@@ -257,6 +257,8 @@ class tlpq_driver_conformance_test extends uvm_test;
     tlpq_driver_collector driver_collectors[int unsigned];
     bit driver_worker_started[int unsigned];
     bit driver_worker_returned[int unsigned];
+    bit retired_descriptor_ids[int];
+    int unsigned retired_generation_by_addr[gq_addr_t];
     tlpq_mock_dut dut;
     tlpq_driver_report_catcher driver_report_catcher;
 
@@ -1035,29 +1037,134 @@ class tlpq_driver_conformance_test extends uvm_test;
         buffer_addresses.push_back(desc.buf_addr);
     endfunction
 
+    function void record_retired_allocation(
+        tlpq_rx_desc retired_desc,
+        gq_addr_t retired_addr,
+        int unsigned retired_generation,
+        string label);
+        int descriptor_id;
+
+        if (retired_desc == null || retired_desc.buf_addr != retired_addr ||
+            retired_generation == 0)
+            `uvm_fatal("TLPQ_DRIVER_RETIRED_TRACKING", {label,
+                       " did not identify one live retired allocation"})
+        descriptor_id = retired_desc.get_inst_id();
+        if (retired_descriptor_ids.exists(descriptor_id))
+            `uvm_fatal("TLPQ_DRIVER_RETIRED_TRACKING", {label,
+                       " attempted to retire one descriptor object twice"})
+        if (retired_generation_by_addr.exists(retired_addr) &&
+            retired_generation <=
+                retired_generation_by_addr[retired_addr])
+            `uvm_fatal("TLPQ_DRIVER_RETIRED_TRACKING", {label,
+                       " reused a retired address without a new allocation"})
+        retired_descriptor_ids[descriptor_id] = 1;
+        retired_generation_by_addr[retired_addr] = retired_generation;
+    endfunction
+
     function void check_refill_replacement(
         int unsigned engine_id,
         gq_logical_seq_t replacement_seq,
         tlpq_rx_desc retired_desc,
         gq_addr_t retired_addr,
-        int unsigned retired_generation,
         int unsigned retired_free_before,
+        gq_addr_t expected_ring_base,
+        int unsigned expected_slot_index,
         string label);
         tlpq_rx_desc replacement;
+        tlpq_rx_desc live_desc;
+        byte raw[];
+        gq_addr_t ring_buffer_addr;
+        gq_addr_t expected_slot_addr;
+        int unsigned replacement_generation;
+        int unsigned ring_live_matches;
+        int unsigned actual_slot_index;
 
         if (!$cast(replacement,
                    driver_engines[engine_id].get_outstanding(
                        replacement_seq)) ||
             replacement == null || replacement == retired_desc ||
+            retired_descriptor_ids.exists(replacement.get_inst_id()) ||
             replacement.owned_allocation_count() != 1 ||
             replacement.buf_len != 128 ||
+            replacement.flags != TLPQ_DESC_AVAIL ||
+            replacement.metadata != '0 ||
             mem.allocation_size(replacement.buf_addr) != 128 ||
-            mem.free_count(retired_addr) != retired_free_before + 1 ||
-            (replacement.buf_addr == retired_addr &&
-             mem.allocation_generation(replacement.buf_addr) <=
-                retired_generation))
+            replacement.buf_addr == 0 || replacement.buf_addr == '1 ||
+            mem.free_count(retired_addr) != retired_free_before + 1)
             `uvm_fatal("TLPQ_DRIVER_REPLACEMENT", {label,
                        " was not a fresh 128-byte ownership with one retire"})
+
+        replacement_generation =
+            mem.allocation_generation(replacement.buf_addr);
+        if (replacement_generation == 0 ||
+            (retired_generation_by_addr.exists(replacement.buf_addr) &&
+             replacement_generation <=
+                retired_generation_by_addr[replacement.buf_addr]))
+            `uvm_fatal("TLPQ_DRIVER_REPLACEMENT_GENERATION", {label,
+                       " reused any retired address without generation advance"})
+
+        actual_slot_index = int'(replacement_seq % TLPQ_DEPTH);
+        expected_slot_addr = expected_ring_base +
+            (expected_slot_index * TLPQ_DESC_BYTES);
+        if (driver_engines[engine_id].ring_base() != expected_ring_base ||
+            actual_slot_index != expected_slot_index ||
+            expected_slot_addr != driver_engines[engine_id].ring_base() +
+                (actual_slot_index * TLPQ_DESC_BYTES))
+            `uvm_fatal("TLPQ_DRIVER_REPLACEMENT_SLOT", $sformatf(
+                "%s logical sequence %0d did not map to ring 0x%016h slot %0d",
+                label, replacement_seq, expected_ring_base,
+                expected_slot_index))
+
+        // Read the actual DUT-visible ring slot. Expected bytes are derived
+        // literally here and never use the descriptor pack/serialize path.
+        dut.read_slot(driver_engines[engine_id], replacement_seq, raw);
+        ring_buffer_addr = 0;
+        if (raw.size() == TLPQ_DESC_BYTES) begin
+            for (int unsigned i = 0; i < 8; i++)
+                ring_buffer_addr[(i * 8) +: 8] = raw[4 + i];
+        end
+        if (raw.size() != 16 ||
+            raw[0] !== 8'h01 || raw[1] !== 8'h00 ||
+            raw[2] !== 8'h80 || raw[3] !== 8'h00 ||
+            raw[12] !== 8'h00 || raw[13] !== 8'h00 ||
+            raw[14] !== 8'h00 || raw[15] !== 8'h00 ||
+            ring_buffer_addr != replacement.buf_addr)
+            `uvm_fatal("TLPQ_DRIVER_REPLACEMENT_RING", $sformatf(
+                {"%s logical sequence %0d physical slot %0d at 0x%016h ",
+                 "did not contain literal available 128-byte descriptor"},
+                label, replacement_seq, expected_slot_index,
+                expected_slot_addr))
+        for (int unsigned i = 0; i < 8; i++) begin
+            if (raw[4 + i] !== replacement.buf_addr[(i * 8) +: 8])
+                `uvm_fatal("TLPQ_DRIVER_REPLACEMENT_RING", $sformatf(
+                    "%s stable address byte %0d diverged", label, i))
+        end
+
+        ring_live_matches = 0;
+        for (int unsigned live_engine = 0;
+             live_engine < DRIVER_ENGINE_COUNT; live_engine++) begin
+            if (!driver_engines.exists(live_engine) ||
+                driver_engines[live_engine] == null ||
+                driver_engines[live_engine].ring_base() == 0)
+                continue;
+            for (gq_logical_seq_t live_seq =
+                     driver_engines[live_engine].head_seq();
+                 live_seq < driver_engines[live_engine].tail_seq();
+                 live_seq++) begin
+                if (!$cast(live_desc,
+                           driver_engines[live_engine].get_outstanding(
+                               live_seq)) || live_desc == null)
+                    `uvm_fatal("TLPQ_DRIVER_LIVE_OWNERSHIP", $sformatf(
+                        "%s found a non-TLPQ live descriptor at engine %0d sequence %0d",
+                        label, live_engine, live_seq))
+                if (live_desc.buf_addr == ring_buffer_addr)
+                    ring_live_matches++;
+            end
+        end
+        if (ring_live_matches != 1)
+            `uvm_fatal("TLPQ_DRIVER_LIVE_ALIAS", $sformatf(
+                "%s ring buffer 0x%016h is referenced by %0d live descriptors",
+                label, ring_buffer_addr, ring_live_matches))
     endfunction
 
     task start_driver_engine(int unsigned engine_id);
@@ -1222,6 +1329,8 @@ class tlpq_driver_conformance_test extends uvm_test;
             16'h001f, 16'h8000, 16'h8001, 16'h8002};
         bit [15:0] switch_batch_tails[3] = '{
             16'h001f, 16'h8000, 16'h8001};
+        int unsigned host_replacement_slots[3] = '{31, 0, 1};
+        int unsigned switch_replacement_slots[2] = '{31, 0};
         tlpq_route_metadata_t host_metadata[3];
         tlpq_route_metadata_t switch_metadata[2];
         tlpq_route_metadata_t simultaneous_host_metadata;
@@ -1333,6 +1442,10 @@ class tlpq_driver_conformance_test extends uvm_test;
             host_retired_generation[i] =
                 mem.allocation_generation(host_retired_addr[i]);
             host_free_before[i] = mem.free_count(host_retired_addr[i]);
+            record_retired_allocation(
+                host_retired[i], host_retired_addr[i],
+                host_retired_generation[i],
+                $sformatf("Host batch retired %0d", i));
             if (!dut.complete_slot(driver_engines[MAIN_HOST_ENGINE], i,
                                    golden, 16, host_metadata[i], -1))
                 `uvm_fatal("TLPQ_DRIVER_DUT",
@@ -1386,6 +1499,12 @@ class tlpq_driver_conformance_test extends uvm_test;
                 `uvm_fatal("TLPQ_DRIVER_HOST_REPLACEMENT", $sformatf(
                     "Host replacement %0d was not a fresh 128-byte ownership",
                     i))
+            check_refill_replacement(
+                MAIN_HOST_ENGINE, 31 + i, host_retired[i],
+                host_retired_addr[i], host_free_before[i],
+                64'h0000_0001_e000_0000,
+                host_replacement_slots[i],
+                $sformatf("Host batch replacement %0d", i));
         end
         if (mem.allocation_count_for_size(TLPQ_BUFFER_BYTES) !=
                 host_alloc_before + 3 ||
@@ -1414,6 +1533,10 @@ class tlpq_driver_conformance_test extends uvm_test;
             switch_retired_generation[i] =
                 mem.allocation_generation(switch_retired_addr[i]);
             switch_free_before[i] = mem.free_count(switch_retired_addr[i]);
+            record_retired_allocation(
+                switch_retired[i], switch_retired_addr[i],
+                switch_retired_generation[i],
+                $sformatf("Switch batch retired %0d", i));
             if (!dut.complete_slot(driver_engines[MAIN_SWITCH_ENGINE], i,
                                    golden, 16, switch_metadata[i], -1))
                 `uvm_fatal("TLPQ_DRIVER_DUT",
@@ -1469,6 +1592,12 @@ class tlpq_driver_conformance_test extends uvm_test;
                 `uvm_fatal("TLPQ_DRIVER_SWITCH_REPLACEMENT", $sformatf(
                     "Switch replacement %0d was not a fresh 128-byte ownership",
                     i))
+            check_refill_replacement(
+                MAIN_SWITCH_ENGINE, 31 + i, switch_retired[i],
+                switch_retired_addr[i], switch_free_before[i],
+                64'h0000_0001_e000_1180,
+                switch_replacement_slots[i],
+                $sformatf("Switch batch replacement %0d", i));
         end
         if (mem.allocation_count_for_size(TLPQ_BUFFER_BYTES) !=
                 switch_alloc_before + 2 ||
@@ -1535,6 +1664,12 @@ class tlpq_driver_conformance_test extends uvm_test;
             mem.free_count(simultaneous_host_addr);
         simultaneous_switch_free_before =
             mem.free_count(simultaneous_switch_addr);
+        record_retired_allocation(
+            simultaneous_host_retired, simultaneous_host_addr,
+            simultaneous_host_generation, "simultaneous Host retired");
+        record_retired_allocation(
+            simultaneous_switch_retired, simultaneous_switch_addr,
+            simultaneous_switch_generation, "simultaneous Switch retired");
         simultaneous_alloc_before =
             mem.allocation_count_for_size(TLPQ_BUFFER_BYTES);
         if (!dut.complete_slot(driver_engines[MAIN_HOST_ENGINE], 3,
@@ -1576,12 +1711,13 @@ class tlpq_driver_conformance_test extends uvm_test;
             golden, simultaneous_switch_metadata, "simultaneous Switch");
         check_refill_replacement(
             MAIN_HOST_ENGINE, 34, simultaneous_host_retired,
-            simultaneous_host_addr, simultaneous_host_generation,
-            simultaneous_host_free_before, "simultaneous Host replacement");
+            simultaneous_host_addr, simultaneous_host_free_before,
+            64'h0000_0001_e000_0000, 2,
+            "simultaneous Host replacement");
         check_refill_replacement(
             MAIN_SWITCH_ENGINE, 33, simultaneous_switch_retired,
-            simultaneous_switch_addr, simultaneous_switch_generation,
-            simultaneous_switch_free_before,
+            simultaneous_switch_addr, simultaneous_switch_free_before,
+            64'h0000_0001_e000_1180, 1,
             "simultaneous Switch replacement");
         if (mem.allocation_count_for_size(TLPQ_BUFFER_BYTES) !=
                 simultaneous_alloc_before + 2)
@@ -1604,6 +1740,8 @@ class tlpq_driver_conformance_test extends uvm_test;
         lost_addr = lost_retired.buf_addr;
         lost_generation = mem.allocation_generation(lost_addr);
         lost_free_before = mem.free_count(lost_addr);
+        record_retired_allocation(
+            lost_retired, lost_addr, lost_generation, "lost-IRQ Host retired");
         lost_alloc_before =
             mem.allocation_count_for_size(TLPQ_BUFFER_BYTES);
         if (!dut.complete_slot(driver_engines[MAIN_HOST_ENGINE], 4,
@@ -1633,8 +1771,9 @@ class tlpq_driver_conformance_test extends uvm_test;
             driver_collectors[MAIN_HOST_ENGINE].observations[4],
             golden, lost_metadata, "Host lost IRQ");
         check_refill_replacement(
-            MAIN_HOST_ENGINE, 35, lost_retired, lost_addr, lost_generation,
-            lost_free_before, "lost-IRQ Host replacement");
+            MAIN_HOST_ENGINE, 35, lost_retired, lost_addr, lost_free_before,
+            64'h0000_0001_e000_0000, 3,
+            "lost-IRQ Host replacement");
         if (mem.allocation_count_for_size(TLPQ_BUFFER_BYTES) !=
                 lost_alloc_before + 1)
             `uvm_fatal("TLPQ_DRIVER_LOST_OWNERSHIP",
@@ -1657,6 +1796,8 @@ class tlpq_driver_conformance_test extends uvm_test;
         int unsigned host_retired_free_before;
         int unsigned switch_retired_free_before;
         int unsigned allocation_before;
+        gq_addr_t host_ring_base;
+        gq_addr_t switch_ring_base;
         time poll_started;
         int host_key;
         int switch_key;
@@ -1682,6 +1823,12 @@ class tlpq_driver_conformance_test extends uvm_test;
 
         start_driver_engine(POLL_HOST_ENGINE);
         start_driver_engine(POLL_SWITCH_ENGINE);
+        host_ring_base = driver_engines[POLL_HOST_ENGINE].ring_base();
+        switch_ring_base = driver_engines[POLL_SWITCH_ENGINE].ring_base();
+        if (host_ring_base == 0 || switch_ring_base == 0 ||
+            host_ring_base == switch_ring_base)
+            `uvm_fatal("TLPQ_DRIVER_POLL_RING_BASE",
+                       "fixed Poll Host/Switch did not own independent rings")
         if (!$cast(host_retired,
                    driver_engines[POLL_HOST_ENGINE].get_outstanding(0)) ||
             !$cast(switch_retired,
@@ -1696,6 +1843,12 @@ class tlpq_driver_conformance_test extends uvm_test;
             mem.allocation_generation(switch_retired_addr);
         host_retired_free_before = mem.free_count(host_retired_addr);
         switch_retired_free_before = mem.free_count(switch_retired_addr);
+        record_retired_allocation(
+            host_retired, host_retired_addr, host_retired_generation,
+            "fixed Poll Host retired");
+        record_retired_allocation(
+            switch_retired, switch_retired_addr, switch_retired_generation,
+            "fixed Poll Switch retired");
         allocation_before =
             mem.allocation_count_for_size(TLPQ_BUFFER_BYTES);
         if (!dut.complete_slot(driver_engines[POLL_HOST_ENGINE], 0,
@@ -1742,11 +1895,11 @@ class tlpq_driver_conformance_test extends uvm_test;
             golden, switch_metadata, "Switch fixed Poll");
         check_refill_replacement(
             POLL_HOST_ENGINE, 31, host_retired, host_retired_addr,
-            host_retired_generation, host_retired_free_before,
+            host_retired_free_before, host_ring_base, 31,
             "fixed Poll Host replacement");
         check_refill_replacement(
             POLL_SWITCH_ENGINE, 31, switch_retired, switch_retired_addr,
-            switch_retired_generation, switch_retired_free_before,
+            switch_retired_free_before, switch_ring_base, 31,
             "fixed Poll Switch replacement");
         if (mem.allocation_count_for_size(TLPQ_BUFFER_BYTES) !=
                 allocation_before + 2)
