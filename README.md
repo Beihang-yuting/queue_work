@@ -573,7 +573,10 @@ Configuration Type 1 write, Memory Read, Memory Write, Message with Data,
 Completion without Data, and Completion with Data. Separate boundary and
 negative checks cover the encoded 1024-DWORD maximum, unsupported formats,
 misaligned/truncated/overlong layouts, inconsistent Fmt/Length values, null
-codec results, and nonzero 3DW padding.
+codec results, and nonzero 3DW padding. TLP Prefixes and ECRC are outside the
+TLPQ DPU-layout contract at this pin: a canonical Prefix (`Fmt=3'b100`) and a
+Digest-present header (`TD=1`) both fail closed with empty outputs and a
+nonempty reason. The bridge does not drop a Prefix or accept an unverified ECRC.
 
 The codec's canonical header order is converted to the DPU four-DWORD header
 window below. Payload DWORDs follow at DPU index 4 in their original order.
@@ -591,6 +594,17 @@ exact Fmt/Length-sized buffer. For a 3DW TLP, DWORD 0 is strict zero padding;
 nonzero padding is rejected rather than ignored. Each DWORD is represented in
 the DPU byte buffer least-significant byte first, while conversion to and from
 the canonical PCIe codec preserves the DWORD values shown above.
+
+The pinned `pcie_tl_codec.decode()` has a known Completion limitation: it fills
+the common `requester_id` and Tag from Completion DW1 even though Cpl/CplD carry
+those fields in DW2. Therefore generic Cpl/CplD requester/Tag correctness is
+not claimed when their DW2 values differ from the completer/status word. TLPQ
+does not repair or harmonize those semantics locally. Independently literal
+fixtures prove that the raw DW1/DW2 bytes traverse the bridge unchanged, and
+the decoded completer ID, status, BCM, byte count, lower address, and payload
+remain useful evidence; consumers that require requester ID or Tag must retain
+and interpret the raw descriptor bytes until an authorized corrected
+`pcie_work` pin is available.
 
 Each TLPQ RX ring entry is exactly 16 bytes, little-endian, and owns one fresh,
 zero-filled 128-byte receive buffer. The descriptor and owned-buffer contracts
@@ -614,6 +628,15 @@ are:
 | Completion read length | Hardware-reported `buf_len`, limited to 128 |
 | Ownership | Descriptor/GQ until retirement, reset, or final cleanup |
 | Refill | A fresh descriptor object and a fresh 128-byte allocation |
+
+Completion analysis callbacks are synchronous, so the delivered descriptor
+and decoded TLP are borrowed for callback duration. A subscriber that retains
+the result should clone the `tlpq_rx_desc`, whose clone is a detached snapshot:
+it deep-copies raw DPU bytes and metadata, re-decodes an independent TLP, and
+owns neither the ring nor the receive allocation. Do not retain or directly
+clone only the pinned TLP object. Its clone path omits `at`, shallow-copies
+Prefix handles, and does not preserve all Configuration- and Message-specific
+fields.
 
 Host and Switch RX are separate channels with separate depth-32 rings,
 configuration objects, pointer codecs, completion sources, refill profiles,
@@ -654,11 +677,17 @@ only on the first chunk, EOP only on the final chunk, and valid is set on every
 committed chunk. The sequence default ready timeout is 1 us; encode failure or
 ready timeout returns `success=0` with a nonempty reason.
 
+One adapter serializes the complete encode-through-control operation for each
+channel, preventing two Host sends or two Switch sends from interleaving one
+register stream. Host and Switch use independent locks, so either channel may
+make progress while the other is waiting for ready.
+
 Multi-chunk TX is intentionally non-atomic. If a later chunk's ready wait
 times out, every earlier chunk already submitted remains committed; there is
 no rollback. The failure reason includes the failing source DWORD offset, and
-the adapter receives no data, keep, TUSER, control, or subsequent ready
-callbacks for the failed chunk or any later chunk.
+the adapter receives no data, keep, TUSER, or control callbacks after the
+failed ready wait and performs no later-chunk ready waits for that transaction.
+The per-channel lock is then released, so a subsequent transaction can run.
 
 ## Run with VCS
 

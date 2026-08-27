@@ -4,9 +4,210 @@ set -euo pipefail
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$repo_root"
 
+scan_tlpq_address_literals() {
+    perl - "$@" <<'PERL'
+use strict;
+use warnings;
+
+sub mask_sv_noncode {
+    my ($text) = @_;
+    my $masked = '';
+    my $state = 'code';
+    my $length = length($text);
+    my $i = 0;
+
+    while ($i < $length) {
+        my $ch = substr($text, $i, 1);
+        my $next = ($i + 1 < $length) ? substr($text, $i + 1, 1) : '';
+
+        if ($state eq 'code') {
+            if ($ch eq '/' && $next eq '/') {
+                $masked .= '  ';
+                $i += 2;
+                $state = 'line_comment';
+                next;
+            }
+            if ($ch eq '/' && $next eq '*') {
+                $masked .= '  ';
+                $i += 2;
+                $state = 'block_comment';
+                next;
+            }
+            if ($ch eq '"') {
+                $masked .= ' ';
+                $i++;
+                $state = 'string';
+                next;
+            }
+            $masked .= $ch;
+            $i++;
+            next;
+        }
+
+        if ($state eq 'line_comment') {
+            if ($ch eq "\n") {
+                $masked .= "\n";
+                $state = 'code';
+            } else {
+                $masked .= ' ';
+            }
+            $i++;
+            next;
+        }
+
+        if ($state eq 'block_comment') {
+            if ($ch eq '*' && $next eq '/') {
+                $masked .= '  ';
+                $i += 2;
+                $state = 'code';
+                next;
+            }
+            $masked .= ($ch eq "\n") ? "\n" : ' ';
+            $i++;
+            next;
+        }
+
+        if ($ch eq '\\' && $next ne '') {
+            $masked .= ' ';
+            $masked .= ($next eq "\n") ? "\n" : ' ';
+            $i += 2;
+            next;
+        }
+        if ($ch eq '"') {
+            $masked .= ' ';
+            $i++;
+            $state = 'code';
+            next;
+        }
+        $masked .= ($ch eq "\n") ? "\n" : ' ';
+        $i++;
+    }
+    return $masked;
+}
+
+sub address_identifier {
+    my ($identifier) = @_;
+    return lc($identifier) =~
+        /(?:^|_)(?:addr|address|base|offset|register|reg|mmio|csr|bar)(?:_|$)/;
+}
+
+sub whitelisted_statement {
+    my ($semantic, $raw) = @_;
+    my $normalized = $semantic;
+    $normalized =~ s/^\s+|\s+$//g;
+    $normalized =~ s/\s+/ /g;
+
+    # Finite built-in whitelist: descriptor buffer handles use zero only as
+    # detached/unprepared state, never as a hardware register mapping.
+    return 1 if $normalized =~
+        /^(?:this\.)?(?:buf_addr|prepared_buf_addr)\s*=\s*0\s*;$/;
+
+    # Explicit exceptions remain visible in source review and are restricted
+    # to these semantic categories rather than accepting arbitrary markers.
+    return 1 if $raw =~
+        /TLPQ_LAYOUT_ALLOW_ADDR_LITERAL:\s*(?:protocol-constant|descriptor-layout|buffer-sentinel)\b/;
+    return 0;
+}
+
+sub scan_statement {
+    my ($file, $line, $statement, $raw_statement) = @_;
+    my $semantic = $statement;
+
+    # Numeric declaration widths, packed ranges, and array indices are layout,
+    # not address values. Remove balanced innermost brackets before tokenizing.
+    1 while $semantic =~ s/\[[^\[\]]*\]/ /g;
+
+    my $has_c_hex = $semantic =~
+        /(?<![A-Za-z0-9_\$])0[xX][0-9a-fA-F_]+/;
+    my $relation_probe = $semantic;
+    # A function's trailing `return 0;`/`return 1'b0;` is a status result, not
+    # an address value participating in the preceding condition. Preserve
+    # compound return expressions so literal/address comparisons still fail.
+    $relation_probe =~ s{
+        \breturn\s+
+        (?:
+            0[xX][0-9a-fA-F_]+ |
+            (?:[0-9][0-9_]*\s*)?'\s*[sS]?\s*[bBoOdDhH]\s*[0-9a-fA-F_xXzZ?]+ |
+            [0-9][0-9_]*
+        )
+        \s*;
+    }{ }gx;
+    my @identifiers = $relation_probe =~ /[A-Za-z_\$][A-Za-z0-9_\$]*/g;
+    my $has_address_identifier = grep { address_identifier($_) } @identifiers;
+
+    my $literal_probe = $relation_probe;
+    my $has_sv_based = $literal_probe =~
+        /(?<![A-Za-z0-9_\$])(?:[0-9][0-9_]*\s*)?'\s*[sS]?\s*[bBoOdDhH]\s*[0-9a-fA-F_xXzZ?]+/;
+    $literal_probe =~ s/(?<![A-Za-z0-9_\$])0[xX][0-9a-fA-F_]+/ /g;
+    $literal_probe =~ s/(?<![A-Za-z0-9_\$])(?:[0-9][0-9_]*\s*)?'\s*[sS]?\s*[bBoOdDhH]\s*[0-9a-fA-F_xXzZ?]+/ /g;
+    my $has_unsized_decimal = $literal_probe =~
+        /(?<![A-Za-z0-9_\$'])[0-9][0-9_]*(?![A-Za-z0-9_\$])/;
+
+    return unless $has_c_hex ||
+        ($has_address_identifier && ($has_sv_based || $has_unsized_decimal));
+    return if !$has_c_hex &&
+        whitelisted_statement($semantic, $raw_statement);
+
+    my $display = $semantic;
+    $display =~ s/^\s+|\s+$//g;
+    $display =~ s/\s+/ /g;
+    $display = substr($display, 0, 240) . '...' if length($display) > 240;
+    print "$file:$line:$display\n";
+}
+
+for my $file (@ARGV) {
+    open my $fh, '<', $file or die "cannot read $file: $!\n";
+    local $/;
+    my $raw = <$fh>;
+    close $fh or die "cannot close $file: $!\n";
+    my $masked = mask_sv_noncode($raw);
+    my $cursor = 0;
+    my $line = 1;
+
+    while ($masked =~ /;/g) {
+        my $end = pos($masked);
+        my $statement = substr($masked, $cursor, $end - $cursor);
+        my $raw_statement = substr($raw, $cursor, $end - $cursor);
+        my $leading = $statement;
+        my $statement_line = $line;
+        if ($leading =~ /\S/) {
+            my $prefix = substr($leading, 0, $-[0]);
+            $statement_line += ($prefix =~ tr/\n//);
+        }
+        scan_statement($file, $statement_line, $statement, $raw_statement);
+        $line += ($statement =~ tr/\n//);
+        $cursor = $end;
+    }
+}
+PERL
+}
+
+if [[ ${1:-} == --scan-tlpq-addresses-only ]]; then
+    shift
+    if (($# == 0)); then
+        printf '%s requires at least one SystemVerilog file\n' \
+            '--scan-tlpq-addresses-only' >&2
+        exit 2
+    fi
+    if ! command -v perl >/dev/null 2>&1; then
+        printf 'required command not found: perl\n' >&2
+        exit 2
+    fi
+    if ! tlpq_address_output=$(scan_tlpq_address_literals "$@"); then
+        printf 'failed to scan TLPQ register-address literals\n' >&2
+        exit 2
+    fi
+    if [[ -n $tlpq_address_output ]]; then
+        printf 'TLPQ register-address literals remain:\n' >&2
+        printf '  %s\n' "$tlpq_address_output" >&2
+        exit 1
+    fi
+    exit 0
+fi
+
 status=0
 
-for command_name in find sort grep git; do
+for command_name in find sort grep git perl; do
     if ! command -v "$command_name" >/dev/null 2>&1; then
         printf 'required command not found: %s\n' "$command_name" >&2
         status=1
@@ -205,26 +406,12 @@ if ((${#tlpq_business_matches[@]} != 0)); then
 fi
 
 tlpq_address_matches=()
-tlpq_c_address_pattern='0[xX][0-9a-fA-F]+'
-tlpq_address_identifier='[[:alnum:]_$]*(addr(ess)?|register|reg|mmio|csr|bar)[[:alnum:]_$]*'
-tlpq_sv_hex_literal="([0-9]+[[:space:]]*)?'[sS]?[hH][[:space:]]*[0-9a-fA-F_xXzZ?]+"
-tlpq_semantic_address_pattern="(${tlpq_address_identifier}.*${tlpq_sv_hex_literal}|${tlpq_sv_hex_literal}.*${tlpq_address_identifier})"
-if tlpq_address_output=$(
-    grep -niEH \
-        -e "$tlpq_c_address_pattern" \
-        -e "$tlpq_semantic_address_pattern" \
-        src/tlpq/*.sv
-); then
-    mapfile -t tlpq_address_matches <<< "$tlpq_address_output"
-else
-    scan_status=$?
-    if ((scan_status != 1)); then
-        printf 'failed to scan TLPQ register-address literals (exit %d)\n' \
-            "$scan_status" >&2
-        exit "$scan_status"
-    fi
+if ! tlpq_address_output=$(scan_tlpq_address_literals src/tlpq/*.sv); then
+    printf 'failed to scan TLPQ register-address literals\n' >&2
+    exit 2
 fi
-if ((${#tlpq_address_matches[@]} != 0)); then
+if [[ -n $tlpq_address_output ]]; then
+    mapfile -t tlpq_address_matches <<< "$tlpq_address_output"
     printf 'TLPQ register-address literals remain:\n' >&2
     printf '  %s\n' "${tlpq_address_matches[@]}" >&2
     status=1
