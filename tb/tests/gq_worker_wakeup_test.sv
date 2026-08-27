@@ -141,6 +141,42 @@ class gq_worker_test_engine extends gq_queue_engine;
             return poll.current_interval;
         return 0;
     endfunction
+
+    function bit try_state_lock_for_test();
+        bit acquired;
+
+        acquired = state_lock.try_get(1);
+        if (acquired)
+            state_lock.put(1);
+        return acquired;
+    endfunction
+endclass
+
+class gq_worker_lock_probe_mem extends host_mem_manager;
+    `uvm_object_utils(gq_worker_lock_probe_mem)
+
+    gq_worker_test_engine engine;
+    bit probe_reads;
+    int unsigned locked_read_callbacks;
+
+    function new(string name = "gq_worker_lock_probe_mem");
+        super.new(name);
+        engine = null;
+        probe_reads = 0;
+        locked_read_callbacks = 0;
+    endfunction
+
+    virtual function void read_mem(
+        bit [63:0] addr,
+        int unsigned size,
+        ref byte data[],
+        input string file = "",
+        input int line = 0);
+        if (probe_reads && engine != null &&
+            !engine.try_state_lock_for_test())
+            locked_read_callbacks++;
+        super.read_mem(addr, size, data, file, line);
+    endfunction
 endclass
 
 class gq_worker_report_catcher extends uvm_report_catcher;
@@ -148,6 +184,7 @@ class gq_worker_report_catcher extends uvm_report_catcher;
 
     int unsigned timeout_count;
     int unsigned invalid_query_count;
+    time timeout_times[$];
 
     function new(string name = "gq_worker_report_catcher");
         super.new(name);
@@ -159,6 +196,7 @@ class gq_worker_report_catcher extends uvm_report_catcher;
         if (get_severity() == UVM_ERROR &&
             get_id() == "GQ_COMPLETION_TIMEOUT") begin
             timeout_count++;
+            timeout_times.push_back($time);
             return CAUGHT;
         end
         if (get_severity() == UVM_WARNING &&
@@ -207,11 +245,29 @@ class gq_worker_wakeup_test extends uvm_test;
     gq_queue_cfg irq_reset_cfg;
     gq_worker_test_engine irq_reset_engine;
 
-    host_mem_manager timeout_mem;
+    gq_worker_lock_probe_mem timeout_mem;
     gq_worker_trace_adapter timeout_adapter;
     gq_worker_trace_completion timeout_source;
     gq_queue_cfg timeout_cfg;
     gq_worker_test_engine timeout_engine;
+
+    host_mem_manager lost_irq_mem;
+    gq_worker_trace_adapter lost_irq_adapter;
+    gq_worker_trace_completion lost_irq_source;
+    gq_queue_cfg lost_irq_cfg;
+    gq_worker_test_engine lost_irq_engine;
+
+    host_mem_manager late_watchdog_mem;
+    gq_worker_trace_adapter late_watchdog_adapter;
+    gq_worker_trace_completion late_watchdog_source;
+    gq_queue_cfg late_watchdog_cfg;
+    gq_worker_test_engine late_watchdog_engine;
+
+    host_mem_manager invalid_deadline_mem;
+    gq_worker_trace_adapter invalid_deadline_adapter;
+    gq_worker_trace_completion invalid_deadline_source;
+    gq_queue_cfg invalid_deadline_cfg;
+    gq_worker_test_engine invalid_deadline_engine;
 
     host_mem_manager rx_mem;
     gq_worker_trace_adapter rx_adapter;
@@ -226,6 +282,9 @@ class gq_worker_wakeup_test extends uvm_test;
     bit adaptive_worker_returned;
     bit irq_worker_returned;
     bit timeout_worker_returned;
+    bit lost_irq_worker_returned;
+    bit late_watchdog_worker_returned;
+    bit invalid_deadline_worker_returned;
     bit rx_worker_returned;
 
     function new(string name = "gq_worker_wakeup_test",
@@ -478,6 +537,49 @@ class gq_worker_wakeup_test extends uvm_test;
                          timeout_adapter);
         timeout_engine = gq_worker_test_engine::type_id::create(
             "timeout_engine", this);
+        timeout_mem.engine = timeout_engine;
+
+        lost_irq_mem = new("lost_irq_mem");
+        initialize_mem(lost_irq_mem, 64'h0000_0001_8700_0000);
+        lost_irq_adapter = gq_worker_trace_adapter::type_id::create(
+            "lost_irq_adapter");
+        lost_irq_source = gq_worker_trace_completion::type_id::create(
+            "lost_irq_source");
+        lost_irq_cfg = make_cfg("lost_irq_cfg", 47, GQ_TX, GQ_IRQ,
+                                GQ_POLL_FIXED, 10ns, 10ns, 0, 50ns,
+                                lost_irq_source);
+        configure_engine("lost_irq_engine", lost_irq_cfg, lost_irq_mem,
+                         lost_irq_adapter);
+        lost_irq_engine = gq_worker_test_engine::type_id::create(
+            "lost_irq_engine", this);
+
+        late_watchdog_mem = new("late_watchdog_mem");
+        initialize_mem(late_watchdog_mem, 64'h0000_0001_8800_0000);
+        late_watchdog_adapter = gq_worker_trace_adapter::type_id::create(
+            "late_watchdog_adapter");
+        late_watchdog_source = gq_worker_trace_completion::type_id::create(
+            "late_watchdog_source");
+        late_watchdog_cfg = make_cfg("late_watchdog_cfg", 48, GQ_TX, GQ_IRQ,
+                                     GQ_POLL_FIXED, 10ns, 10ns, 200ns, 60ns,
+                                     late_watchdog_source);
+        configure_engine("late_watchdog_engine", late_watchdog_cfg,
+                         late_watchdog_mem, late_watchdog_adapter);
+        late_watchdog_engine = gq_worker_test_engine::type_id::create(
+            "late_watchdog_engine", this);
+
+        invalid_deadline_mem = new("invalid_deadline_mem");
+        initialize_mem(invalid_deadline_mem, 64'h0000_0001_8900_0000);
+        invalid_deadline_adapter = gq_worker_trace_adapter::type_id::create(
+            "invalid_deadline_adapter");
+        invalid_deadline_source = gq_worker_trace_completion::type_id::create(
+            "invalid_deadline_source");
+        invalid_deadline_cfg = make_cfg(
+            "invalid_deadline_cfg", 49, GQ_TX, GQ_POLL, GQ_POLL_FIXED,
+            30ns, 30ns, 0, 130ns, invalid_deadline_source);
+        configure_engine("invalid_deadline_engine", invalid_deadline_cfg,
+                         invalid_deadline_mem, invalid_deadline_adapter);
+        invalid_deadline_engine = gq_worker_test_engine::type_id::create(
+            "invalid_deadline_engine", this);
 
         rx_mem = new("rx_mem");
         initialize_mem(rx_mem, 64'h0000_0001_8600_0000);
@@ -586,12 +688,28 @@ class gq_worker_wakeup_test extends uvm_test;
             adaptive_source.query_times[4] - adaptive_source.query_times[3],
             adaptive_source.query_times[query_before] - publish_time), UVM_LOW)
 
+        wait_for_query_count(adaptive_source, query_before + 4,
+                             "adaptive pre-retirement backoff");
+        check_expectation(adaptive_engine.current_poll_interval() == 100ns,
+               $sformatf("adaptive interval was not backed off before retirement (got %0t)",
+                         adaptive_engine.current_poll_interval()));
+        query_before = adaptive_source.query_calls;
         adaptive_dut.complete_slot(adaptive_engine, 0, 32, 64);
         adaptive_dut.complete_slot(adaptive_engine, 1, 32, 64);
-        wait_for_query_count(adaptive_source, query_before + 2,
+        wait_for_query_count(adaptive_source, query_before + 1,
                              "adaptive progress query");
+        for (int unsigned observation = 0; observation < 20;
+             observation++) begin
+            #10ns;
+            if (adaptive_engine.outstanding_count() == 0 &&
+                adaptive_engine.current_poll_interval() == 10ns)
+                break;
+        end
         check_expectation(adaptive_engine.outstanding_count() == 0,
                "progress query did not retire both published descriptors");
+        check_expectation(adaptive_engine.current_poll_interval() == 10ns,
+               $sformatf("retirement did not independently reset adaptive polling to 10ns (got %0t)",
+                         adaptive_engine.current_poll_interval()));
         query_before = adaptive_source.query_calls;
         #1us;
         check_expectation(adaptive_source.query_calls == query_before,
@@ -753,6 +871,7 @@ class gq_worker_wakeup_test extends uvm_test;
         irq_reset_mem.leak_check(`__FILE__, `__LINE__);
 
         timeout_engine.initialize();
+        timeout_mem.probe_reads = 1;
         timeout_worker_returned = 0;
         fork : timeout_worker
             begin
@@ -767,6 +886,9 @@ class gq_worker_wakeup_test extends uvm_test;
         check_expectation(report_catcher.timeout_count - timeout_before == 1,
                $sformatf("oldest published TX timeout reported %0d times",
                          report_catcher.timeout_count - timeout_before));
+        check_expectation(timeout_mem.locked_read_callbacks == 0,
+               $sformatf("host-memory read callback ran under state_lock %0d time(s)",
+                         timeout_mem.locked_read_callbacks));
         `uvm_info("GQ_WORKER_TRACE", $sformatf(
             "tx_timeout reports=%0d queries=%0d",
             report_catcher.timeout_count - timeout_before,
@@ -775,6 +897,126 @@ class gq_worker_wakeup_test extends uvm_test;
         wait_for_worker_stop(timeout_worker_returned, "timeout TX");
         disable timeout_worker;
         timeout_mem.leak_check(`__FILE__, `__LINE__);
+
+        lost_irq_engine.initialize();
+        lost_irq_worker_returned = 0;
+        fork : lost_irq_worker
+            begin
+                lost_irq_engine.run_completion_worker();
+                lost_irq_worker_returned = 1;
+            end
+        join_none
+        timeout_before = report_catcher.timeout_count;
+        tx_desc = make_tx("lost_irq_timeout", 8);
+        submit_one(lost_irq_engine, tx_desc, "lost_irq_timeout");
+        publish_time = $time;
+        for (int unsigned observation = 0; observation < 10;
+             observation++) begin
+            #10ns;
+            if (report_catcher.timeout_count != timeout_before)
+                break;
+        end
+        check_expectation(report_catcher.timeout_count - timeout_before == 1,
+               $sformatf("watchdog-zero lost IRQ reported %0d timeout(s)",
+                         report_catcher.timeout_count - timeout_before));
+        if (report_catcher.timeout_count - timeout_before == 1)
+            check_expectation(
+                report_catcher.timeout_times[timeout_before] - publish_time ==
+                    50ns,
+                $sformatf("watchdog-zero timeout arrived at delta %0t",
+                    report_catcher.timeout_times[timeout_before] -
+                        publish_time));
+        check_expectation(lost_irq_source.query_calls == 0 &&
+                          lost_irq_adapter.ack_irq_calls == 0,
+               $sformatf("watchdog-zero deadline queried/ACKed: queries=%0d ack=%0d",
+                         lost_irq_source.query_calls,
+                         lost_irq_adapter.ack_irq_calls));
+        #50ns;
+        check_expectation(report_catcher.timeout_count - timeout_before == 1,
+               "watchdog-zero deadline repeated for the same oldest entry");
+        lost_irq_engine.cleanup();
+        wait_for_worker_stop(lost_irq_worker_returned, "watchdog-zero IRQ");
+        disable lost_irq_worker;
+        lost_irq_mem.leak_check(`__FILE__, `__LINE__);
+
+        late_watchdog_engine.initialize();
+        late_watchdog_worker_returned = 0;
+        fork : late_watchdog_worker
+            begin
+                late_watchdog_engine.run_completion_worker();
+                late_watchdog_worker_returned = 1;
+            end
+        join_none
+        timeout_before = report_catcher.timeout_count;
+        tx_desc = make_tx("late_watchdog_timeout", 9);
+        submit_one(late_watchdog_engine, tx_desc, "late_watchdog_timeout");
+        publish_time = $time;
+        for (int unsigned observation = 0; observation < 10;
+             observation++) begin
+            #10ns;
+            if (report_catcher.timeout_count != timeout_before)
+                break;
+        end
+        check_expectation(report_catcher.timeout_count - timeout_before == 1,
+               $sformatf("late-watchdog case reported %0d timeout(s)",
+                         report_catcher.timeout_count - timeout_before));
+        if (report_catcher.timeout_count - timeout_before == 1)
+            check_expectation(
+                report_catcher.timeout_times[timeout_before] - publish_time ==
+                    60ns,
+                $sformatf("late-watchdog timeout arrived at delta %0t",
+                    report_catcher.timeout_times[timeout_before] -
+                        publish_time));
+        check_expectation(late_watchdog_source.query_calls == 0 &&
+                          late_watchdog_adapter.ack_irq_calls == 0,
+               $sformatf("deadline later than watchdog ordering was wrong: queries=%0d ack=%0d",
+                         late_watchdog_source.query_calls,
+                         late_watchdog_adapter.ack_irq_calls));
+        late_watchdog_engine.cleanup();
+        wait_for_worker_stop(late_watchdog_worker_returned,
+                             "late-watchdog IRQ");
+        disable late_watchdog_worker;
+        late_watchdog_mem.leak_check(`__FILE__, `__LINE__);
+
+        invalid_deadline_engine.initialize();
+        invalid_deadline_source.forced_invalid_queries = 32'hffff_ffff;
+        invalid_deadline_worker_returned = 0;
+        fork : invalid_deadline_worker
+            begin
+                invalid_deadline_engine.run_completion_worker();
+                invalid_deadline_worker_returned = 1;
+            end
+        join_none
+        timeout_before = report_catcher.timeout_count;
+        query_before = report_catcher.invalid_query_count;
+        tx_desc = make_tx("invalid_query_timeout", 10);
+        submit_one(invalid_deadline_engine, tx_desc, "invalid_query_timeout");
+        publish_time = $time;
+        for (int unsigned observation = 0; observation < 20;
+             observation++) begin
+            #10ns;
+            if (report_catcher.timeout_count != timeout_before)
+                break;
+        end
+        check_expectation(report_catcher.timeout_count - timeout_before == 1,
+               $sformatf("persistent invalid queries reported %0d timeout(s)",
+                         report_catcher.timeout_count - timeout_before));
+        if (report_catcher.timeout_count - timeout_before == 1)
+            check_expectation(
+                report_catcher.timeout_times[timeout_before] - publish_time ==
+                    130ns,
+                $sformatf("invalid-query timeout arrived at delta %0t",
+                    report_catcher.timeout_times[timeout_before] -
+                        publish_time));
+        check_expectation(
+            report_catcher.invalid_query_count - query_before == 4,
+            $sformatf("persistent-invalid case caught %0d query warnings instead of 4 before deadline",
+                report_catcher.invalid_query_count - query_before));
+        invalid_deadline_engine.cleanup();
+        wait_for_worker_stop(invalid_deadline_worker_returned,
+                             "persistent-invalid Poll");
+        disable invalid_deadline_worker;
+        invalid_deadline_mem.leak_check(`__FILE__, `__LINE__);
 
         rx_engine.initialize();
         rx_desc = mailbox_rx_desc::type_id::create("rx_zero_timeout_desc");
@@ -808,8 +1050,8 @@ class gq_worker_wakeup_test extends uvm_test;
         rx_mem.leak_check(`__FILE__, `__LINE__);
 
         uvm_report_cb::delete(null, report_catcher);
-        check_expectation(report_catcher.invalid_query_count == 1,
-               $sformatf("expected one caught invalid-query warning, got %0d",
+        check_expectation(report_catcher.invalid_query_count == 5,
+               $sformatf("expected five caught invalid-query warnings, got %0d",
                          report_catcher.invalid_query_count));
         if (expectation_failures != 0)
             `uvm_fatal("GQ_WORKER_WAKEUP", $sformatf(

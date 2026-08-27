@@ -48,6 +48,8 @@ class gq_timing_config_test extends uvm_test;
         cfg.irq_watchdog_interval = 1us;
         cfg.completion_timeout   = 10us;
         cfg.rx_slot_mode         = GQ_RX_EXPLICIT_REFILL;
+        cfg.ptr_codec            = gq_test_ptr_codec::type_id::create(
+            {name, "_ptr_codec"});
         cfg.completion_source    = mailbox_completion::type_id::create(
             {name, "_completion"});
         return cfg;

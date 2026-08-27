@@ -110,6 +110,7 @@ class gq_config_test extends uvm_test;
         if (gq_queue_key(GQ_RX, 7) != "rx_7")
             `uvm_fatal("QUEUE_KEY", "RX queue key")
 
+        ptr_codec = gq_test_ptr_codec::type_id::create("ptr_codec");
         cfg = gq_queue_cfg::type_id::create("cfg");
         cfg.queue_id           = 7;
         cfg.role               = GQ_TX;
@@ -121,6 +122,7 @@ class gq_config_test extends uvm_test;
         cfg.poll_min_interval  = 10ns;
         cfg.poll_max_interval  = 10ns;
         cfg.completion_timeout = 1us;
+        cfg.ptr_codec          = ptr_codec;
         cfg.completion_source  = mailbox_completion::type_id::create(
             "cfg_completion");
         expect_invalid(cfg, "depth 48");
@@ -153,7 +155,6 @@ class gq_config_test extends uvm_test;
         mem = new("mem");
         mem.init_region(64'h0000_0001_0000_0000,
                         64'h0000_0001_00ff_ffff, MODE_LINEAR, 16);
-        ptr_codec = gq_test_ptr_codec::type_id::create("ptr_codec");
         adapter   = mailbox_mock_adapter::type_id::create("adapter");
 
         invalid_mailbox_cfg = make_mailbox_cfg("bad_id_cfg");

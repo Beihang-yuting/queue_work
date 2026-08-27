@@ -50,6 +50,10 @@ class gq_index_phase_ptr_codec extends gq_ptr_codec;
         return 1;
     endfunction
 
+    virtual function bit validate(int unsigned depth, output string reason);
+        return validate_depth(depth, reason);
+    endfunction
+
     virtual function gq_raw_ptr_t encode_publish(
         gq_logical_seq_t old_tail,
         gq_logical_seq_t new_tail,

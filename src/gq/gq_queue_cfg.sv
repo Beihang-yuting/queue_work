@@ -44,6 +44,7 @@ class gq_queue_cfg extends uvm_object;
 
     function bit validate(output string reason);
         string completion_reason;
+        string pointer_reason;
 
         if (!gq_is_pow2(depth)) begin
             reason = $sformatf("depth must be a power of two and at least 2 (got %0d)", depth);
@@ -57,6 +58,16 @@ class gq_queue_cfg extends uvm_object;
 
         if (alignment == 0) begin
             reason = "alignment must be non-zero";
+            return 0;
+        end
+
+        if (ptr_codec == null) begin
+            reason = "pointer codec must not be null";
+            return 0;
+        end
+
+        if (!ptr_codec.validate(depth, pointer_reason)) begin
+            reason = {"pointer codec: ", pointer_reason};
             return 0;
         end
 
