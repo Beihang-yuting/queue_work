@@ -76,10 +76,25 @@ required_tlpq_files=(
     src/tlpq/tlpq_tx_reg_adapter.sv
     src/tlpq/tlpq_types.sv
 )
+tlpq_symlinks=()
+if [[ -L src/tlpq ]]; then
+    tlpq_symlinks+=(src/tlpq)
+elif [[ -d src/tlpq ]]; then
+    mapfile -t tlpq_symlinks < <(
+        find src/tlpq -type l -print | sort
+    )
+fi
+if ((${#tlpq_symlinks[@]} != 0)); then
+    printf 'src/tlpq must not contain symbolic links:\n' >&2
+    printf '  %s\n' "${tlpq_symlinks[@]}" >&2
+    status=1
+fi
+
 actual_tlpq_files=()
 if [[ -d src/tlpq ]]; then
     mapfile -t actual_tlpq_files < <(
-        find src/tlpq -maxdepth 1 -type f -name '*.sv' -print | sort
+        find src/tlpq -maxdepth 1 \
+            \( -type f -o -type l \) -name '*.sv' -print | sort
     )
 fi
 if ((${#actual_tlpq_files[@]} != ${#required_tlpq_files[@]})); then
@@ -104,6 +119,11 @@ if [[ $actual_pcie_gitlink != "$expected_pcie_gitlink" ]]; then
         "$pcie_work_pin" >&2
     status=1
 fi
+if [[ -L pcie_work ]]; then
+    printf 'pcie_work must be a real submodule worktree, not a symbolic link\n' \
+        >&2
+    status=1
+fi
 if ! actual_pcie_head=$(git -C pcie_work rev-parse HEAD 2>/dev/null); then
     printf 'pcie_work submodule is not initialized\n' >&2
     status=1
@@ -113,47 +133,100 @@ elif [[ $actual_pcie_head != "$pcie_work_pin" ]]; then
     status=1
 fi
 
+super_common_git_dir=$(cd "$(git rev-parse --git-common-dir)" && pwd -P)
+super_worktree_git_dir=$(cd "$(git rev-parse --git-dir)" && pwd -P)
+if [[ $super_worktree_git_dir != "$super_common_git_dir" &&
+      $super_worktree_git_dir != "$super_common_git_dir"/worktrees/* ]]; then
+    printf 'superproject git dir is outside its common git dir: %s\n' \
+        "$super_worktree_git_dir" >&2
+    status=1
+fi
+expected_pcie_git_dir="$super_worktree_git_dir/modules/pcie_work"
+if actual_pcie_git_dir_raw=$(
+    git -C pcie_work rev-parse --absolute-git-dir 2>/dev/null
+); then
+    actual_pcie_git_dir=$(cd "$actual_pcie_git_dir_raw" && pwd -P)
+    if [[ $actual_pcie_git_dir != "$expected_pcie_git_dir" ]]; then
+        printf 'pcie_work git dir is %s, expected owned module %s\n' \
+            "$actual_pcie_git_dir" "$expected_pcie_git_dir" >&2
+        status=1
+    fi
+else
+    printf 'failed to resolve initialized pcie_work git dir\n' >&2
+    status=1
+fi
+
+if ! git -C pcie_work diff --quiet --; then
+    printf 'pcie_work has unstaged changes\n' >&2
+    status=1
+fi
+if ! git -C pcie_work diff --cached --quiet --; then
+    printf 'pcie_work has staged changes\n' >&2
+    status=1
+fi
+pcie_untracked=$(git -C pcie_work ls-files --others --exclude-standard)
+if [[ -n $pcie_untracked ]]; then
+    printf 'pcie_work has untracked files:\n%s\n' "$pcie_untracked" >&2
+    status=1
+fi
+
 if ((status != 0)); then
     exit "$status"
 fi
 
 stale_files=()
-if stale_files_output=$(
-    find src tb -type f \
-        \( -name '*.svh' -o -name '*.v' -o -name '*.vh' \) -print | sort
-); then
-    if [[ -n "$stale_files_output" ]]; then
-        mapfile -t stale_files <<< "$stale_files_output"
-    fi
-else
-    scan_status=$?
-    printf 'failed to scan repository-owned HDL extensions (exit %d)\n' \
-        "$scan_status" >&2
-    exit "$scan_status"
-fi
+mapfile -d '' -t stale_files < <(
+    git ls-files -z -- '*.svh' '*.v' '*.vh'
+)
 if ((${#stale_files[@]} != 0)); then
     printf 'repository-owned HDL files must all use the .sv extension:\n' >&2
     printf '  %s\n' "${stale_files[@]}" >&2
     status=1
 fi
 
-tlpq_isolation_matches=()
-tlpq_isolation_pattern='0x[0-9a-fA-F]+|MSGQ|CMDQ|mailbox_pkg'
-if tlpq_isolation_output=$(
-    grep -nEH "$tlpq_isolation_pattern" src/tlpq/*.sv
+tlpq_business_matches=()
+tlpq_business_pattern='mailbox|msgq|cmdq'
+if tlpq_business_output=$(
+    grep -niEH "$tlpq_business_pattern" src/tlpq/*.sv
 ); then
-    mapfile -t tlpq_isolation_matches <<< "$tlpq_isolation_output"
+    mapfile -t tlpq_business_matches <<< "$tlpq_business_output"
 else
     scan_status=$?
     if ((scan_status != 1)); then
-        printf 'failed to scan TLPQ dependency isolation (exit %d)\n' \
+        printf 'failed to scan TLPQ business isolation (exit %d)\n' \
             "$scan_status" >&2
         exit "$scan_status"
     fi
 fi
-if ((${#tlpq_isolation_matches[@]} != 0)); then
-    printf 'TLPQ register-address or business-library dependencies remain:\n' >&2
-    printf '  %s\n' "${tlpq_isolation_matches[@]}" >&2
+if ((${#tlpq_business_matches[@]} != 0)); then
+    printf 'TLPQ business-library dependencies remain:\n' >&2
+    printf '  %s\n' "${tlpq_business_matches[@]}" >&2
+    status=1
+fi
+
+tlpq_address_matches=()
+tlpq_c_address_pattern='0[xX][0-9a-fA-F]+'
+tlpq_address_identifier='[[:alnum:]_$]*(addr(ess)?|register|reg|mmio|csr|bar)[[:alnum:]_$]*'
+tlpq_sv_hex_literal="([0-9]+[[:space:]]*)?'[sS]?[hH][[:space:]]*[0-9a-fA-F_xXzZ?]+"
+tlpq_semantic_address_pattern="(${tlpq_address_identifier}.*${tlpq_sv_hex_literal}|${tlpq_sv_hex_literal}.*${tlpq_address_identifier})"
+if tlpq_address_output=$(
+    grep -niEH \
+        -e "$tlpq_c_address_pattern" \
+        -e "$tlpq_semantic_address_pattern" \
+        src/tlpq/*.sv
+); then
+    mapfile -t tlpq_address_matches <<< "$tlpq_address_output"
+else
+    scan_status=$?
+    if ((scan_status != 1)); then
+        printf 'failed to scan TLPQ register-address literals (exit %d)\n' \
+            "$scan_status" >&2
+        exit "$scan_status"
+    fi
+fi
+if ((${#tlpq_address_matches[@]} != 0)); then
+    printf 'TLPQ register-address literals remain:\n' >&2
+    printf '  %s\n' "${tlpq_address_matches[@]}" >&2
     status=1
 fi
 
@@ -177,19 +250,25 @@ if ((${#tlpq_codec_definitions[@]} != 0)); then
     status=1
 fi
 
+tracked_sv_files=()
+mapfile -d '' -t tracked_sv_files < <(
+    git ls-files -z -- '*.sv'
+)
+
 all_svh_includes=()
 include_pattern='`include[[:space:]]+"[^"]+\.svh"'
-if all_svh_includes_output=$(
-    find src tb -type f -name '*.sv' \
-        -exec grep -nEH "$include_pattern" {} +
-); then
-    mapfile -t all_svh_includes <<< "$all_svh_includes_output"
-else
-    scan_status=$?
-    if ((scan_status != 1)); then
-        printf 'failed to scan for repository-owned .svh includes (exit %d)\n' \
-            "$scan_status" >&2
-        exit "$scan_status"
+if ((${#tracked_sv_files[@]} != 0)); then
+    if all_svh_includes_output=$(
+        grep -nEH "$include_pattern" "${tracked_sv_files[@]}"
+    ); then
+        mapfile -t all_svh_includes <<< "$all_svh_includes_output"
+    else
+        scan_status=$?
+        if ((scan_status != 1)); then
+            printf 'failed to scan for repository-owned .svh includes (exit %d)\n' \
+                "$scan_status" >&2
+            exit "$scan_status"
+        fi
     fi
 fi
 
@@ -209,17 +288,18 @@ fi
 
 stale_guards=()
 guard_pattern='^[[:space:]]*`(ifndef|define)[[:space:]]+[A-Z0-9_]+_SVH[[:space:]]*$'
-if stale_guards_output=$(
-    find src tb -type f -name '*.sv' \
-        -exec grep -nEH "$guard_pattern" {} +
-); then
-    mapfile -t stale_guards <<< "$stale_guards_output"
-else
-    scan_status=$?
-    if ((scan_status != 1)); then
-        printf 'failed to scan for SVH include guards (exit %d)\n' \
-            "$scan_status" >&2
-        exit "$scan_status"
+if ((${#tracked_sv_files[@]} != 0)); then
+    if stale_guards_output=$(
+        grep -nEH "$guard_pattern" "${tracked_sv_files[@]}"
+    ); then
+        mapfile -t stale_guards <<< "$stale_guards_output"
+    else
+        scan_status=$?
+        if ((scan_status != 1)); then
+            printf 'failed to scan for SVH include guards (exit %d)\n' \
+                "$scan_status" >&2
+            exit "$scan_status"
+        fi
     fi
 fi
 if ((${#stale_guards[@]} != 0)); then
