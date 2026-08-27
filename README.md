@@ -556,6 +556,110 @@ the derived adapter owns register mapping and transport access. An
 adapter-internal transport retry never creates a second GQ publish: every retry
 remains behind the one `write_cmdq_tail()` semantic callback for that publish.
 
+## Bridge PCIe TLPs and operate TLPQ
+
+TLPQ consumes the `pcie_work` submodule at the exact gitlink
+`94930e1d69e7a059cd794eb08c5b2e97aa93dc27`. Initialize submodules before a
+TLPQ build and do not substitute a locally declared `pcie_tl_tlp` or
+`pcie_tl_codec`. For the complete combined build, the compile order is host
+memory; `pcie_tl_if.sv`, the PCIe BDF and device-profile helper packages, and
+`pcie_tl_pkg.sv`; GQ; `mailbox`, `msgq`, `cmdq`, and `tlpq`; then the selected
+test package and `tb_top.sv`.
+
+`tlpq_packet_bridge` uses the pinned PCIe codec and maintains independent
+literal golden vectors for these nine valid packet categories: Configuration
+Type 0 read, Configuration Type 0 write, Configuration Type 1 read,
+Configuration Type 1 write, Memory Read, Memory Write, Message with Data,
+Completion without Data, and Completion with Data. Separate boundary and
+negative checks cover the encoded 1024-DWORD maximum, unsupported formats,
+misaligned/truncated/overlong layouts, inconsistent Fmt/Length values, null
+codec results, and nonzero 3DW padding.
+
+The codec's canonical header order is converted to the DPU four-DWORD header
+window below. Payload DWORDs follow at DPU index 4 in their original order.
+
+| DPU DWORD | 4DW TLP | 3DW TLP |
+| ---: | --- | --- |
+| 0 | Canonical DW3 | `32'h0000_0000` padding |
+| 1 | Canonical DW2 | Canonical DW2 |
+| 2 | Canonical DW1 | Canonical DW1 |
+| 3 | Canonical DW0 | Canonical DW0 |
+| 4 onward | Payload DW0 onward | Payload DW0 onward |
+
+Receive decode requires at least the complete 16-byte DPU header window and an
+exact Fmt/Length-sized buffer. For a 3DW TLP, DWORD 0 is strict zero padding;
+nonzero padding is rejected rather than ignored. Each DWORD is represented in
+the DPU byte buffer least-significant byte first, while conversion to and from
+the canonical PCIe codec preserves the DWORD values shown above.
+
+Each TLPQ RX ring entry is exactly 16 bytes, little-endian, and owns one fresh,
+zero-filled 128-byte receive buffer. The descriptor and owned-buffer contracts
+are:
+
+| Offset | Size | Field | Contract |
+| --- | ---: | --- | --- |
+| `0x00` | 2 | `flags` | Software publishes `AVAIL=1`; hardware completion sets `USED=1` |
+| `0x02` | 2 | `buf_len` | Initially 128; hardware reports the received byte count, which must not exceed 128 |
+| `0x04` | 8 | `buf_addr` | Stable address of the descriptor-owned buffer |
+| `0x0c` | 1 | `host_id`, `tlp_type` | Low and high nibbles of route metadata |
+| `0x0d` | 1 | `primary_bus` | Route metadata written with completion |
+| `0x0e` | 1 | `secondary_bus` | Route metadata written with completion |
+| `0x0f` | 1 | `subordinate_bus` | Route metadata written with completion |
+
+| Owned-buffer property | Value |
+| --- | --- |
+| Allocation size | 128 bytes |
+| Initial contents | All zero |
+| Initial descriptor length | 128 bytes |
+| Completion read length | Hardware-reported `buf_len`, limited to 128 |
+| Ownership | Descriptor/GQ until retirement, reset, or final cleanup |
+| Refill | A fresh descriptor object and a fresh 128-byte allocation |
+
+Host and Switch RX are separate channels with separate depth-32 rings,
+configuration objects, pointer codecs, completion sources, refill profiles,
+descriptors, and owned buffers. Each uses `GQ_RX_EXPLICIT_REFILL`, initially
+posts 31 entries, and explicitly limits each refill publication to one entry
+(`max_refill_batch=1`); neither channel shares progress or storage with the
+other.
+
+The standard RX wait policy is IRQ with adaptive Poll support configured for a
+50 ns minimum, 500 ns maximum, and backoff factor 2. The lost-IRQ watchdog is
+1 us and the RX completion timeout is zero, so an idle receive queue does not
+report an oldest-outstanding timeout. Users may select either fixed or adaptive
+Poll when changing a queue from IRQ mode, but fixed Poll requires equal minimum
+and maximum intervals. A directed 10 ns Poll setting is a test-only override;
+it is not a production TLPQ default.
+
+RX activation is ordered independently for each channel as
+`RESET -> CONFIGURE -> PUBLISH31 -> ENABLE`: reset and semantic register
+configuration complete first, the initial tail value 31 is published only
+after all 31 descriptors are serialized, and enable occurs only after that
+publish returns. Later batch-one refills publish one replacement tail without
+enabling the channel again.
+
+The reusable library deliberately contains no register addresses. User-derived
+RX and TX adapters map the semantic channel operations to project registers,
+RAL, PCIe accesses, or a backdoor. RX implementations provide reset,
+configure, enable, disable/cancellation, tail publish, IRQ wait, and IRQ
+acknowledge callbacks. TX implementations provide ready wait, indexed DWORD
+write, keep write, TUSER host-ID write, and SOP/EOP/valid control callbacks.
+The adapters own Host/Switch address mapping; generic GQ and TLPQ code do not.
+
+TX first encodes the TLP into the DPU DWORD stream, then sends chunks of at most
+16 DWORDs. Every chunk performs its own ready wait before any callback for that
+chunk. Source DWORD traversal remains continuous across chunks, while the
+hardware data-register index restarts at zero for every chunk. `keep[i]` marks
+each valid DWORD in that chunk, TUSER carries the selected host ID, SOP is set
+only on the first chunk, EOP only on the final chunk, and valid is set on every
+committed chunk. The sequence default ready timeout is 1 us; encode failure or
+ready timeout returns `success=0` with a nonempty reason.
+
+Multi-chunk TX is intentionally non-atomic. If a later chunk's ready wait
+times out, every earlier chunk already submitted remains committed; there is
+no rollback. The failure reason includes the failing source DWORD offset, and
+the adapter receives no data, keep, TUSER, control, or subsequent ready
+callbacks for the failed chunk or any later chunk.
+
 ## Run with VCS
 
 On a machine where VCS and the UVM license environment are already loaded:
