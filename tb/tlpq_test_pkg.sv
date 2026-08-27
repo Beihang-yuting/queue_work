@@ -8,6 +8,7 @@ package tlpq_test_pkg;
     import gq_pkg::*;
     import tlpq_pkg::*;
     `include "uvm_macros.svh"
+    `include "host_mem_manager.sv"
 
     class tlpq_pcie_smoke_test extends uvm_test;
         `uvm_component_utils(tlpq_pcie_smoke_test)
@@ -40,6 +41,8 @@ package tlpq_test_pkg;
                 `uvm_error("TLPQ_PCIE", "codec smoke failed")
         endtask
     endclass
+
+    `include "tests/tlpq_desc_test.sv"
 endpackage
 
 `endif

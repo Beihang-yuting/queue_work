@@ -1,0 +1,291 @@
+`ifndef TLPQ_DESC_TEST_SV
+`define TLPQ_DESC_TEST_SV
+
+class tlpq_desc_test extends uvm_test;
+    `uvm_component_utils(tlpq_desc_test)
+
+    function new(string name = "tlpq_desc_test", uvm_component parent = null);
+        super.new(name, parent);
+    endfunction
+
+    function void expect_byte(string field_name, byte actual, byte expected);
+        if (actual !== expected)
+            `uvm_fatal("TLPQ_LAYOUT", $sformatf(
+                "%s: got 0x%02h expected 0x%02h",
+                field_name, actual, expected))
+    endfunction
+
+    function void copy_bytes(input byte source[], ref byte destination[]);
+        destination = new[source.size()];
+        foreach (source[i])
+            destination[i] = source[i];
+    endfunction
+
+    function void expect_bytes_equal(string check_name, input byte actual[],
+                                     input byte expected[]);
+        if (actual.size() != expected.size())
+            `uvm_fatal("TLPQ_STATE", $sformatf(
+                "%s: got size %0d expected %0d", check_name,
+                actual.size(), expected.size()))
+        foreach (expected[i]) begin
+            if (actual[i] !== expected[i])
+                `uvm_fatal("TLPQ_STATE", $sformatf(
+                    "%s: byte %0d got 0x%02h expected 0x%02h",
+                    check_name, i, actual[i], expected[i]))
+        end
+    endfunction
+
+    function tlpq_rx_desc make_desc(string name, host_mem_manager mem);
+        tlpq_rx_desc desc;
+
+        desc = tlpq_rx_desc::type_id::create(name);
+        desc.attach_mem(mem);
+        if (!desc.prepare())
+            `uvm_fatal("TLPQ_PREP", {name, " preparation failed"})
+        if (desc.owned_allocation_count() != 1)
+            `uvm_fatal("TLPQ_OWNER", $sformatf(
+                "%s owns %0d allocations expected 1", name,
+                desc.owned_allocation_count()))
+        return desc;
+    endfunction
+
+    function void check_public_types();
+        tlpq_channel_e channel;
+        tlpq_route_metadata_t metadata;
+
+        channel = TLPQ_HOST;
+        metadata = '0;
+        if (TLPQ_DEPTH != 32 || TLPQ_DESC_BYTES != 16 ||
+            TLPQ_BUFFER_BYTES != 128 || TLPQ_DESC_AVAIL != 16'h0001 ||
+            TLPQ_DESC_USED != 16'h0002 || TLPQ_HOST_QUEUE_ID != 0 ||
+            TLPQ_SWITCH_QUEUE_ID != 1 || channel != TLPQ_HOST ||
+            $bits(metadata) != 32)
+            `uvm_fatal("TLPQ_TYPES", "public TLPQ constants/types changed")
+    endfunction
+
+    function void check_layout_ownership_and_stability();
+        host_mem_manager mem;
+        tlpq_rx_desc first;
+        tlpq_rx_desc second;
+        gq_addr_t first_addr;
+        gq_addr_t second_addr;
+        byte first_buffer[];
+        byte second_buffer[];
+        byte submitted[];
+        byte completion[];
+        byte incomplete[];
+        byte before_reject[];
+        byte corrupted[];
+        byte after_reject[];
+
+        mem = new("layout_mem");
+        mem.init_region(64'h0000_0000_1000_0000,
+                        64'h0000_0000_1000_ffff, MODE_LINEAR, 16);
+        first = make_desc("first", mem);
+        second = make_desc("second", mem);
+        first_addr = first.buf_addr;
+        second_addr = second.buf_addr;
+
+        if (first_addr != 64'h0000_0000_1000_0000 ||
+            second_addr != 64'h0000_0000_1000_0080 ||
+            first_addr == second_addr || first.buf_len != 16'd128 ||
+            second.buf_len != 16'd128)
+            `uvm_fatal("TLPQ_ALLOC",
+                "descriptors do not own distinct exact 128-byte buffers")
+
+        mem.read_mem(first_addr, 128, first_buffer, `__FILE__, `__LINE__);
+        mem.read_mem(second_addr, 128, second_buffer, `__FILE__, `__LINE__);
+        if (first_buffer.size() != 128 || second_buffer.size() != 128)
+            `uvm_fatal("TLPQ_BUFFER", "owned buffer size is not exactly 128")
+        foreach (first_buffer[i]) begin
+            if (first_buffer[i] !== 8'h00 || second_buffer[i] !== 8'h00)
+                `uvm_fatal("TLPQ_BUFFER", $sformatf(
+                    "owned buffer byte %0d was not cleared", i))
+        end
+
+        first.metadata.host_id = 4'h5;
+        first.metadata.tlp_type = 4'ha;
+        first.metadata.primary_bus = 8'hb2;
+        first.metadata.secondary_bus = 8'hc3;
+        first.metadata.subordinate_bus = 8'hd4;
+        first.mark_available(1'b1);
+        first.pack(submitted);
+        if (submitted.size() != 16)
+            `uvm_fatal("TLPQ_LAYOUT", $sformatf(
+                "packed %0d bytes expected 16", submitted.size()))
+
+        expect_byte("flags[7:0]", submitted[0], 8'h01);
+        expect_byte("flags[15:8]", submitted[1], 8'h00);
+        expect_byte("buf_len[7:0]", submitted[2], 8'h80);
+        expect_byte("buf_len[15:8]", submitted[3], 8'h00);
+        expect_byte("buf_addr[7:0]", submitted[4], 8'h00);
+        expect_byte("buf_addr[15:8]", submitted[5], 8'h00);
+        expect_byte("buf_addr[23:16]", submitted[6], 8'h00);
+        expect_byte("buf_addr[31:24]", submitted[7], 8'h10);
+        expect_byte("buf_addr[39:32]", submitted[8], 8'h00);
+        expect_byte("buf_addr[47:40]", submitted[9], 8'h00);
+        expect_byte("buf_addr[55:48]", submitted[10], 8'h00);
+        expect_byte("buf_addr[63:56]", submitted[11], 8'h00);
+        expect_byte("host/type", submitted[12], 8'ha5);
+        expect_byte("primary_bus", submitted[13], 8'hb2);
+        expect_byte("secondary_bus", submitted[14], 8'hc3);
+        expect_byte("subordinate_bus", submitted[15], 8'hd4);
+        if (first.dpu_bytes.size() != 0 || first.decoded_tlp != null)
+            `uvm_fatal("TLPQ_RESULT", "fresh descriptor result slots are dirty")
+
+        copy_bytes(submitted, completion);
+        completion[0] = 8'h03;
+        completion[1] = 8'h00;
+        completion[2] = 8'h2c;
+        completion[3] = 8'h00;
+        completion[12] = 8'he7;
+        completion[13] = 8'h45;
+        completion[14] = 8'h67;
+        completion[15] = 8'h89;
+        if (!first.unpack(completion))
+            `uvm_fatal("TLPQ_MUTABLE",
+                "hardware length/routing writeback was rejected")
+        if (!first.is_complete(1'b0) || first.buf_len != 16'h002c ||
+            first.metadata.host_id != 4'h7 ||
+            first.metadata.tlp_type != 4'he ||
+            first.metadata.primary_bus != 8'h45 ||
+            first.metadata.secondary_bus != 8'h67 ||
+            first.metadata.subordinate_bus != 8'h89 ||
+            first.buf_addr != first_addr)
+            `uvm_fatal("TLPQ_MUTABLE",
+                "writeback fields or stable address decoded incorrectly")
+
+        copy_bytes(completion, incomplete);
+        incomplete[0] = 8'h01;
+        incomplete[2] = 8'h11;
+        incomplete[12] = 8'h34;
+        incomplete[13] = 8'h56;
+        incomplete[14] = 8'h78;
+        incomplete[15] = 8'h9a;
+        if (!first.unpack(incomplete))
+            `uvm_fatal("TLPQ_INCOMPLETE", "mutable incomplete writeback rejected")
+        if (first.is_complete(1'b1))
+            `uvm_fatal("TLPQ_INCOMPLETE", "missing USED completed descriptor")
+
+        first.pack(before_reject);
+        copy_bytes(completion, corrupted);
+        corrupted[4] = corrupted[4] ^ 8'h01;
+        if (first.unpack(corrupted))
+            `uvm_fatal("TLPQ_STABLE", "changed buffer address was accepted")
+        first.pack(after_reject);
+        expect_bytes_equal("rejected address writeback state",
+                           after_reject, before_reject);
+
+        corrupted = new[15];
+        if (first.unpack(corrupted))
+            `uvm_fatal("TLPQ_SIZE", "wrong-size descriptor was accepted")
+        first.pack(after_reject);
+        expect_bytes_equal("rejected wrong-size state",
+                           after_reject, before_reject);
+
+        first.release_owned();
+        first.release_owned();
+        second.release_owned();
+        second.release_owned();
+        if (first.owned_allocation_count() != 0 ||
+            second.owned_allocation_count() != 0)
+            `uvm_fatal("TLPQ_RELEASE", "release retained owned allocations")
+        mem.leak_check(`__FILE__, `__LINE__);
+    endfunction
+
+    task check_generic_completion();
+        host_mem_manager mem;
+        tlpq_rx_desc first;
+        tlpq_rx_desc second;
+        tlpq_completion completion_source;
+        gq_desc_base pending[$];
+        gq_addr_t ring_base;
+        gq_addr_t first_addr;
+        gq_addr_t second_addr;
+        byte first_bytes[];
+        byte second_bytes[];
+        bit valid;
+        int unsigned completed_count;
+
+        mem = new("completion_mem");
+        mem.init_region(64'h0000_0000_2000_0000,
+                        64'h0000_0000_2000_ffff, MODE_LINEAR, 16);
+        ring_base = mem.alloc(2 * 16, 16, `__FILE__, `__LINE__);
+        if (ring_base == '1)
+            `uvm_fatal("TLPQ_COMPLETION", "ring allocation failed")
+        first = make_desc("completion_first", mem);
+        second = make_desc("completion_second", mem);
+        first_addr = first.buf_addr;
+        second_addr = second.buf_addr;
+        first.mark_available(1'b0);
+        second.mark_available(1'b0);
+        first.pack(first_bytes);
+        second.pack(second_bytes);
+
+        first_bytes[0] = 8'h03;
+        first_bytes[2] = 8'h21;
+        first_bytes[12] = 8'hba;
+        first_bytes[13] = 8'h12;
+        first_bytes[14] = 8'h34;
+        first_bytes[15] = 8'h56;
+        second_bytes[2] = 8'h43;
+        second_bytes[12] = 8'hdc;
+        second_bytes[13] = 8'h78;
+        second_bytes[14] = 8'h9a;
+        second_bytes[15] = 8'hbc;
+        mem.write_mem(ring_base, first_bytes, `__FILE__, `__LINE__);
+        mem.write_mem(ring_base + 16, second_bytes, `__FILE__, `__LINE__);
+
+        pending.push_back(first);
+        pending.push_back(second);
+        completion_source = tlpq_completion::type_id::create(
+            "completion_source");
+        completion_source.query_completed(mem, null, ring_base, 0, 2, 16,
+                                          0, pending, valid,
+                                          completed_count);
+        if (!valid || completed_count != 1)
+            `uvm_fatal("TLPQ_COMPLETION", $sformatf(
+                "got valid=%0b count=%0d expected valid=1 count=1",
+                valid, completed_count))
+        if (first.buf_addr != first_addr || second.buf_addr != second_addr ||
+            first.buf_len != 16'h0021 || second.buf_len != 16'h0043 ||
+            first.metadata.host_id != 4'ha ||
+            first.metadata.tlp_type != 4'hb ||
+            first.metadata.primary_bus != 8'h12 ||
+            first.metadata.secondary_bus != 8'h34 ||
+            first.metadata.subordinate_bus != 8'h56 ||
+            second.metadata.host_id != 4'hc ||
+            second.metadata.tlp_type != 4'hd ||
+            second.metadata.primary_bus != 8'h78 ||
+            second.metadata.secondary_bus != 8'h9a ||
+            second.metadata.subordinate_bus != 8'hbc)
+            `uvm_fatal("TLPQ_COMPLETION",
+                "generic writeback did not preserve ownership/decode metadata")
+
+        first.release_owned();
+        second.release_owned();
+        mem.free(ring_base, `__FILE__, `__LINE__);
+        mem.leak_check(`__FILE__, `__LINE__);
+    endtask
+
+    function void check_pointer_vectors();
+        tlpq_ptr_codec codec;
+
+        codec = tlpq_ptr_codec::type_id::create("codec");
+        if (codec.encode_publish(0, 31, 32) != 32'h0000_001f ||
+            codec.encode_publish(31, 32, 32) != 32'h0000_8000 ||
+            codec.encode_publish(32, 64, 32) != 32'h0000_0000)
+            `uvm_fatal("TLPQ_PTR", "bit-15 pointer vectors did not match")
+    endfunction
+
+    task run_phase(uvm_phase phase);
+        phase.raise_objection(this);
+        check_public_types();
+        check_layout_ownership_and_stability();
+        check_pointer_vectors();
+        check_generic_completion();
+        phase.drop_objection(this);
+    endtask
+endclass
+
+`endif
