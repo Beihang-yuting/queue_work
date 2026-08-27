@@ -1,6 +1,25 @@
 `ifndef TLPQ_DESC_TEST_SV
 `define TLPQ_DESC_TEST_SV
 
+class tlpq_alloc_error_catcher extends uvm_report_catcher;
+    `uvm_object_utils(tlpq_alloc_error_catcher)
+
+    int unsigned caught_errors;
+
+    function new(string name = "tlpq_alloc_error_catcher");
+        super.new(name);
+        caught_errors = 0;
+    endfunction
+
+    virtual function action_e catch();
+        if (get_severity() == UVM_ERROR && get_id() == "HOST_MEM") begin
+            caught_errors++;
+            return CAUGHT;
+        end
+        return THROW;
+    endfunction
+endclass
+
 class tlpq_desc_test extends uvm_test;
     `uvm_component_utils(tlpq_desc_test)
 
@@ -193,6 +212,126 @@ class tlpq_desc_test extends uvm_test;
         mem.leak_check(`__FILE__, `__LINE__);
     endfunction
 
+    function void check_prepare_failures_are_one_shot();
+        host_mem_manager prepared_mem;
+        host_mem_manager no_mem_rescue;
+        host_mem_manager small_mem;
+        host_mem_manager alloc_rescue;
+        tlpq_rx_desc prepared_desc;
+        tlpq_rx_desc no_mem_desc;
+        tlpq_rx_desc alloc_failed_desc;
+        tlpq_alloc_error_catcher catcher;
+        gq_addr_t prepared_addr;
+        byte prepared_state[];
+        byte prepared_after[];
+        byte prepared_buffer[];
+        byte prepared_buffer_after[];
+        byte no_mem_state[];
+        byte no_mem_after[];
+        byte alloc_failed_state[];
+        byte alloc_failed_after[];
+
+        prepared_mem = new("reprepare_mem");
+        prepared_mem.init_region(64'h0000_0000_3000_0000,
+                                 64'h0000_0000_3000_0fff,
+                                 MODE_LINEAR, 16);
+        prepared_desc = make_desc("reprepare_desc", prepared_mem);
+        prepared_desc.metadata.host_id = 4'h6;
+        prepared_desc.metadata.tlp_type = 4'h9;
+        prepared_desc.metadata.primary_bus = 8'h12;
+        prepared_desc.metadata.secondary_bus = 8'h34;
+        prepared_desc.metadata.subordinate_bus = 8'h56;
+        prepared_desc.mark_available(1'b0);
+        prepared_addr = prepared_desc.buf_addr;
+        prepared_desc.pack(prepared_state);
+        prepared_mem.read_mem(prepared_addr, 128, prepared_buffer,
+                              `__FILE__, `__LINE__);
+        if (prepared_desc.prepare())
+            `uvm_fatal("TLPQ_REPEAT", "second preparation was accepted")
+        prepared_desc.pack(prepared_after);
+        prepared_mem.read_mem(prepared_addr, 128, prepared_buffer_after,
+                              `__FILE__, `__LINE__);
+        if (prepared_desc.owned_allocation_count() != 1 ||
+            prepared_desc.buf_addr != prepared_addr)
+            `uvm_fatal("TLPQ_REPEAT",
+                "second preparation changed address or ownership")
+        expect_bytes_equal("second prepare descriptor state",
+                           prepared_after, prepared_state);
+        expect_bytes_equal("second prepare buffer state",
+                           prepared_buffer_after, prepared_buffer);
+        prepared_desc.release_owned();
+        prepared_mem.leak_check(`__FILE__, `__LINE__);
+
+        no_mem_rescue = new("no_mem_rescue");
+        no_mem_rescue.init_region(64'h0000_0000_3100_0000,
+                                  64'h0000_0000_3100_0fff,
+                                  MODE_LINEAR, 16);
+        no_mem_desc = tlpq_rx_desc::type_id::create("no_mem_desc");
+        no_mem_desc.pack(no_mem_state);
+        if (no_mem_desc.prepare())
+            `uvm_fatal("TLPQ_NO_MEM",
+                "preparation without attached memory succeeded")
+        no_mem_desc.attach_mem(no_mem_rescue);
+        if (no_mem_desc.prepare())
+            `uvm_fatal("TLPQ_NO_MEM",
+                "memory-less failure was retried after attaching memory")
+        no_mem_desc.pack(no_mem_after);
+        if (no_mem_desc.owned_allocation_count() != 0 ||
+            no_mem_desc.buf_addr != 0 || no_mem_desc.buf_len != 0 ||
+            no_mem_desc.flags != 0 || no_mem_desc.metadata != '0 ||
+            no_mem_desc.dpu_bytes.size() != 0 ||
+            no_mem_desc.decoded_tlp != null)
+            `uvm_fatal("TLPQ_NO_MEM",
+                "rejected memory-less preparation changed descriptor state")
+        expect_bytes_equal("memory-less prepare state",
+                           no_mem_after, no_mem_state);
+        no_mem_desc.release_owned();
+        no_mem_rescue.leak_check(`__FILE__, `__LINE__);
+
+        small_mem = new("small_mem");
+        small_mem.init_region(64'h0000_0000_3200_0000,
+                              64'h0000_0000_3200_003f,
+                              MODE_LINEAR, 16);
+        alloc_rescue = new("alloc_rescue");
+        alloc_rescue.init_region(64'h0000_0000_3300_0000,
+                                 64'h0000_0000_3300_0fff,
+                                 MODE_LINEAR, 16);
+        alloc_failed_desc = tlpq_rx_desc::type_id::create(
+            "alloc_failed_desc");
+        alloc_failed_desc.attach_mem(small_mem);
+        alloc_failed_desc.pack(alloc_failed_state);
+        catcher = tlpq_alloc_error_catcher::type_id::create(
+            "alloc_error_catcher");
+        uvm_report_cb::add(null, catcher);
+        if (alloc_failed_desc.prepare())
+            `uvm_fatal("TLPQ_ALLOC_FAIL",
+                "preparation succeeded without 128 bytes")
+        uvm_report_cb::delete(null, catcher);
+        if (catcher.caught_errors != 1)
+            `uvm_fatal("TLPQ_ALLOC_FAIL", $sformatf(
+                "caught %0d allocation errors expected 1",
+                catcher.caught_errors))
+        alloc_failed_desc.attach_mem(alloc_rescue);
+        if (alloc_failed_desc.prepare())
+            `uvm_fatal("TLPQ_ALLOC_FAIL",
+                "allocation failure was retried with a larger allocator")
+        alloc_failed_desc.pack(alloc_failed_after);
+        if (alloc_failed_desc.owned_allocation_count() != 0 ||
+            alloc_failed_desc.buf_addr != 0 ||
+            alloc_failed_desc.buf_len != 0 ||
+            alloc_failed_desc.flags != 0 ||
+            alloc_failed_desc.metadata != '0 ||
+            alloc_failed_desc.dpu_bytes.size() != 0 ||
+            alloc_failed_desc.decoded_tlp != null)
+            `uvm_fatal("TLPQ_ALLOC_FAIL",
+                "allocation failure changed descriptor state or ownership")
+        expect_bytes_equal("allocation-failed prepare state",
+                           alloc_failed_after, alloc_failed_state);
+        alloc_failed_desc.release_owned();
+        small_mem.leak_check(`__FILE__, `__LINE__);
+        alloc_rescue.leak_check(`__FILE__, `__LINE__);
+    endfunction
+
     task check_generic_completion();
         host_mem_manager mem;
         tlpq_rx_desc first;
@@ -270,18 +409,32 @@ class tlpq_desc_test extends uvm_test;
 
     function void check_pointer_vectors();
         tlpq_ptr_codec codec;
+        string reason;
 
         codec = tlpq_ptr_codec::type_id::create("codec");
         if (codec.encode_publish(0, 31, 32) != 32'h0000_001f ||
             codec.encode_publish(31, 32, 32) != 32'h0000_8000 ||
             codec.encode_publish(32, 64, 32) != 32'h0000_0000)
             `uvm_fatal("TLPQ_PTR", "bit-15 pointer vectors did not match")
+        if (codec.validate_depth(0, reason) || reason == "")
+            `uvm_fatal("TLPQ_PTR_VALIDATE",
+                "zero depth was accepted or lacked a rejection reason")
+        if (!codec.validate_depth(32, reason) || reason != "")
+            `uvm_fatal("TLPQ_PTR_VALIDATE", $sformatf(
+                "TLPQ depth 32 was rejected: %s", reason))
+        if (!codec.validate_depth(32768, reason) || reason != "")
+            `uvm_fatal("TLPQ_PTR_VALIDATE", $sformatf(
+                "15-bit maximum depth was rejected: %s", reason))
+        if (codec.validate_depth(32769, reason) || reason == "")
+            `uvm_fatal("TLPQ_PTR_VALIDATE",
+                "depth above 15-bit maximum was accepted or lacked a reason")
     endfunction
 
     task run_phase(uvm_phase phase);
         phase.raise_objection(this);
         check_public_types();
         check_layout_ownership_and_stability();
+        check_prepare_failures_are_one_shot();
         check_pointer_vectors();
         check_generic_completion();
         phase.drop_objection(this);
