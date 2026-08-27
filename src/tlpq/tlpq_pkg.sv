@@ -8,6 +8,7 @@ package tlpq_pkg;
     `include "uvm_macros.svh"
 
     `include "tlpq_types.sv"
+    `include "tlpq_packet_bridge.sv"
     `include "tlpq_rx_desc.sv"
     `include "tlpq_completion.sv"
     `include "tlpq_ptr_codec.sv"

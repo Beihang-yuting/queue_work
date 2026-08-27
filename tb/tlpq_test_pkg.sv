@@ -43,6 +43,7 @@ package tlpq_test_pkg;
     endclass
 
     `include "tests/tlpq_desc_test.sv"
+    `include "tests/tlpq_bridge_test.sv"
 endpackage
 
 `endif
