@@ -3,11 +3,15 @@
 
 virtual class tlpq_tx_reg_adapter extends uvm_object;
     protected tlpq_packet_bridge packet_bridge;
+    protected semaphore host_send_lock;
+    protected semaphore switch_send_lock;
 
     function new(string name = "tlpq_tx_reg_adapter");
         super.new(name);
         packet_bridge = tlpq_packet_bridge::type_id::create(
             {name, "_packet_bridge"});
+        host_send_lock = new(1);
+        switch_send_lock = new(1);
     endfunction
 
     pure virtual task wait_tlpq_tx_ready(
@@ -25,7 +29,7 @@ virtual class tlpq_tx_reg_adapter extends uvm_object;
     pure virtual task write_tlpq_tx_ctrl(
         tlpq_channel_e channel, bit sop, bit eop, bit valid);
 
-    task send_tlp(
+    protected task send_tlp_locked(
         tlpq_channel_e channel, bit [2:0] host_id,
         pcie_tl_tlp tlp, time ready_timeout,
         output bit success, output string reason);
@@ -81,6 +85,38 @@ virtual class tlpq_tx_reg_adapter extends uvm_object;
 
         success = 1;
         reason = "";
+    endtask
+
+    task send_tlp(
+        tlpq_channel_e channel, bit [2:0] host_id,
+        pcie_tl_tlp tlp, time ready_timeout,
+        output bit success, output string reason);
+        semaphore send_lock;
+
+        success = 0;
+        reason = "";
+        case (channel)
+            TLPQ_HOST:   send_lock = host_send_lock;
+            TLPQ_SWITCH: send_lock = switch_send_lock;
+            default: begin
+                reason = $sformatf("invalid TLPQ TX channel %0d",
+                                   int'(channel));
+                return;
+            end
+        endcase
+        if (send_lock == null) begin
+            reason = $sformatf("TLPQ TX channel %0d lock is not configured",
+                               int'(channel));
+            return;
+        end
+
+        // One channel's ready/data/keep/TUSER/control registers form one
+        // transaction stream.  Hold its lock from encode through the final
+        // control write, while the other channel remains independent.
+        send_lock.get(1);
+        send_tlp_locked(channel, host_id, tlp, ready_timeout,
+                        success, reason);
+        send_lock.put(1);
     endtask
 endclass
 

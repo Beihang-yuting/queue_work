@@ -327,6 +327,141 @@ class tlpq_tx_test extends uvm_test;
              "for HOST and SWITCH callback streams"}, UVM_LOW)
     endtask
 
+    // Mutation caught: removing the per-channel transaction lock allows the
+    // second Host send to enter WAIT and commit while the first is paused.
+    task check_same_channel_serialization();
+        bit [31:0] first_payload[];
+        bit [31:0] second_payload[];
+        bit [31:0] expected_words[];
+        int unsigned expected_indices[];
+        bit [15:0] expected_keep[];
+        bit [2:0] expected_tuser[];
+        tlpq_mock_tx_ctrl_t expected_ctrl[];
+        string expected_event_kind[];
+        tlpq_tx_sequence first_seq;
+        tlpq_tx_sequence second_seq;
+        bit first_done;
+        bit second_done;
+        int host_key;
+
+        host_key = int'(TLPQ_HOST);
+        first_payload = '{32'ha0a0_0001};
+        second_payload = '{32'hb0b0_0002};
+        expected_words = '{32'h0000_0000, 32'h0000_6000,
+                           32'haaaa_0aff, 32'h4000_0001,
+                           32'ha0a0_0001,
+                           32'h0000_0000, 32'h0000_7000,
+                           32'hbbbb_0bff, 32'h4000_0001,
+                           32'hb0b0_0002};
+        expected_indices = '{0,1,2,3,4, 0,1,2,3,4};
+        expected_keep = '{16'h001f, 16'h001f};
+        expected_tuser = '{3'h1, 3'h2};
+        expected_ctrl = '{{sop:1, eop:1, valid:1},
+                          '{sop:1, eop:1, valid:1}};
+        expected_event_kind = '{"WAIT", "DATA", "DATA", "DATA", "DATA",
+                                "DATA", "KEEP", "TUSER", "CTRL",
+                                "WAIT", "DATA", "DATA", "DATA", "DATA",
+                                "DATA", "KEEP", "TUSER", "CTRL"};
+
+        adapter.reset_channel(TLPQ_HOST);
+        adapter.block_ready_wait(TLPQ_HOST, 1);
+        first_done = 0;
+        second_done = 0;
+        fork
+            begin
+                run_tx("serialized_first", TLPQ_HOST, 3'h1,
+                    make_mem_write("serialized_first_tlp", 16'haaaa,
+                                   10'h00a, 32'h0000_6000,
+                                   first_payload),
+                    100ns, first_seq);
+                first_done = 1;
+            end
+        join_none
+        wait (adapter.ready_wait_count[host_key] == 1);
+        fork
+            begin
+                run_tx("serialized_second", TLPQ_HOST, 3'h2,
+                    make_mem_write("serialized_second_tlp", 16'hbbbb,
+                                   10'h00b, 32'h0000_7000,
+                                   second_payload),
+                    100ns, second_seq);
+                second_done = 1;
+            end
+        join_none
+        #(1ns);
+        if (adapter.ready_wait_count[host_key] != 1 ||
+            adapter.data_word[host_key].size() != 0 ||
+            adapter.ctrl_write[host_key].size() != 0 || second_done)
+            `uvm_fatal("TLPQ_TX_SAME_CHANNEL_INTERLEAVE",
+                {"second Host transaction entered the register stream while ",
+                 "the first transaction was paused"})
+        adapter.release_ready_wait(TLPQ_HOST);
+        wait (first_done && second_done);
+        expect_success("serialized first Host", first_seq);
+        expect_success("serialized second Host", second_seq);
+        expect_trace("same-channel serialized Host", TLPQ_HOST,
+                     expected_words, expected_indices, expected_keep,
+                     expected_tuser, expected_ctrl, expected_event_kind, 2);
+    endtask
+
+    // Mutation caught: replacing independent Host/Switch locks with one global
+    // lock prevents Switch progress while a Host ready wait is blocked.
+    task check_cross_channel_concurrency();
+        bit [31:0] host_payload[];
+        bit [31:0] switch_payload[];
+        tlpq_tx_sequence host_seq;
+        tlpq_tx_sequence switch_seq;
+        bit host_done;
+        bit switch_done;
+        int host_key;
+        int switch_key;
+
+        host_key = int'(TLPQ_HOST);
+        switch_key = int'(TLPQ_SWITCH);
+        host_payload = '{32'hc0c0_0003};
+        switch_payload = '{32'hd0d0_0004};
+        adapter.reset_channel(TLPQ_HOST);
+        adapter.reset_channel(TLPQ_SWITCH);
+        adapter.block_ready_wait(TLPQ_HOST, 1);
+        host_done = 0;
+        switch_done = 0;
+        fork
+            begin
+                run_tx("concurrent_host", TLPQ_HOST, 3'h3,
+                    make_mem_write("concurrent_host_tlp", 16'hcccc,
+                                   10'h00c, 32'h0000_8000,
+                                   host_payload),
+                    100ns, host_seq);
+                host_done = 1;
+            end
+        join_none
+        wait (adapter.ready_wait_count[host_key] == 1);
+        fork
+            begin
+                run_tx("concurrent_switch", TLPQ_SWITCH, 3'h4,
+                    make_mem_write("concurrent_switch_tlp", 16'hdddd,
+                                   10'h00d, 32'h0000_9000,
+                                   switch_payload),
+                    100ns, switch_seq);
+                switch_done = 1;
+            end
+        join_none
+        #(1ns);
+        if (!switch_done)
+            `uvm_fatal("TLPQ_TX_CROSS_CHANNEL_BLOCK",
+                "blocked Host transaction prevented Switch progress")
+        if (host_done || adapter.data_word[host_key].size() != 0 ||
+            !switch_seq.success ||
+            adapter.ready_wait_count[switch_key] != 1 ||
+            adapter.ctrl_write[switch_key].size() != 1)
+            `uvm_fatal("TLPQ_TX_CROSS_CHANNEL_CONCURRENCY",
+                "Switch did not complete independently of the blocked Host")
+        adapter.release_ready_wait(TLPQ_HOST);
+        wait (host_done);
+        expect_success("concurrent Host", host_seq);
+        expect_success("concurrent Switch", switch_seq);
+    endtask
+
     // Mutation caught: writing data before the selected channel reports ready.
     task check_delayed_ready();
         bit [31:0] payload[];
@@ -387,6 +522,96 @@ class tlpq_tx_test extends uvm_test;
              "data/keep/tuser/control writes=0"}, UVM_LOW)
     endtask
 
+    // Mutations caught: rolling back an already committed first chunk,
+    // writing any part of a timed-out second chunk, reporting the wrong
+    // source offset, or retaining the channel lock after failure.
+    task check_second_chunk_timeout_contract();
+        bit [31:0] payload[];
+        bit [31:0] next_payload[];
+        bit [31:0] expected_prefix[];
+        tlpq_tx_sequence partial_seq;
+        tlpq_tx_sequence next_seq;
+        bit next_done;
+        int host_key;
+
+        host_key = int'(TLPQ_HOST);
+        payload = '{32'h6000_0000, 32'h6000_0001, 32'h6000_0002,
+                    32'h6000_0003, 32'h6000_0004, 32'h6000_0005,
+                    32'h6000_0006, 32'h6000_0007, 32'h6000_0008,
+                    32'h6000_0009, 32'h6000_000a, 32'h6000_000b,
+                    32'h6000_000c, 32'h6000_000d, 32'h6000_000e,
+                    32'h6000_000f};
+        expected_prefix = '{32'h0000_0000, 32'h0000_a000,
+                            32'heeee_0eff, 32'h4000_0010,
+                            32'h6000_0000, 32'h6000_0001,
+                            32'h6000_0002, 32'h6000_0003,
+                            32'h6000_0004, 32'h6000_0005,
+                            32'h6000_0006, 32'h6000_0007,
+                            32'h6000_0008, 32'h6000_0009,
+                            32'h6000_000a, 32'h6000_000b};
+        adapter.reset_channel(TLPQ_HOST);
+        adapter.script_ready_result(TLPQ_HOST, 1'b1);
+        adapter.script_ready_result(TLPQ_HOST, 1'b0);
+        run_tx("second_chunk_timeout", TLPQ_HOST, 3'h5,
+               make_mem_write("second_chunk_timeout_tlp", 16'heeee,
+                              10'h00e, 32'h0000_a000, payload),
+               25ns, partial_seq);
+        if (partial_seq.success ||
+            partial_seq.reason !=
+                "TLPQ TX channel 0 ready timeout at DWORD 16" ||
+            adapter.ready_wait_count[host_key] != 2 ||
+            adapter.data_word[host_key].size() != 16 ||
+            adapter.keep_write[host_key].size() != 1 ||
+            adapter.keep_write[host_key][0] != 16'hffff ||
+            adapter.tuser_write[host_key].size() != 1 ||
+            adapter.tuser_write[host_key][0] != 3'h5 ||
+            adapter.ctrl_write[host_key].size() != 1 ||
+            !adapter.ctrl_write[host_key][0].sop ||
+            adapter.ctrl_write[host_key][0].eop ||
+            !adapter.ctrl_write[host_key][0].valid)
+            `uvm_fatal("TLPQ_TX_PARTIAL_TIMEOUT",
+                "second-chunk timeout violated the committed-prefix contract")
+        foreach (expected_prefix[i]) begin
+            if (adapter.data_word[host_key][i] !== expected_prefix[i] ||
+                adapter.data_word_index[host_key][i] != i)
+                `uvm_fatal("TLPQ_TX_PARTIAL_PREFIX",
+                    $sformatf("committed prefix DWORD[%0d] diverged", i))
+        end
+        if (adapter.event_kind[host_key].size() != 21 ||
+            adapter.event_kind[host_key][19] != "CTRL" ||
+            adapter.event_kind[host_key][20] != "WAIT")
+            `uvm_fatal("TLPQ_TX_FAILED_CHUNK_WRITES",
+                "failed second chunk performed callbacks after its ready wait")
+
+        next_payload = '{32'h7000_0001};
+        next_done = 0;
+        fork
+            begin
+                run_tx("after_partial_timeout", TLPQ_HOST, 3'h6,
+                    make_mem_write("after_partial_timeout_tlp", 16'hffff,
+                                   10'h00f, 32'h0000_b000,
+                                   next_payload),
+                    25ns, next_seq);
+                next_done = 1;
+            end
+            begin
+                #(100ns);
+                if (!next_done)
+                    `uvm_fatal("TLPQ_TX_LOCK_RELEASE",
+                        "channel lock remained held after second-chunk timeout")
+            end
+        join_any
+        disable fork;
+        expect_success("send after partial timeout", next_seq);
+        if (adapter.event_kind[host_key][21] != "WAIT" ||
+            adapter.data_word[host_key].size() != 21 ||
+            adapter.keep_write[host_key].size() != 2 ||
+            adapter.tuser_write[host_key].size() != 2 ||
+            adapter.ctrl_write[host_key].size() != 2)
+            `uvm_fatal("TLPQ_TX_POST_TIMEOUT_TRACE",
+                "next transaction did not follow the failed wait cleanly")
+    endtask
+
     // Mutation caught: invoking any register callback after encode rejects null.
     task check_encode_failure();
         tlpq_tx_sequence tx_seq;
@@ -406,8 +631,11 @@ class tlpq_tx_test extends uvm_test;
         check_12_dword_host_trace();
         check_20_dword_switch_trace();
         check_channel_isolation();
+        check_same_channel_serialization();
+        check_cross_channel_concurrency();
         check_delayed_ready();
         check_ready_timeout();
+        check_second_chunk_timeout_contract();
         check_encode_failure();
         phase.drop_objection(this);
     endtask
