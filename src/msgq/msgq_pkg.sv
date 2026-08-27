@@ -15,6 +15,9 @@ package msgq_pkg;
     `include "msgq_mac_age_entry.sv"
     `include "msgq_1588_entry.sv"
     `include "msgq_completion.sv"
+    `include "msgq_refill_profile.sv"
+    `include "msgq_sequences.sv"
+    `include "msgq_env.sv"
 endpackage
 
 `endif
