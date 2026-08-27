@@ -123,7 +123,41 @@ class tlpq_rx_desc extends gq_desc_base;
     endfunction
 
     virtual function bit parse_completion();
-        return 0;
+        byte copied_bytes[];
+        pcie_tl_tlp parsed_tlp;
+        tlpq_packet_bridge bridge;
+        string reason;
+
+        decoded_tlp = null;
+        if (!prepared || !is_complete(1'b0))
+            return 0;
+        if (buf_addr != prepared_buf_addr || buf_len > TLPQ_BUFFER_BYTES)
+            return 0;
+        if (prepared_mem == null || prepared_buf_addr == '1)
+            return 0;
+
+        if (buf_len == 0) begin
+            copied_bytes = new[0];
+        end else begin
+            prepared_mem.read_mem(prepared_buf_addr, buf_len, copied_bytes,
+                                  `__FILE__, `__LINE__);
+            if (copied_bytes.size() != buf_len)
+                return 0;
+        end
+
+        dpu_bytes = new[copied_bytes.size()];
+        foreach (copied_bytes[i])
+            dpu_bytes[i] = copied_bytes[i];
+
+        bridge = tlpq_packet_bridge::type_id::create(
+            {get_name(), "_packet_bridge"});
+        if (bridge == null)
+            return 0;
+        if (!bridge.decode_tlp(dpu_bytes, parsed_tlp, reason))
+            return 0;
+
+        decoded_tlp = parsed_tlp;
+        return 1;
     endfunction
 endclass
 

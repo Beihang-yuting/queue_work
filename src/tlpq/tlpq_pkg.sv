@@ -10,6 +10,7 @@ package tlpq_pkg;
     `include "tlpq_types.sv"
     `include "tlpq_packet_bridge.sv"
     `include "tlpq_rx_desc.sv"
+    `include "tlpq_refill_profile.sv"
     `include "tlpq_completion.sv"
     `include "tlpq_ptr_codec.sv"
 endpackage

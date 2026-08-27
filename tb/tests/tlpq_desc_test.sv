@@ -54,6 +54,21 @@ class tlpq_desc_test extends uvm_test;
         end
     endfunction
 
+    function void expect_dpu_bytes_equal(string check_name,
+                                         input bit [7:0] actual[],
+                                         input byte expected[]);
+        if (actual.size() != expected.size())
+            `uvm_fatal("TLPQ_PARSE_RAW", $sformatf(
+                "%s: got size %0d expected %0d", check_name,
+                actual.size(), expected.size()))
+        foreach (expected[i]) begin
+            if (actual[i] !== expected[i])
+                `uvm_fatal("TLPQ_PARSE_RAW", $sformatf(
+                    "%s: byte %0d got 0x%02h expected 0x%02h",
+                    check_name, i, actual[i], expected[i]))
+        end
+    endfunction
+
     function tlpq_rx_desc make_desc(string name, host_mem_manager mem);
         tlpq_rx_desc desc;
 
@@ -332,6 +347,191 @@ class tlpq_desc_test extends uvm_test;
         alloc_rescue.leak_check(`__FILE__, `__LINE__);
     endfunction
 
+    // Mutations caught: skipping the packet bridge, reading the advertised
+    // capacity instead of completed buf_len, retaining a decoded object after
+    // a bad length/layout, or parsing a rejected stable-address writeback.
+    function void check_descriptor_completion_parsing();
+        host_mem_manager mem;
+        tlpq_rx_desc desc;
+        tlpq_rx_desc stable_desc;
+        pcie_tl_mem_tlp decoded_mem;
+        gq_addr_t desc_addr;
+        byte submitted[];
+        byte completion[];
+        byte malformed[];
+        byte short_layout[];
+        byte stable_submitted[];
+        byte stable_completion[];
+        byte golden[] = '{8'h80, 8'h77, 8'h66, 8'h55,
+                          8'h44, 8'h33, 8'h22, 8'h11,
+                          8'hc3, 8'h9a, 8'h78, 8'h56,
+                          8'h02, 8'h00, 8'h00, 8'h20};
+
+        mem = new("parse_mem");
+        mem.init_region(64'h0000_0000_4000_0000,
+                        64'h0000_0000_4000_ffff, MODE_LINEAR, 16);
+        desc = make_desc("parse_desc", mem);
+        desc_addr = desc.buf_addr;
+        mem.write_mem(desc_addr, golden, `__FILE__, `__LINE__);
+
+        desc.metadata.host_id = 4'h1;
+        desc.metadata.tlp_type = 4'h2;
+        desc.metadata.primary_bus = 8'h03;
+        desc.metadata.secondary_bus = 8'h04;
+        desc.metadata.subordinate_bus = 8'h05;
+        desc.mark_available(1'b0);
+        desc.pack(submitted);
+        copy_bytes(submitted, completion);
+        completion[0] = 8'h03;
+        completion[2] = 8'h10;
+        completion[3] = 8'h00;
+        completion[12] = 8'he7;
+        completion[13] = 8'h45;
+        completion[14] = 8'h67;
+        completion[15] = 8'h89;
+        if (!desc.unpack(completion) || !desc.parse_completion())
+            `uvm_fatal("TLPQ_PARSE_VALID",
+                "valid completed descriptor did not parse")
+        expect_dpu_bytes_equal("valid completion raw bytes",
+                               desc.dpu_bytes, golden);
+        if (!$cast(decoded_mem, desc.decoded_tlp) || decoded_mem == null ||
+            decoded_mem.kind != TLP_MEM_RD ||
+            decoded_mem.fmt != FMT_4DW_NO_DATA ||
+            decoded_mem.type_f != TLP_TYPE_MEM_RD ||
+            decoded_mem.length != 10'd2 ||
+            decoded_mem.requester_id != 16'h5678 ||
+            decoded_mem.tag[7:0] != 8'h9a ||
+            decoded_mem.addr != 64'h1122_3344_5566_7780 ||
+            !decoded_mem.is_64bit || decoded_mem.first_be != 4'h3 ||
+            decoded_mem.last_be != 4'hc ||
+            desc.metadata.host_id != 4'h7 ||
+            desc.metadata.tlp_type != 4'he ||
+            desc.metadata.primary_bus != 8'h45 ||
+            desc.metadata.secondary_bus != 8'h67 ||
+            desc.metadata.subordinate_bus != 8'h89)
+            `uvm_fatal("TLPQ_PARSE_VALID",
+                "raw completion, decoded TLP, or routing metadata changed")
+
+        copy_bytes(golden, malformed);
+        malformed[15] = 8'he0;
+        mem.write_mem(desc_addr, malformed, `__FILE__, `__LINE__);
+        if (desc.parse_completion())
+            `uvm_fatal("TLPQ_PARSE_CODEC",
+                "unsupported PCIe Fmt decoded successfully")
+        expect_dpu_bytes_equal("malformed completion raw bytes",
+                               desc.dpu_bytes, malformed);
+        if (desc.decoded_tlp != null)
+            `uvm_fatal("TLPQ_PARSE_CODEC",
+                "codec failure retained a decoded object")
+
+        short_layout = new[15];
+        for (int unsigned i = 0; i < short_layout.size(); i++)
+            short_layout[i] = golden[i];
+        mem.write_mem(desc_addr, short_layout, `__FILE__, `__LINE__);
+        completion[2] = 8'h0f;
+        completion[3] = 8'h00;
+        if (!desc.unpack(completion) || desc.parse_completion())
+            `uvm_fatal("TLPQ_PARSE_LAYOUT",
+                "short DPU layout parsed successfully")
+        expect_dpu_bytes_equal("short completion raw bytes",
+                               desc.dpu_bytes, short_layout);
+        if (desc.decoded_tlp != null)
+            `uvm_fatal("TLPQ_PARSE_LAYOUT",
+                "layout failure retained a decoded object")
+
+        completion[2] = 8'h81;
+        completion[3] = 8'h00;
+        if (!desc.unpack(completion) || desc.parse_completion())
+            `uvm_fatal("TLPQ_PARSE_LENGTH",
+                "completion length beyond the owned buffer was accepted")
+        expect_dpu_bytes_equal("length failure preserves prior raw bytes",
+                               desc.dpu_bytes, short_layout);
+        if (desc.decoded_tlp != null)
+            `uvm_fatal("TLPQ_PARSE_LENGTH",
+                "length failure retained a decoded object")
+
+        stable_desc = make_desc("stable_parse_desc", mem);
+        mem.write_mem(stable_desc.buf_addr, golden, `__FILE__, `__LINE__);
+        stable_desc.mark_available(1'b0);
+        stable_desc.pack(stable_submitted);
+        copy_bytes(stable_submitted, stable_completion);
+        stable_completion[0] = 8'h03;
+        stable_completion[2] = 8'h10;
+        stable_completion[4] = stable_completion[4] ^ 8'h01;
+        if (stable_desc.unpack(stable_completion))
+            `uvm_fatal("TLPQ_PARSE_STABLE",
+                "changed owned-buffer address was accepted")
+        if (stable_desc.parse_completion() ||
+            stable_desc.dpu_bytes.size() != 0 ||
+            stable_desc.decoded_tlp != null)
+            `uvm_fatal("TLPQ_PARSE_STABLE",
+                "rejected stable address produced raw or decoded output")
+
+        desc.release_owned();
+        stable_desc.release_owned();
+        mem.leak_check(`__FILE__, `__LINE__);
+    endfunction
+
+    // Mutations caught: any non-31/30/31/1/restart default, descriptor reuse,
+    // buffer reuse after normal GQ preparation, or selecting auto-recycle.
+    function void check_refill_profile();
+        uvm_object profile_object;
+        gq_refill_profile profile;
+        gq_desc_base first_base;
+        gq_desc_base second_base;
+        tlpq_rx_desc first;
+        tlpq_rx_desc second;
+        host_mem_manager mem;
+        gq_queue_cfg queue_cfg;
+        string reason;
+
+        profile_object = uvm_factory::get().create_object_by_name(
+            "tlpq_refill_profile", get_full_name(), "profile");
+        if (!$cast(profile, profile_object) || profile == null)
+            `uvm_fatal("TLPQ_REFILL_TYPE",
+                "tlpq_refill_profile is missing or not a GQ refill profile")
+        if (profile.initial_post_count != 31 ||
+            profile.low_watermark != 30 ||
+            profile.high_watermark != 31 ||
+            profile.max_refill_batch != 1 ||
+            !profile.restart_after_reset ||
+            !profile.validate(TLPQ_DEPTH, reason))
+            `uvm_fatal("TLPQ_REFILL_DEFAULT", $sformatf(
+                "31-entry batch-one defaults are invalid: %s", reason))
+
+        first_base = profile.create_desc(9, 64'h0000_0001_0000_0002);
+        second_base = profile.create_desc(9, 64'h0000_0001_0000_0002);
+        if (!$cast(first, first_base) || !$cast(second, second_base) ||
+            first == null || second == null || first == second)
+            `uvm_fatal("TLPQ_REFILL_CREATE",
+                "create_desc did not return fresh TLPQ RX descriptors")
+        if (first.owned_allocation_count() != 0 ||
+            second.owned_allocation_count() != 0)
+            `uvm_fatal("TLPQ_REFILL_PREP",
+                "profile allocated buffers before normal GQ preparation")
+
+        mem = new("refill_mem");
+        mem.init_region(64'h0000_0000_5000_0000,
+                        64'h0000_0000_5000_ffff, MODE_LINEAR, 16);
+        first.attach_mem(mem);
+        second.attach_mem(mem);
+        if (!first.prepare() || !second.prepare() ||
+            first.owned_allocation_count() != 1 ||
+            second.owned_allocation_count() != 1 ||
+            first.buf_addr == second.buf_addr)
+            `uvm_fatal("TLPQ_REFILL_OWNER",
+                "prepared refill descriptors do not own distinct buffers")
+
+        queue_cfg = gq_queue_cfg::type_id::create("queue_cfg");
+        if (queue_cfg.rx_slot_mode != GQ_RX_EXPLICIT_REFILL)
+            `uvm_fatal("TLPQ_REFILL_MODE",
+                "TLPQ refill requires explicit-refill queue ownership")
+
+        first.release_owned();
+        second.release_owned();
+        mem.leak_check(`__FILE__, `__LINE__);
+    endfunction
+
     task check_generic_completion();
         host_mem_manager mem;
         tlpq_rx_desc first;
@@ -435,6 +635,8 @@ class tlpq_desc_test extends uvm_test;
         check_public_types();
         check_layout_ownership_and_stability();
         check_prepare_failures_are_one_shot();
+        check_refill_profile();
+        check_descriptor_completion_parsing();
         check_pointer_vectors();
         check_generic_completion();
         phase.drop_objection(this);
