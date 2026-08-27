@@ -549,6 +549,79 @@ class tlpq_bridge_test extends uvm_test;
             `uvm_fatal("TLPQ_FIELDS", "completion_with_data fields/payload changed")
     endfunction
 
+    // Characterization only: the bridge preserves independent Completion
+    // DW1/DW2 values, while the pinned codec incorrectly sources the common
+    // requester/tag fields from DW1.  Do not harmonize these fixtures or turn
+    // this external residual into a local semantic repair.
+    function void check_completion_decode_residual();
+        bit [31:0] words[];
+        bit [7:0] dpu_bytes[];
+        bit [7:0] canonical[];
+        bit [7:0] expected_canonical[];
+        pcie_tl_tlp decoded_base;
+        pcie_tl_cpl_tlp decoded;
+        string reason;
+
+        words = new[4];
+        words[0] = 32'h0000_0000;
+        words[1] = 32'h1357_a65a;
+        words[2] = 32'h89ab_3234;
+        words[3] = 32'h0a00_0000;
+        words_to_dpu_bytes(words, dpu_bytes);
+        expected_canonical = '{8'h0a,8'h00,8'h00,8'h00,
+                               8'h89,8'hab,8'h32,8'h34,
+                               8'h13,8'h57,8'ha6,8'h5a};
+        expect_success("noncoordinated_cpl raw conversion",
+            bridge.dpu_bytes_to_codec(dpu_bytes, canonical, reason), reason);
+        expect_bytes("noncoordinated_cpl canonical bytes",
+                     canonical, expected_canonical);
+        expect_success("noncoordinated_cpl pinned decode",
+            bridge.decode_tlp(dpu_bytes, decoded_base, reason), reason);
+        if (!$cast(decoded, decoded_base) || decoded == null ||
+            decoded.completer_id != 16'h89ab ||
+            decoded.cpl_status != CPL_STATUS_UR || !decoded.bcm ||
+            decoded.byte_count != 12'h234 || decoded.lower_addr != 7'h5a ||
+            // Raw DW2 is 0x1357_a65a, but the pinned common decode reads DW1.
+            decoded.requester_id != 16'h89ab ||
+            decoded.tag[7:0] != 8'h32 ||
+            decoded.requester_id == 16'h1357 ||
+            decoded.tag[7:0] == 8'ha6)
+            `uvm_fatal("TLPQ_CPL_EXTERNAL_RESIDUAL",
+                "non-coordinated Cpl no longer exposes the pinned decode defect")
+
+        words = new[5];
+        words[0] = 32'h0000_0000;
+        words[1] = 32'h2468_b73c;
+        words[2] = 32'h9abc_0004;
+        words[3] = 32'h4a00_0001;
+        words[4] = 32'hfedc_ba98;
+        words_to_dpu_bytes(words, dpu_bytes);
+        expected_canonical = '{8'h4a,8'h00,8'h00,8'h01,
+                               8'h9a,8'hbc,8'h00,8'h04,
+                               8'h24,8'h68,8'hb7,8'h3c,
+                               8'hfe,8'hdc,8'hba,8'h98};
+        expect_success("noncoordinated_cpld raw conversion",
+            bridge.dpu_bytes_to_codec(dpu_bytes, canonical, reason), reason);
+        expect_bytes("noncoordinated_cpld canonical bytes",
+                     canonical, expected_canonical);
+        expect_success("noncoordinated_cpld pinned decode",
+            bridge.decode_tlp(dpu_bytes, decoded_base, reason), reason);
+        if (!$cast(decoded, decoded_base) || decoded == null ||
+            decoded.completer_id != 16'h9abc ||
+            decoded.cpl_status != CPL_STATUS_SC || decoded.bcm ||
+            decoded.byte_count != 12'h004 || decoded.lower_addr != 7'h3c ||
+            decoded.payload.size() != 4 ||
+            decoded.payload[0] != 8'hfe || decoded.payload[1] != 8'hdc ||
+            decoded.payload[2] != 8'hba || decoded.payload[3] != 8'h98 ||
+            // Raw DW2 is 0x2468_b73c, but the pinned common decode reads DW1.
+            decoded.requester_id != 16'h9abc ||
+            decoded.tag[7:0] != 8'h00 ||
+            decoded.requester_id == 16'h2468 ||
+            decoded.tag[7:0] == 8'hb7)
+            `uvm_fatal("TLPQ_CPLD_EXTERNAL_RESIDUAL",
+                "non-coordinated CplD no longer exposes the pinned decode defect")
+    endfunction
+
     // Mutation caught: interpreting a data Length of zero as anything but 1024 DW.
     function void check_max_length_data();
         bit [7:0] canonical[];
@@ -637,6 +710,81 @@ class tlpq_bridge_test extends uvm_test;
             `uvm_fatal("TLPQ_MALFORMED", $sformatf(
                 "%s: unsafe codec rejection reason='%s' output=%0d",
                 case_name, reason, dpu_dwords.size()))
+    endfunction
+
+    function void expect_tlp_encode_reject(string case_name,
+                                           pcie_tl_tlp unsupported);
+        bit [31:0] dpu_dwords[];
+        string reason;
+
+        dpu_dwords = new[1];
+        dpu_dwords[0] = 32'hdead_beef;
+        if (bridge.encode_tlp(unsupported, dpu_dwords, reason))
+            `uvm_fatal("TLPQ_UNSUPPORTED", {case_name, ": accepted by encoder"})
+        if (reason == "" || dpu_dwords.size() != 0)
+            `uvm_fatal("TLPQ_UNSUPPORTED", $sformatf(
+                "%s: unsafe encode rejection reason='%s' output=%0d",
+                case_name, reason, dpu_dwords.size()))
+    endfunction
+
+    // Mutations caught: silently dropping a prefix, accepting a prefix as the
+    // main header, or admitting TD-marked traffic without a defined ECRC slot.
+    function void check_unsupported_prefix_and_ecrc();
+        pcie_tl_mem_tlp request;
+        pcie_tl_prefix prefix;
+        bit [31:0] words[];
+        bit [7:0] dpu_bytes[];
+        bit [7:0] prefixed_canonical[];
+        bit [7:0] td_canonical[];
+
+        request = pcie_tl_mem_tlp::type_id::create("prefixed_request");
+        request.kind = TLP_MEM_RD;
+        request.fmt = FMT_3DW_NO_DATA;
+        request.type_f = TLP_TYPE_MEM_RD;
+        request.length = 10'd1;
+        request.requester_id = 16'h1234;
+        request.tag = 10'h056;
+        request.addr = 64'h0000_0000_89ab_cdf0;
+        request.first_be = 4'hf;
+        prefix = pcie_tl_prefix::create_pasid(20'h54321, 1'b1, 1'b0);
+        request.prefixes.push_back(prefix);
+        request.has_prefix = 1'b1;
+        expect_tlp_encode_reject("prefixed_tlp", request);
+
+        // Literal canonical stream: PASID prefix followed by a valid 3DW read.
+        prefixed_canonical = '{8'h91,8'h15,8'h43,8'h21,
+                               8'h00,8'h00,8'h00,8'h01,
+                               8'h12,8'h34,8'h56,8'h0f,
+                               8'h89,8'hab,8'hcd,8'hf0};
+        expect_codec_reject("canonical_prefix_unsupported",
+                            prefixed_canonical);
+
+        words = new[4];
+        words[0] = 32'h0000_0000;
+        words[1] = 32'h0000_0000;
+        words[2] = 32'h0000_0000;
+        words[3] = 32'h9100_0000;
+        words_to_dpu_bytes(words, dpu_bytes);
+        expect_dpu_reject("dpu_prefix_unsupported", dpu_bytes);
+
+        // TD is set but this bridge has no ECRC representation/verification
+        // contract.  Even a header-sized stream must therefore fail closed.
+        words[0] = 32'h0000_0000;
+        words[1] = 32'habcd_0048;
+        words[2] = 32'h1234_560f;
+        words[3] = 32'h0400_8001;
+        words_to_dpu_bytes(words, dpu_bytes);
+        expect_dpu_reject("dpu_ecrc_td_unsupported", dpu_bytes);
+
+        td_canonical = '{8'h04,8'h00,8'h80,8'h01,
+                         8'h12,8'h34,8'h56,8'h0f,
+                         8'hab,8'hcd,8'h00,8'h48};
+        expect_codec_reject("canonical_ecrc_td_unsupported", td_canonical);
+
+        request.prefixes.delete();
+        request.has_prefix = 1'b0;
+        request.td = 1'b1;
+        expect_tlp_encode_reject("ecrc_tlp", request);
     endfunction
 
     // Mutations caught: missing size/padding/Fmt/Length validation and dirty outputs.
@@ -821,7 +969,9 @@ class tlpq_bridge_test extends uvm_test;
         check_message_with_data();
         check_completion();
         check_completion_with_data();
+        check_completion_decode_residual();
         check_max_length_data();
+        check_unsupported_prefix_and_ecrc();
         check_malformed_layouts();
         check_codec_contract_inconsistencies();
         phase.drop_objection(this);

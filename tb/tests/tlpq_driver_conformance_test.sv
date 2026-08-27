@@ -98,6 +98,7 @@ class tlpq_driver_collector extends uvm_component;
 
     uvm_analysis_imp #(gq_desc_base, tlpq_driver_collector) analysis_export;
     tlpq_driver_observation observations[$];
+    tlpq_rx_desc retained_snapshots[$];
     uvm_event observation_event;
 
     function new(string name = "tlpq_driver_collector",
@@ -109,15 +110,27 @@ class tlpq_driver_collector extends uvm_component;
 
     function void write(gq_desc_base base_desc);
         tlpq_rx_desc desc;
-        pcie_tl_mem_tlp decoded;
+        tlpq_rx_desc snapshot;
+        pcie_tl_tlp decoded;
+        pcie_tl_mem_tlp decoded_mem;
+        uvm_object snapshot_object;
         tlpq_driver_observation observation;
 
         if (!$cast(desc, base_desc) || desc == null)
             `uvm_fatal("TLPQ_DRIVER_CALLBACK",
                        "completion callback was not a TLPQ RX descriptor")
-        if (!$cast(decoded, desc.decoded_tlp) || decoded == null)
+        decoded = desc.decoded_tlp;
+        if (decoded == null)
             `uvm_fatal("TLPQ_DRIVER_CALLBACK",
-                       "completion callback did not carry a decoded Memory TLP")
+                       "completion callback did not carry a decoded TLP")
+        snapshot_object = desc.clone();
+        if (!$cast(snapshot, snapshot_object) || snapshot == null ||
+            snapshot.decoded_tlp == null ||
+            snapshot.decoded_tlp == desc.decoded_tlp ||
+            snapshot.mem != null || snapshot.owned_allocation_count() != 0)
+            `uvm_fatal("TLPQ_DRIVER_SNAPSHOT",
+                       "callback clone was not a detached decoded snapshot")
+        retained_snapshots.push_back(snapshot);
         observation = tlpq_driver_observation::type_id::create(
             $sformatf("observation_%0d", observations.size()));
         observation.dpu_bytes = new[desc.dpu_bytes.size()];
@@ -134,7 +147,9 @@ class tlpq_driver_collector extends uvm_component;
         observation.decoded_length = decoded.length;
         observation.decoded_requester = decoded.requester_id;
         observation.decoded_tag = decoded.tag[7:0];
-        observation.decoded_addr = decoded.addr;
+        observation.decoded_addr = 0;
+        if ($cast(decoded_mem, decoded) && decoded_mem != null)
+            observation.decoded_addr = decoded_mem.addr;
         observation.callback_time = $time;
         observations.push_back(observation);
         observation_event.trigger();
@@ -231,10 +246,12 @@ class tlpq_driver_conformance_test extends uvm_test;
     localparam int unsigned POLL_HOST_ENGINE   = 2;
     localparam int unsigned POLL_SWITCH_ENGINE = 3;
     localparam int unsigned ERROR_HOST_ENGINE  = 4;
-    localparam int unsigned DRIVER_ENGINE_COUNT = 5;
+    localparam int unsigned GOLDEN_HOST_ENGINE = 5;
+    localparam int unsigned DRIVER_ENGINE_COUNT = 6;
     localparam int unsigned MAIN_ADAPTER_SLOT  = 0;
     localparam int unsigned POLL_ADAPTER_SLOT  = 1;
     localparam int unsigned ERROR_ADAPTER_SLOT = 2;
+    localparam int unsigned GOLDEN_ADAPTER_SLOT = 3;
 
     tlpq_driver_mem mem;
     tlpq_mock_adapter adapter;
@@ -281,6 +298,8 @@ class tlpq_driver_conformance_test extends uvm_test;
         if (engine_id == POLL_HOST_ENGINE ||
             engine_id == POLL_SWITCH_ENGINE)
             return POLL_ADAPTER_SLOT;
+        if (engine_id == GOLDEN_HOST_ENGINE)
+            return GOLDEN_ADAPTER_SLOT;
         return ERROR_ADAPTER_SLOT;
     endfunction
 
@@ -359,13 +378,14 @@ class tlpq_driver_conformance_test extends uvm_test;
         tlpq_rx_hw_cfg_t poll_host_hw;
         tlpq_rx_hw_cfg_t poll_switch_hw;
         tlpq_rx_hw_cfg_t error_host_hw;
+        tlpq_rx_hw_cfg_t golden_host_hw;
 
         super.build_phase(phase);
         mem = new("mem");
         mem.init_region(64'h0000_0001_e000_0000,
                         64'h0000_0001_e0ff_ffff, MODE_LINEAR, 16);
         for (int unsigned adapter_slot = 0;
-             adapter_slot <= ERROR_ADAPTER_SLOT; adapter_slot++)
+             adapter_slot <= GOLDEN_ADAPTER_SLOT; adapter_slot++)
             driver_adapters[adapter_slot] =
                 tlpq_mock_adapter::type_id::create(
                     $sformatf("driver_adapter_%0d", adapter_slot));
@@ -380,6 +400,8 @@ class tlpq_driver_conformance_test extends uvm_test;
                            msix_index:13'h144, msix_valid:1'b1};
         error_host_hw = '{host_id:3'h3, bdf:16'h0500,
                           msix_index:13'h055, msix_valid:1'b1};
+        golden_host_hw = '{host_id:3'h4, bdf:16'h0600,
+                           msix_index:13'h066, msix_valid:1'b1};
         if (!driver_adapters[MAIN_ADAPTER_SLOT].register_tlpq_rx(
                 TLPQ_HOST, TLPQ_HOST_QUEUE_ID, main_host_hw, reason) ||
             !driver_adapters[MAIN_ADAPTER_SLOT].register_tlpq_rx(
@@ -391,7 +413,9 @@ class tlpq_driver_conformance_test extends uvm_test;
                 TLPQ_SWITCH, TLPQ_SWITCH_QUEUE_ID,
                 poll_switch_hw, reason) ||
             !driver_adapters[ERROR_ADAPTER_SLOT].register_tlpq_rx(
-                TLPQ_HOST, TLPQ_HOST_QUEUE_ID, error_host_hw, reason))
+                TLPQ_HOST, TLPQ_HOST_QUEUE_ID, error_host_hw, reason) ||
+            !driver_adapters[GOLDEN_ADAPTER_SLOT].register_tlpq_rx(
+                TLPQ_HOST, TLPQ_HOST_QUEUE_ID, golden_host_hw, reason))
             `uvm_fatal("TLPQ_DRIVER_MAP",
                        {"directed adapter mapping failed: ", reason})
 
@@ -400,6 +424,7 @@ class tlpq_driver_conformance_test extends uvm_test;
         build_driver_engine(POLL_HOST_ENGINE, GQ_POLL);
         build_driver_engine(POLL_SWITCH_ENGINE, GQ_POLL);
         build_driver_engine(ERROR_HOST_ENGINE, GQ_POLL);
+        build_driver_engine(GOLDEN_HOST_ENGINE, GQ_IRQ);
         dut = tlpq_mock_dut::type_id::create("dut");
         dut.mem = mem;
         driver_report_catcher =
@@ -970,6 +995,9 @@ class tlpq_driver_conformance_test extends uvm_test;
             POLL_SWITCH_ENGINE:
                 return '{host_id:3'h6, bdf:16'h0401,
                          msix_index:13'h144, msix_valid:1'b1};
+            GOLDEN_HOST_ENGINE:
+                return '{host_id:3'h4, bdf:16'h0600,
+                         msix_index:13'h066, msix_valid:1'b1};
             default:
                 return '{host_id:3'h3, bdf:16'h0500,
                          msix_index:13'h055, msix_valid:1'b1};
@@ -1318,6 +1346,387 @@ class tlpq_driver_conformance_test extends uvm_test;
         if (harness_adapter.wait_irq_count[channel_key] != expected_count)
             `uvm_fatal("TLPQ_DRIVER_IRQ_WAIT", {label,
                        " observed an unexpected IRQ wait count"})
+    endtask
+
+    function void check_golden_snapshot(
+        int unsigned vector_index, string label,
+        tlpq_rx_desc snapshot, input byte expected_bytes[],
+        tlpq_route_metadata_t expected_metadata,
+        gq_addr_t expected_buf_addr);
+        pcie_tl_cfg_tlp cfg_tlp;
+        pcie_tl_mem_tlp mem_tlp;
+        pcie_tl_msg_tlp msg_tlp;
+        pcie_tl_cpl_tlp cpl_tlp;
+
+        if (snapshot == null || snapshot.mem != null ||
+            snapshot.owned_allocation_count() != 0 ||
+            snapshot.flags != (TLPQ_DESC_AVAIL | TLPQ_DESC_USED) ||
+            snapshot.buf_len != expected_bytes.size() ||
+            snapshot.buf_addr != expected_buf_addr ||
+            snapshot.metadata != expected_metadata ||
+            !driver_dpu_bytes_equal(snapshot.dpu_bytes, expected_bytes) ||
+            snapshot.decoded_tlp == null)
+            `uvm_fatal("TLPQ_GOLDEN_SNAPSHOT", {label,
+                       " detached raw descriptor snapshot diverged"})
+
+        case (vector_index)
+            0: begin
+                if (!$cast(cfg_tlp, snapshot.decoded_tlp) ||
+                    cfg_tlp.kind != TLP_CFG_RD0 ||
+                    cfg_tlp.fmt != FMT_3DW_NO_DATA ||
+                    cfg_tlp.type_f != TLP_TYPE_CFG_RD0 ||
+                    cfg_tlp.length != 10'd1 ||
+                    cfg_tlp.requester_id != 16'h1234 ||
+                    cfg_tlp.tag[7:0] != 8'h56 || cfg_tlp.at != 2'b10 ||
+                    cfg_tlp.completer_id != 16'habcd ||
+                    cfg_tlp.reg_num != 10'h012 ||
+                    cfg_tlp.first_be != 4'hf || cfg_tlp.payload.size() != 0)
+                    `uvm_fatal("TLPQ_GOLDEN_CFG_RD0", {label,
+                               " Configuration Read Type 0 fields diverged"})
+            end
+            1: begin
+                if (!$cast(cfg_tlp, snapshot.decoded_tlp) ||
+                    cfg_tlp.kind != TLP_CFG_WR0 ||
+                    cfg_tlp.fmt != FMT_3DW_WITH_DATA ||
+                    cfg_tlp.type_f != TLP_TYPE_CFG_WR0 ||
+                    cfg_tlp.length != 10'd1 ||
+                    cfg_tlp.requester_id != 16'h2345 ||
+                    cfg_tlp.tag[7:0] != 8'h67 ||
+                    cfg_tlp.completer_id != 16'hbcde ||
+                    cfg_tlp.reg_num != 10'h1ab ||
+                    cfg_tlp.first_be != 4'ha ||
+                    cfg_tlp.payload.size() != 4 ||
+                    cfg_tlp.payload[0] != 8'h11 ||
+                    cfg_tlp.payload[1] != 8'h22 ||
+                    cfg_tlp.payload[2] != 8'h33 ||
+                    cfg_tlp.payload[3] != 8'h44)
+                    `uvm_fatal("TLPQ_GOLDEN_CFG_WR0", {label,
+                               " Configuration Write Type 0 fields diverged"})
+            end
+            2: begin
+                if (!$cast(cfg_tlp, snapshot.decoded_tlp) ||
+                    cfg_tlp.kind != TLP_CFG_RD1 ||
+                    cfg_tlp.fmt != FMT_3DW_NO_DATA ||
+                    cfg_tlp.type_f != TLP_TYPE_CFG_RD1 ||
+                    cfg_tlp.length != 10'd1 ||
+                    cfg_tlp.requester_id != 16'h3456 ||
+                    cfg_tlp.tag[7:0] != 8'h78 ||
+                    cfg_tlp.completer_id != 16'hcdef ||
+                    cfg_tlp.reg_num != 10'h02a ||
+                    cfg_tlp.first_be != 4'h3 || cfg_tlp.payload.size() != 0)
+                    `uvm_fatal("TLPQ_GOLDEN_CFG_RD1", {label,
+                               " Configuration Read Type 1 fields diverged"})
+            end
+            3: begin
+                if (!$cast(cfg_tlp, snapshot.decoded_tlp) ||
+                    cfg_tlp.kind != TLP_CFG_WR1 ||
+                    cfg_tlp.fmt != FMT_3DW_WITH_DATA ||
+                    cfg_tlp.type_f != TLP_TYPE_CFG_WR1 ||
+                    cfg_tlp.length != 10'd1 ||
+                    cfg_tlp.requester_id != 16'h4567 ||
+                    cfg_tlp.tag[7:0] != 8'h89 ||
+                    cfg_tlp.completer_id != 16'hd0e1 ||
+                    cfg_tlp.reg_num != 10'h155 ||
+                    cfg_tlp.first_be != 4'h5 ||
+                    cfg_tlp.payload.size() != 4 ||
+                    cfg_tlp.payload[0] != 8'ha1 ||
+                    cfg_tlp.payload[1] != 8'hb2 ||
+                    cfg_tlp.payload[2] != 8'hc3 ||
+                    cfg_tlp.payload[3] != 8'hd4)
+                    `uvm_fatal("TLPQ_GOLDEN_CFG_WR1", {label,
+                               " Configuration Write Type 1 fields diverged"})
+            end
+            4: begin
+                if (!$cast(mem_tlp, snapshot.decoded_tlp) ||
+                    mem_tlp.kind != TLP_MEM_RD ||
+                    mem_tlp.fmt != FMT_4DW_NO_DATA ||
+                    mem_tlp.type_f != TLP_TYPE_MEM_RD ||
+                    mem_tlp.length != 10'd2 ||
+                    mem_tlp.requester_id != 16'h5678 ||
+                    mem_tlp.tag[7:0] != 8'h9a ||
+                    mem_tlp.addr != 64'h1122_3344_5566_7780 ||
+                    !mem_tlp.is_64bit || mem_tlp.first_be != 4'h3 ||
+                    mem_tlp.last_be != 4'hc || mem_tlp.payload.size() != 0)
+                    `uvm_fatal("TLPQ_GOLDEN_MEM_RD", {label,
+                               " Memory Read fields diverged"})
+            end
+            5: begin
+                if (!$cast(mem_tlp, snapshot.decoded_tlp) ||
+                    mem_tlp.kind != TLP_MEM_WR ||
+                    mem_tlp.fmt != FMT_3DW_WITH_DATA ||
+                    mem_tlp.type_f != TLP_TYPE_MEM_WR ||
+                    mem_tlp.length != 10'd2 ||
+                    mem_tlp.requester_id != 16'h6789 ||
+                    mem_tlp.tag[7:0] != 8'hab ||
+                    mem_tlp.addr != 64'h0000_0000_89ab_cdf0 ||
+                    mem_tlp.is_64bit || mem_tlp.first_be != 4'h7 ||
+                    mem_tlp.last_be != 4'he || mem_tlp.payload.size() != 8 ||
+                    mem_tlp.payload[0] != 8'hde ||
+                    mem_tlp.payload[1] != 8'had ||
+                    mem_tlp.payload[2] != 8'hbe ||
+                    mem_tlp.payload[3] != 8'hef ||
+                    mem_tlp.payload[4] != 8'h01 ||
+                    mem_tlp.payload[5] != 8'h23 ||
+                    mem_tlp.payload[6] != 8'h45 ||
+                    mem_tlp.payload[7] != 8'h67)
+                    `uvm_fatal("TLPQ_GOLDEN_MEM_WR", {label,
+                               " Memory Write fields diverged"})
+            end
+            6: begin
+                if (!$cast(msg_tlp, snapshot.decoded_tlp) ||
+                    msg_tlp.kind != TLP_MSGD ||
+                    msg_tlp.fmt != FMT_4DW_WITH_DATA ||
+                    msg_tlp.type_f != TLP_TYPE_MSG_ID ||
+                    msg_tlp.length != 10'd2 ||
+                    msg_tlp.requester_id != 16'h789a ||
+                    msg_tlp.tag[7:0] != 8'hbc ||
+                    msg_tlp.msg_code != MSG_VENDOR_TYPE0 ||
+                    msg_tlp.msg_addr != 64'hcafe_babe_0bad_f00d ||
+                    msg_tlp.payload.size() != 8 ||
+                    msg_tlp.payload[0] != 8'h10 ||
+                    msg_tlp.payload[1] != 8'h32 ||
+                    msg_tlp.payload[2] != 8'h54 ||
+                    msg_tlp.payload[3] != 8'h76 ||
+                    msg_tlp.payload[4] != 8'h98 ||
+                    msg_tlp.payload[5] != 8'hba ||
+                    msg_tlp.payload[6] != 8'hdc ||
+                    msg_tlp.payload[7] != 8'hfe)
+                    `uvm_fatal("TLPQ_GOLDEN_MSGD", {label,
+                               " Message with Data fields diverged"})
+            end
+            7: begin
+                if (!$cast(cpl_tlp, snapshot.decoded_tlp) ||
+                    cpl_tlp.kind != TLP_CPL ||
+                    cpl_tlp.fmt != FMT_3DW_NO_DATA ||
+                    cpl_tlp.type_f != TLP_TYPE_CPL ||
+                    cpl_tlp.length != 10'd0 ||
+                    cpl_tlp.completer_id != 16'h89ab ||
+                    cpl_tlp.cpl_status != CPL_STATUS_UR || !cpl_tlp.bcm ||
+                    cpl_tlp.byte_count != 12'h234 ||
+                    cpl_tlp.lower_addr != 7'h5a ||
+                    cpl_tlp.payload.size() != 0 ||
+                    // Raw DW2 carries requester/tag 0x1357/0xa6.  The pinned
+                    // codec incorrectly returns DW1 0x89ab/0x32 instead.
+                    cpl_tlp.requester_id != 16'h89ab ||
+                    cpl_tlp.tag[7:0] != 8'h32 ||
+                    cpl_tlp.requester_id == 16'h1357 ||
+                    cpl_tlp.tag[7:0] == 8'ha6)
+                    `uvm_fatal("TLPQ_GOLDEN_CPL_RESIDUAL", {label,
+                               " did not expose the pinned Completion defect"})
+            end
+            8: begin
+                if (!$cast(cpl_tlp, snapshot.decoded_tlp) ||
+                    cpl_tlp.kind != TLP_CPLD ||
+                    cpl_tlp.fmt != FMT_3DW_WITH_DATA ||
+                    cpl_tlp.type_f != TLP_TYPE_CPL ||
+                    cpl_tlp.length != 10'd1 ||
+                    cpl_tlp.completer_id != 16'h9abc ||
+                    cpl_tlp.cpl_status != CPL_STATUS_SC || cpl_tlp.bcm ||
+                    cpl_tlp.byte_count != 12'h004 ||
+                    cpl_tlp.lower_addr != 7'h3c ||
+                    cpl_tlp.payload.size() != 4 ||
+                    cpl_tlp.payload[0] != 8'hfe ||
+                    cpl_tlp.payload[1] != 8'hdc ||
+                    cpl_tlp.payload[2] != 8'hba ||
+                    cpl_tlp.payload[3] != 8'h98 ||
+                    // Raw DW2 carries requester/tag 0x2468/0xb7; pinned
+                    // decode exposes the unrelated DW1 0x9abc/0x00 values.
+                    cpl_tlp.requester_id != 16'h9abc ||
+                    cpl_tlp.tag[7:0] != 8'h00 ||
+                    cpl_tlp.requester_id == 16'h2468 ||
+                    cpl_tlp.tag[7:0] == 8'hb7)
+                    `uvm_fatal("TLPQ_GOLDEN_CPLD_RESIDUAL", {label,
+                               " did not expose the pinned CplD defect"})
+            end
+            default:
+                `uvm_fatal("TLPQ_GOLDEN_INDEX", "unknown golden vector")
+        endcase
+    endfunction
+
+    task run_golden_full_chain_scenario();
+        byte vectors[9][];
+        string labels[9];
+        tlpq_route_metadata_t metadata[9];
+        tlpq_rx_desc retired[9];
+        gq_addr_t retired_addr[9];
+        int unsigned retired_free_before[9];
+        gq_addr_t live_addr[$];
+        int unsigned live_free_before[$];
+        tlpq_rx_desc live_desc;
+        tlpq_rx_desc snapshot;
+        gq_addr_t ring_addr;
+        int unsigned ring_free_before;
+        int unsigned completion_write_before;
+        int unsigned allocation_before;
+        int host_key;
+        time irq_time;
+
+        // Every byte array is an independent literal fixture.  No bridge,
+        // codec, pack(), or production serializer creates the DMA input.
+        labels[0] = "Configuration Read Type 0";
+        vectors[0] = '{8'h00,8'h00,8'h00,8'h00,
+                       8'h48,8'h00,8'hcd,8'hab,
+                       8'h0f,8'h56,8'h34,8'h12,
+                       8'h01,8'h08,8'h00,8'h04};
+        labels[1] = "Configuration Write Type 0";
+        vectors[1] = '{8'h00,8'h00,8'h00,8'h00,
+                       8'hac,8'h06,8'hde,8'hbc,
+                       8'h0a,8'h67,8'h45,8'h23,
+                       8'h01,8'h00,8'h00,8'h44,
+                       8'h44,8'h33,8'h22,8'h11};
+        labels[2] = "Configuration Read Type 1";
+        vectors[2] = '{8'h00,8'h00,8'h00,8'h00,
+                       8'ha8,8'h00,8'hef,8'hcd,
+                       8'h03,8'h78,8'h56,8'h34,
+                       8'h01,8'h00,8'h00,8'h05};
+        labels[3] = "Configuration Write Type 1";
+        vectors[3] = '{8'h00,8'h00,8'h00,8'h00,
+                       8'h54,8'h05,8'he1,8'hd0,
+                       8'h05,8'h89,8'h67,8'h45,
+                       8'h01,8'h00,8'h00,8'h45,
+                       8'hd4,8'hc3,8'hb2,8'ha1};
+        labels[4] = "Memory Read";
+        vectors[4] = '{8'h80,8'h77,8'h66,8'h55,
+                       8'h44,8'h33,8'h22,8'h11,
+                       8'hc3,8'h9a,8'h78,8'h56,
+                       8'h02,8'h00,8'h00,8'h20};
+        labels[5] = "Memory Write";
+        vectors[5] = '{8'h00,8'h00,8'h00,8'h00,
+                       8'hf0,8'hcd,8'hab,8'h89,
+                       8'he7,8'hab,8'h89,8'h67,
+                       8'h02,8'h00,8'h00,8'h40,
+                       8'hef,8'hbe,8'had,8'hde,
+                       8'h67,8'h45,8'h23,8'h01};
+        labels[6] = "Message with Data";
+        vectors[6] = '{8'h0d,8'hf0,8'had,8'h0b,
+                       8'hbe,8'hba,8'hfe,8'hca,
+                       8'h7e,8'hbc,8'h9a,8'h78,
+                       8'h02,8'h00,8'h00,8'h72,
+                       8'h76,8'h54,8'h32,8'h10,
+                       8'hfe,8'hdc,8'hba,8'h98};
+        labels[7] = "Completion";
+        vectors[7] = '{8'h00,8'h00,8'h00,8'h00,
+                       8'h5a,8'ha6,8'h57,8'h13,
+                       8'h34,8'h32,8'hab,8'h89,
+                       8'h00,8'h00,8'h00,8'h0a};
+        labels[8] = "Completion with Data";
+        vectors[8] = '{8'h00,8'h00,8'h00,8'h00,
+                       8'h3c,8'hb7,8'h68,8'h24,
+                       8'h04,8'h00,8'hbc,8'h9a,
+                       8'h01,8'h00,8'h00,8'h4a,
+                       8'h98,8'hba,8'hdc,8'hfe};
+
+        for (int unsigned i = 0; i < 9; i++) begin
+            metadata[i] = '{host_id:4'(i), tlp_type:4'(i + 1),
+                            primary_bus:8'(8'h80 + i),
+                            secondary_bus:8'(8'h90 + i),
+                            subordinate_bus:8'(8'ha0 + i)};
+        end
+
+        host_key = int'(TLPQ_HOST);
+        start_driver_engine(GOLDEN_HOST_ENGINE);
+        start_driver_worker(GOLDEN_HOST_ENGINE);
+        wait_for_driver_irq_waits(GOLDEN_HOST_ENGINE, 1,
+                                  "nine-vector batch");
+        completion_write_before = dut.completion_write_count;
+        allocation_before = mem.allocation_count_for_size(TLPQ_BUFFER_BYTES);
+        for (int unsigned i = 0; i < 9; i++) begin
+            if (!$cast(retired[i],
+                       driver_engines[GOLDEN_HOST_ENGINE].get_outstanding(i)) ||
+                retired[i] == null || retired[i].owned_allocation_count() != 1 ||
+                mem.allocation_size(retired[i].buf_addr) !=
+                    TLPQ_BUFFER_BYTES)
+                `uvm_fatal("TLPQ_GOLDEN_OWNERSHIP", {labels[i],
+                           " did not begin in a real owned 128-byte buffer"})
+            retired_addr[i] = retired[i].buf_addr;
+            retired_free_before[i] = mem.free_count(retired_addr[i]);
+            if (!dut.complete_slot(driver_engines[GOLDEN_HOST_ENGINE], i,
+                                   vectors[i], vectors[i].size(),
+                                   metadata[i], -1))
+                `uvm_fatal("TLPQ_GOLDEN_DMA", {labels[i],
+                           " mock DMA completion failed"})
+        end
+        irq_time = $time;
+        dut.trigger_irq(driver_adapters[GOLDEN_ADAPTER_SLOT], TLPQ_HOST);
+        wait_for_driver_callbacks(GOLDEN_HOST_ENGINE, 9,
+                                  "nine-vector batch");
+        wait_for_driver_publishes(GOLDEN_HOST_ENGINE, 10,
+                                  "nine-vector batch-one refill");
+        if (dut.completion_write_count != completion_write_before + 9 ||
+            driver_adapters[GOLDEN_ADAPTER_SLOT].ack_irq_count[host_key] != 1 ||
+            driver_completions[GOLDEN_HOST_ENGINE].query_times.size() != 1 ||
+            driver_completions[GOLDEN_HOST_ENGINE].query_times[0] != irq_time ||
+            driver_completions[GOLDEN_HOST_ENGINE].ack_counts_at_query[0] != 1 ||
+            driver_engines[GOLDEN_HOST_ENGINE].head_seq() != 9 ||
+            driver_engines[GOLDEN_HOST_ENGINE].tail_seq() != 40 ||
+            driver_engines[GOLDEN_HOST_ENGINE].outstanding_count() != 31 ||
+            driver_collectors[GOLDEN_HOST_ENGINE].retained_snapshots.size()
+                != 9 ||
+            mem.allocation_count_for_size(TLPQ_BUFFER_BYTES) !=
+                allocation_before + 9)
+            `uvm_fatal("TLPQ_GOLDEN_CHAIN",
+                       "nine literals did not traverse one real IRQ retirement")
+        for (int unsigned i = 0; i < 9; i++) begin
+            if (mem.free_count(retired_addr[i]) !=
+                    retired_free_before[i] + 1 ||
+                driver_adapters[GOLDEN_ADAPTER_SLOT].published_tails[
+                    host_key][i + 1] != 16'h8000 + i)
+                `uvm_fatal("TLPQ_GOLDEN_RETIRE", {labels[i],
+                           " was not freed once and refilled singly"})
+        end
+
+        // Corrupt the retired source after callback; the callback clone must
+        // remain byte- and object-independent through engine cleanup.
+        retired[0].dpu_bytes[0] ^= 8'hff;
+        retired[0].decoded_tlp.requester_id = 16'h0000;
+        ring_addr = driver_engines[GOLDEN_HOST_ENGINE].ring_base();
+        ring_free_before = mem.free_count(ring_addr);
+        for (gq_logical_seq_t seq =
+                 driver_engines[GOLDEN_HOST_ENGINE].head_seq();
+             seq < driver_engines[GOLDEN_HOST_ENGINE].tail_seq(); seq++) begin
+            if (!$cast(live_desc,
+                       driver_engines[GOLDEN_HOST_ENGINE].get_outstanding(seq)) ||
+                live_desc == null)
+                `uvm_fatal("TLPQ_GOLDEN_CLEANUP",
+                           "live replacement was not a TLPQ descriptor")
+            live_addr.push_back(live_desc.buf_addr);
+            live_free_before.push_back(mem.free_count(live_desc.buf_addr));
+        end
+        driver_engines[GOLDEN_HOST_ENGINE].cleanup();
+        if (driver_engines[GOLDEN_HOST_ENGINE].ring_base() != 0 ||
+            driver_engines[GOLDEN_HOST_ENGINE].outstanding_count() != 0 ||
+            mem.free_count(ring_addr) != ring_free_before + 1)
+            `uvm_fatal("TLPQ_GOLDEN_CLEANUP",
+                       "golden engine cleanup did not release its ring once")
+        foreach (live_addr[i]) begin
+            if (mem.free_count(live_addr[i]) != live_free_before[i] + 1)
+                `uvm_fatal("TLPQ_GOLDEN_CLEANUP",
+                           "cleanup did not free every live buffer once")
+        end
+        driver_engines[GOLDEN_HOST_ENGINE].cleanup();
+        if (mem.free_count(ring_addr) != ring_free_before + 1)
+            `uvm_fatal("TLPQ_GOLDEN_CLEANUP",
+                       "second cleanup double-freed the golden ring")
+        foreach (live_addr[i]) begin
+            if (mem.free_count(live_addr[i]) != live_free_before[i] + 1)
+                `uvm_fatal("TLPQ_GOLDEN_CLEANUP",
+                           "second cleanup double-freed a golden buffer")
+        end
+
+        for (int unsigned i = 0; i < 9; i++) begin
+            snapshot = driver_collectors[GOLDEN_HOST_ENGINE].
+                retained_snapshots[i];
+            check_golden_snapshot(i, labels[i], snapshot, vectors[i],
+                                  metadata[i], retired_addr[i]);
+        end
+        `uvm_info("TLPQ_COMPLETION_EXTERNAL_RESIDUAL",
+            {"raw Cpl DW2 requester/tag=1357/a6 and CplD=2468/b7; ",
+             "pinned decode exposes incorrect DW1 values 89ab/32 and 9abc/00"},
+            UVM_LOW)
+        `uvm_info("TLPQ_GOLDEN_FULL_CHAIN",
+            {"nine independent literal DPU byte fixtures traversed owned ",
+             "buffers, mock DMA, one IRQ, real GQ query/retirement, parse, ",
+             "callback clone, batch-one refill, and cleanup"}, UVM_LOW)
     endtask
 
     task run_main_dual_ring_scenario();
@@ -2290,6 +2699,7 @@ class tlpq_driver_conformance_test extends uvm_test;
         join_none
         run_main_dual_ring_scenario();
         run_fixed_poll_scenario();
+        run_golden_full_chain_scenario();
         run_malformed_and_reset_query_scenario();
         run_cleanup_blocked_ack_scenario();
         cleanup_driver_engines();

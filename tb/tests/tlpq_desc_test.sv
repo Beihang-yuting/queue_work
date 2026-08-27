@@ -578,6 +578,86 @@ class tlpq_desc_test extends uvm_test;
         mem.leak_check(`__FILE__, `__LINE__);
     endfunction
 
+    // Mutation caught: relying on gq_desc_base/pcie_tl_tlp do_copy leaves a
+    // retained callback clone without the public descriptor snapshot or an
+    // independent decoded object after the engine releases owned storage.
+    function void check_snapshot_clone();
+        host_mem_manager mem;
+        tlpq_rx_desc source;
+        tlpq_rx_desc snapshot;
+        uvm_object cloned_object;
+        pcie_tl_mem_tlp source_tlp;
+        pcie_tl_mem_tlp snapshot_tlp;
+        gq_addr_t source_addr;
+        byte submitted[];
+        byte completion[];
+        byte golden[] = '{8'h80, 8'h77, 8'h66, 8'h55,
+                          8'h44, 8'h33, 8'h22, 8'h11,
+                          8'hc3, 8'h9a, 8'h78, 8'h56,
+                          8'h02, 8'h00, 8'h00, 8'h20};
+        tlpq_route_metadata_t expected_metadata;
+
+        mem = new("snapshot_clone_mem");
+        mem.init_region(64'h0000_0000_4100_0000,
+                        64'h0000_0000_4100_ffff, MODE_LINEAR, 16);
+        source = make_desc("snapshot_clone_source", mem);
+        source_addr = source.buf_addr;
+        mem.write_mem(source_addr, golden, `__FILE__, `__LINE__);
+        source.mark_available(1'b0);
+        source.pack(submitted);
+        copy_bytes(submitted, completion);
+        completion[0] = 8'h03;
+        completion[1] = 8'h00;
+        completion[2] = 8'h10;
+        completion[3] = 8'h00;
+        completion[12] = 8'hb6;
+        completion[13] = 8'ha1;
+        completion[14] = 8'ha2;
+        completion[15] = 8'ha3;
+        expected_metadata = '{host_id:4'h6, tlp_type:4'hb,
+                              primary_bus:8'ha1, secondary_bus:8'ha2,
+                              subordinate_bus:8'ha3};
+        if (!source.unpack(completion) || !source.parse_completion() ||
+            !$cast(source_tlp, source.decoded_tlp) || source_tlp == null)
+            `uvm_fatal("TLPQ_CLONE_SETUP",
+                "valid source descriptor did not parse before clone")
+
+        cloned_object = source.clone();
+        if (!$cast(snapshot, cloned_object) || snapshot == null)
+            `uvm_fatal("TLPQ_CLONE_TYPE",
+                "descriptor clone did not retain the TLPQ derived type")
+
+        // Prove the snapshot has no alias to either public dynamic object.
+        source.dpu_bytes[0] ^= 8'hff;
+        source_tlp.addr = 64'h0;
+        source.metadata = '0;
+        source.release_owned();
+        mem.leak_check(`__FILE__, `__LINE__);
+
+        if (snapshot.flags != (TLPQ_DESC_AVAIL | TLPQ_DESC_USED) ||
+            snapshot.buf_len != 16 || snapshot.buf_addr != source_addr ||
+            snapshot.metadata != expected_metadata ||
+            snapshot.mem != null || snapshot.owned_allocation_count() != 0)
+            `uvm_fatal("TLPQ_CLONE_SNAPSHOT",
+                "retained clone copied no snapshot or retained ownership")
+        expect_dpu_bytes_equal("retained clone raw bytes",
+                               snapshot.dpu_bytes, golden);
+        if (!$cast(snapshot_tlp, snapshot.decoded_tlp) ||
+            snapshot_tlp == null || snapshot_tlp == source_tlp ||
+            snapshot_tlp.kind != TLP_MEM_RD ||
+            snapshot_tlp.fmt != FMT_4DW_NO_DATA ||
+            snapshot_tlp.type_f != TLP_TYPE_MEM_RD ||
+            snapshot_tlp.length != 10'd2 ||
+            snapshot_tlp.requester_id != 16'h5678 ||
+            snapshot_tlp.tag[7:0] != 8'h9a ||
+            snapshot_tlp.addr != 64'h1122_3344_5566_7780 ||
+            !snapshot_tlp.is_64bit || snapshot_tlp.first_be != 4'h3 ||
+            snapshot_tlp.last_be != 4'hc)
+            `uvm_fatal("TLPQ_CLONE_DECODE",
+                "retained clone did not reconstruct an independent TLP")
+        snapshot.release_owned();
+    endfunction
+
     // Mutations caught: any non-31/30/31/1/restart default, descriptor reuse,
     // buffer reuse after normal GQ preparation, or selecting auto-recycle.
     function void check_refill_profile();
@@ -782,6 +862,7 @@ class tlpq_desc_test extends uvm_test;
         check_refill_profile();
         check_engine_refill_ownership();
         check_descriptor_completion_parsing();
+        check_snapshot_clone();
         check_pointer_vectors();
         check_generic_completion();
         phase.drop_objection(this);

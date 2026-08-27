@@ -83,6 +83,7 @@ class tlpq_packet_bridge extends uvm_object;
     function bit codec_bytes_to_dpu(
         input bit [7:0] codec_bytes[],
         output bit [31:0] dpu_dwords[], output string reason);
+        bit [31:0] canonical_dw0;
         bit [2:0] fmt_bits;
         bit is_4dw;
         bit has_data;
@@ -107,10 +108,15 @@ class tlpq_packet_bridge extends uvm_object;
             return 1'b0;
         end
 
-        fmt_bits = codec_bytes[0][7:5];
+        canonical_dw0 = canonical_word(codec_bytes, 0);
+        fmt_bits = canonical_dw0[31:29];
         if (!classify_fmt(fmt_bits, is_4dw, has_data,
                           header_bytes, reason))
             return 1'b0;
+        if (canonical_dw0[15]) begin
+            reason = "ECRC/Digest (TD=1) is unsupported by the TLPQ DPU bridge";
+            return 1'b0;
+        end
         if (codec_bytes.size() < header_bytes) begin
             reason = $sformatf(
                 "canonical %0dDW header requires %0d bytes; received %0d",
@@ -172,6 +178,10 @@ class tlpq_packet_bridge extends uvm_object;
         if (!classify_fmt(fmt_bits, is_4dw, has_data,
                           header_bytes, reason))
             return 1'b0;
+        if (canonical_dw0[15]) begin
+            reason = "ECRC/Digest (TD=1) is unsupported by the TLPQ DPU bridge";
+            return 1'b0;
+        end
 
         encoded_length = canonical_dw0[9:0];
         payload_dwords = has_data ?

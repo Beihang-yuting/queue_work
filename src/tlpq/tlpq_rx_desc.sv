@@ -31,6 +31,52 @@ class tlpq_rx_desc extends gq_desc_base;
         prepared_buf_addr = 0;
     endfunction
 
+    // A descriptor clone is a detached callback snapshot, never a second
+    // owner of the engine's ring or receive allocation.  Re-decode from the
+    // copied DPU bytes instead of relying on the pinned PCIe classes' partial
+    // derived-class do_copy implementations.
+    virtual function void do_copy(uvm_object rhs);
+        tlpq_rx_desc rhs_;
+        tlpq_packet_bridge bridge;
+        pcie_tl_tlp parsed_tlp;
+        string reason;
+
+        super.do_copy(rhs);
+        if (!$cast(rhs_, rhs))
+            return;
+
+        // copy() may target a previously prepared object; release its old
+        // ownership before replacing it with snapshot-only state.
+        release_owned();
+        mem               = null;
+        prepare_attempted = 0;
+        prepared          = 0;
+        prepared_mem      = null;
+        prepared_buf_addr = 0;
+
+        flags    = rhs_.flags;
+        buf_len  = rhs_.buf_len;
+        buf_addr = rhs_.buf_addr;
+        metadata = rhs_.metadata;
+        dpu_bytes = new[rhs_.dpu_bytes.size()];
+        foreach (rhs_.dpu_bytes[i])
+            dpu_bytes[i] = rhs_.dpu_bytes[i];
+        decoded_tlp = null;
+
+        if (rhs_.decoded_tlp == null)
+            return;
+        bridge = tlpq_packet_bridge::type_id::create(
+            {get_name(), "_snapshot_bridge"});
+        if (bridge == null ||
+            !bridge.decode_tlp(dpu_bytes, parsed_tlp, reason)) begin
+            `uvm_error("TLPQ_SNAPSHOT_COPY", $sformatf(
+                "could not reconstruct decoded TLP from snapshot bytes: %s",
+                reason))
+            return;
+        end
+        decoded_tlp = parsed_tlp;
+    endfunction
+
     virtual function bit prepare();
         gq_addr_t allocated;
         byte cleared_buffer[];
