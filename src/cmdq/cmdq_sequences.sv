@@ -25,12 +25,20 @@ class cmdq_command_sequence extends uvm_sequence #(gq_request, gq_response);
         result_status = CMDQ_RESULT_OK;
     endfunction
 
+    protected function void accept_timeout();
+        result = new[0];
+        result_status = CMDQ_RESULT_TIMEOUT;
+    endfunction
+
     task body();
         cmdq_tx_desc desc;
         gq_request request;
         gq_response response;
         semaphore outcome_lock;
         bit outcome_owned;
+        bit completion_seen;
+        realtime completion_at;
+        realtime deadline_at;
 
         result = new[0];
         result_status = CMDQ_RESULT_SUBMIT_ERROR;
@@ -52,32 +60,39 @@ class cmdq_command_sequence extends uvm_sequence #(gq_request, gq_response);
 
         outcome_lock = new(1);
         outcome_owned = 0;
+        completion_seen = 0;
+        completion_at = 0.0;
+        deadline_at = $realtime + completion_timeout;
         fork
             begin : completion_timeout_race
                 fork
                     begin : completion_branch
                         desc.completion_event.wait_on();
                         outcome_lock.get(1);
+                        completion_at = $realtime;
+                        completion_seen = 1;
                         if (!outcome_owned) begin
                             outcome_owned = 1;
-                            accept_completion(desc);
+                            if (completion_at <= deadline_at)
+                                accept_completion(desc);
+                            else
+                                accept_timeout();
                         end
                         outcome_lock.put(1);
                     end
                     begin : timeout_branch
                         #(completion_timeout);
-                        // Let every active completion in this deadline time
-                        // slot trigger its persistent event before arbitration.
-                        #0;
+                        // Advancing one timeprecision guarantees every region
+                        // in the inclusive deadline slot has settled.
+                        #1step;
                         outcome_lock.get(1);
                         if (!outcome_owned) begin
                             outcome_owned = 1;
-                            if (desc.completion_event.is_on())
+                            if (completion_seen &&
+                                completion_at <= deadline_at)
                                 accept_completion(desc);
-                            else begin
-                                result = new[0];
-                                result_status = CMDQ_RESULT_TIMEOUT;
-                            end
+                            else
+                                accept_timeout();
                         end
                         outcome_lock.put(1);
                     end

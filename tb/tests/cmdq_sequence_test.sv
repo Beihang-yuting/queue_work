@@ -55,6 +55,26 @@ class cmdq_sequence_mem extends host_mem_manager;
     endfunction
 endclass
 
+class cmdq_sequence_timeout_catcher extends uvm_report_catcher;
+    `uvm_object_utils(cmdq_sequence_timeout_catcher)
+
+    int unsigned timeout_count;
+
+    function new(string name = "cmdq_sequence_timeout_catcher");
+        super.new(name);
+        timeout_count = 0;
+    endfunction
+
+    virtual function action_e catch();
+        if (get_severity() == UVM_ERROR &&
+            get_id() == "GQ_COMPLETION_TIMEOUT") begin
+            timeout_count++;
+            return CAUGHT;
+        end
+        return THROW;
+    endfunction
+endclass
+
 class cmdq_scripted_driver extends uvm_driver #(gq_request, gq_response);
     `uvm_component_utils(cmdq_scripted_driver)
 
@@ -63,6 +83,8 @@ class cmdq_scripted_driver extends uvm_driver #(gq_request, gq_response);
     bit [15:0] expected_dst_id;
     byte completion_bytes[];
     time completion_delay;
+    bit complete_after_nba;
+    bit complete_one_step_late;
     bit return_submit_error;
     int unsigned request_count;
     bit saw_submit;
@@ -76,6 +98,8 @@ class cmdq_scripted_driver extends uvm_driver #(gq_request, gq_response);
         expected_request = new[0];
         completion_bytes = new[0];
         completion_delay = 0;
+        complete_after_nba = 0;
+        complete_one_step_late = 0;
         return_submit_error = 0;
         request_count = 0;
         saw_submit = 0;
@@ -87,6 +111,10 @@ class cmdq_scripted_driver extends uvm_driver #(gq_request, gq_response);
     protected task complete_desc(cmdq_tx_desc desc);
         if (completion_delay != 0)
             #(completion_delay);
+        if (complete_after_nba)
+            uvm_wait_for_nba_region();
+        if (complete_one_step_late)
+            #1step;
         if (completion_bytes.size() != 0)
             mem.write_mem(desc.rx_buf_addr, completion_bytes,
                           `__FILE__, `__LINE__);
@@ -416,9 +444,6 @@ class cmdq_sequence_test extends uvm_test;
         error_driver.mem = mem;
         error_driver.return_submit_error = 1;
 
-        // The focused business timeout owns the no-completion result. Keep
-        // the independent engine diagnostic later so test output stays clean.
-        cfg.completion_timeout = 20us;
     endfunction
 
     function void connect_phase(uvm_phase phase);
@@ -439,6 +464,7 @@ class cmdq_sequence_test extends uvm_test;
         gq_sequencer sequencer;
         gq_queue_engine engine;
         cmdq_command_sequence command_seq;
+        cmdq_sequence_timeout_catcher timeout_catcher;
         byte fse_request[] = '{8'h17, 8'h2a, 8'hc4, 8'h09};
         byte pstat_request[] = '{8'h81, 8'h00, 8'h5e};
         byte pstat_result[] = '{8'hd3, 8'h14, 8'h59, 8'h26,
@@ -506,6 +532,17 @@ class cmdq_sequence_test extends uvm_test;
             #10ns;
         expect_released(adapter.captured_tx_addr,
                         adapter.captured_rx_addr, "pstat_completion");
+        if (command_seq.result_status != CMDQ_RESULT_OK ||
+            command_seq.result.size() != 7)
+            `uvm_fatal("CMDQ_SEQUENCE_PSTAT_RELEASED",
+                       "released PSTAT result status or length is incorrect")
+        foreach (pstat_result[i]) begin
+            if (command_seq.result[i] !== pstat_result[i])
+                `uvm_fatal("CMDQ_SEQUENCE_PSTAT_RELEASED", $sformatf(
+                    {"released PSTAT result byte %0d is 0x%02h, ",
+                     "expected 0x%02h"},
+                    i, command_seq.result[i], pstat_result[i]))
+        end
 
         // Mutation caught: timeout winning solely because its delay wakes in
         // the deadline slot violates the inclusive completion deadline.
@@ -513,6 +550,7 @@ class cmdq_sequence_test extends uvm_test;
         early_driver.expected_dst_id = CMDQ_DST_PSTAT;
         early_driver.completion_bytes = pstat_result;
         early_driver.completion_delay = 10us;
+        early_driver.complete_after_nba = 1;
         command_seq = cmdq_command_sequence::type_id::create(
             "deadline_sequence");
         command_seq.request_payload = pstat_request;
@@ -533,6 +571,25 @@ class cmdq_sequence_test extends uvm_test;
         expect_released(early_driver.captured_tx_addr,
                         early_driver.captured_rx_addr,
                         "deadline_completion");
+
+        // Mutation caught: accepting any event observed after settlement lets
+        // a completion one timeprecision beyond the deadline win.
+        early_driver.complete_after_nba = 0;
+        early_driver.complete_one_step_late = 1;
+        command_seq = cmdq_command_sequence::type_id::create(
+            "late_completion_sequence");
+        command_seq.request_payload = pstat_request;
+        command_seq.dst_id = CMDQ_DST_PSTAT;
+        command_seq.start(early_sequencer);
+        #1step;
+        if (command_seq.result_status != CMDQ_RESULT_TIMEOUT ||
+            command_seq.result.size() != 0 ||
+            early_driver.request_count != 3)
+            `uvm_fatal("CMDQ_SEQUENCE_LATE",
+                       "after-deadline completion did not remain a timeout")
+        expect_released(early_driver.captured_tx_addr,
+                        early_driver.captured_rx_addr,
+                        "late_completion");
 
         // Mutation caught: treating a failed response as committed waits for
         // completion (or times out) instead of returning a submit error now.
@@ -555,6 +612,9 @@ class cmdq_sequence_test extends uvm_test;
         adapter.expected_dst_id = CMDQ_DST_FSE;
         adapter.completion_bytes = new[0];
         adapter.auto_complete = 0;
+        timeout_catcher = cmdq_sequence_timeout_catcher::type_id::create(
+            "timeout_catcher");
+        uvm_report_cb::add(null, timeout_catcher);
         submit_count_before = adapter.observed_submits;
         command_seq = cmdq_command_sequence::type_id::create("timeout_sequence");
         command_seq.request_payload = timeout_request;
@@ -563,16 +623,19 @@ class cmdq_sequence_test extends uvm_test;
         command_seq.start(sequencer);
         returned_at = $time;
         #1ns;
+        uvm_report_cb::delete(null, timeout_catcher);
         if (command_seq.result_status != CMDQ_RESULT_TIMEOUT ||
             command_seq.result.size() != 0 ||
             returned_at - started_at != 10us ||
-            adapter.observed_submits != submit_count_before + 1)
+            adapter.observed_submits != submit_count_before + 1 ||
+            timeout_catcher.timeout_count != 1)
             `uvm_fatal("CMDQ_SEQUENCE_TIMEOUT", $sformatf(
                 {"timeout result mismatch: status=%0d size=%0d elapsed=%0t ",
-                 "submits=%0d"},
+                 "submits=%0d engine_timeouts=%0d"},
                 command_seq.result_status, command_seq.result.size(),
                 returned_at - started_at,
-                adapter.observed_submits - submit_count_before))
+                adapter.observed_submits - submit_count_before,
+                timeout_catcher.timeout_count))
 
         phase.drop_objection(this);
     endtask
