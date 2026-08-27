@@ -31,7 +31,13 @@ fi
 remote_host=ubuntu@10.11.10.53
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 summary_checker="$repo_root/scripts/check_uvm_summary.sh"
+pcie_tl_pkg="$repo_root/pcie_work/pcie_tl_vip/src/pcie_tl_pkg.sv"
 log_file=
+
+if [[ ! -f $pcie_tl_pkg ]]; then
+    echo "required initialized PCIe package not found: $pcie_tl_pkg" >&2
+    exit 1
+fi
 
 cleanup() {
     local status=$?
