@@ -22,6 +22,8 @@ done
 
 for required_file in \
     src/gq/gq_pkg.sv \
+    src/gq/gq_desc_writeback_completion.sv \
+    src/gq/gq_index_phase_ptr_codec.sv \
     src/mailbox/mailbox_pkg.sv \
     tb/gq_test_pkg.sv; do
     if [[ ! -f "$required_file" ]]; then

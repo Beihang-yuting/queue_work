@@ -26,7 +26,8 @@ function gq_queue_cfg make_mailbox_queue_cfg(
     int unsigned queue_id,
     int unsigned depth,
     gq_wait_mode_e wait_mode,
-    time poll_interval,
+    time fixed_poll_interval,
+    time irq_watchdog_interval,
     time completion_timeout,
     gq_ptr_codec ptr_codec);
     gq_queue_cfg queue_cfg;
@@ -38,11 +39,14 @@ function gq_queue_cfg make_mailbox_queue_cfg(
     queue_cfg.desc_size          = role == GQ_TX ? 64 : 16;
     queue_cfg.alignment          = 64;
     queue_cfg.status_area_size   = 0;
-    queue_cfg.wait_mode          = wait_mode;
-    queue_cfg.poll_interval      = poll_interval;
-    queue_cfg.completion_timeout = completion_timeout;
-    queue_cfg.ptr_codec          = ptr_codec;
-    queue_cfg.completion_source  = mailbox_completion::type_id::create(
+    queue_cfg.wait_mode             = wait_mode;
+    queue_cfg.poll_policy           = GQ_POLL_FIXED;
+    queue_cfg.poll_min_interval     = fixed_poll_interval;
+    queue_cfg.poll_max_interval     = fixed_poll_interval;
+    queue_cfg.irq_watchdog_interval = irq_watchdog_interval;
+    queue_cfg.completion_timeout    = completion_timeout;
+    queue_cfg.ptr_codec             = ptr_codec;
+    queue_cfg.completion_source     = mailbox_completion::type_id::create(
         {name, "_completion"});
     return queue_cfg;
 endfunction
@@ -67,13 +71,17 @@ cfg.mem       = mem;
 cfg.adapter   = adapter;
 
 tx_1_cfg = make_mailbox_queue_cfg(
-    "tx_1_cfg", GQ_TX, 1, 32, GQ_POLL, 100ns, 10us, cfg.ptr_codec);
+    "tx_1_cfg", GQ_TX, 1, 32, GQ_POLL, 100ns, 0, 10us,
+    cfg.ptr_codec);
 tx_4095_cfg = make_mailbox_queue_cfg(
-    "tx_4095_cfg", GQ_TX, 4095, 32, GQ_IRQ, 100ns, 10us, cfg.ptr_codec);
+    "tx_4095_cfg", GQ_TX, 4095, 32, GQ_IRQ, 100ns, 1us, 10us,
+    cfg.ptr_codec);
 rx_2_cfg = make_mailbox_queue_cfg(
-    "rx_2_cfg", GQ_RX, 2, 32, GQ_POLL, 100ns, 10us, cfg.ptr_codec);
+    "rx_2_cfg", GQ_RX, 2, 32, GQ_POLL, 100ns, 0, 0,
+    cfg.ptr_codec);
 rx_3000_cfg = make_mailbox_queue_cfg(
-    "rx_3000_cfg", GQ_RX, 3000, 32, GQ_IRQ, 100ns, 10us, cfg.ptr_codec);
+    "rx_3000_cfg", GQ_RX, 3000, 32, GQ_IRQ, 100ns, 1us, 0,
+    cfg.ptr_codec);
 
 if (!cfg.add_queue(tx_1_cfg, reason) ||
     !cfg.add_queue(tx_4095_cfg, reason) ||
@@ -311,19 +319,78 @@ A second startup request returns `GQ_RESOURCE_ERROR`. With
 `restart_after_reset=1`, reset recovery reposts the saved initial profile; it
 does not accept another user startup.
 
-## Select poll or IRQ completion
+## Query completions and schedule waits
 
-Poll and IRQ modes share the same ordered drain path. Select `wait_mode`,
-`poll_interval`, and `completion_timeout` on each `gq_queue_cfg` before its
-successful `add_queue`, as shown in the configuration example above. Do not
-change those values through `cfg.queues` after ownership transfers.
+Every completion strategy implements the asynchronous `query_completed()`
+task. It receives the memory and adapter handles, ring and status addresses,
+ring geometry, the current logical head, and a snapshot of pending descriptors.
+Its two outputs have exact, independent meanings:
+
+- `valid=0` means completion state could not be sampled or parsed. The engine
+  reports the query failure and retires no descriptor; `completed_count` is
+  ignored and implementations return it as zero.
+- `valid=1` means the sample is usable. `completed_count=0` is a successful
+  no-progress sample, while a nonzero count is the contiguous number of
+  descriptors completed from the logical head. The engine rejects a count
+  larger than either the pending snapshot or the current outstanding count.
+
+`gq_desc_writeback_completion` reads pending ring slots in logical order,
+unpacks each descriptor, tests `is_complete(gq_phase(sequence, depth))`, and
+stops at the first incomplete or invalid slot. `gq_tail_mem_completion` instead
+decodes a sampled completion tail and returns its distance from the logical
+head. The task may block in an adapter-backed implementation; reset and cleanup
+do not hold the lifecycle lock across it, discard stale results by epoch, and
+wait for the exact query task to quiesce before releasing storage.
+
+Poll and IRQ modes share this ordered drain path. Select `wait_mode`,
+`poll_policy`, `poll_min_interval`, `poll_max_interval`,
+`poll_backoff_factor`, `irq_watchdog_interval`, and `completion_timeout` before
+the successful `add_queue`; do not mutate them after ownership transfers.
+Fixed polling requires equal minimum and maximum intervals and waits that
+interval every time. Adaptive polling starts at `poll_min_interval`; after each
+valid zero-progress query the next interval is
+`min(poll_max_interval, current_interval * poll_backoff_factor)`, with
+saturation before multiplication can overflow. Completion progress resets the
+next interval to the minimum. New work wakes a sleeping worker and resets the
+interval to the minimum, but does not itself trigger a completion query; an
+invalid query does not advance the backoff. Reset followed by fresh work also
+restores the minimum interval.
 
 In IRQ mode a generic adapter implements `wait_irq()` and `ack_irq()`; a
 `mailbox_reg_adapter` subclass implements `wait_mailbox_irq()` and
-`ack_mailbox_irq()`, which the base class forwards. The timeout also bounds an
-IRQ wait. Completion diagnostics start their age after the tail publish returns
-and report an oldest-outstanding episode once, including role, queue ID, head,
+`ack_mailbox_irq()`, which the base class forwards. An actual IRQ is
+acknowledged exactly once before its completion query. A nonzero
+`irq_watchdog_interval` permits a lost-IRQ completion query, but a watchdog
+wake is never acknowledged; zero disables the watchdog. A spurious IRQ is
+still acknowledged, while valid zero progress remains zero progress.
+
+The IRQ watchdog is separate from `completion_timeout`, which is the
+oldest-published diagnostic deadline. TX requires a nonzero completion timeout
+greater than `poll_max_interval`. RX permits `completion_timeout=0`; this
+disables oldest-outstanding timeout reports so an empty RX queue may remain
+idle indefinitely. A nonzero timeout starts after tail publication returns and
+reports an oldest-outstanding episode once, including role, queue ID, head,
 tail, slot, phase, ring/slot addresses, and descriptor bytes.
+
+## Choose the RX slot lifecycle and refill granularity
+
+`GQ_RX_EXPLICIT_REFILL` is the default. After ordered parsing and synchronous
+analysis delivery, the engine retires completed descriptors, releases their
+owned allocations, creates and prepares replacements, rewrites their ring
+slots, and publishes the new tail until `high_watermark` is restored. A
+nonzero `max_refill_batch` caps the number of replacements in one publication;
+the engine performs more refill iterations as needed. `max_refill_batch=0`
+means unlimited and preserves the legacy single batched publication.
+
+`GQ_RX_AUTO_RECYCLE` registers and clears `depth-1` fixed-size entries and
+publishes the initial tail once. After `N` contiguous completions it parses and
+delivers those entries, advances both logical head and tail by `N`, creates
+`N` fresh logical entry objects for the rotating sentinel slots, and restores
+the outstanding window to `depth-1`. It neither rewrites the ring bytes nor
+publishes another tail, so the ring image and publish count remain unchanged.
+Auto-recycle entries must not own separate allocations; activation rejects such
+an entry before publishing any tail. Explicit-refill queues retain the normal
+rewrite/publish behavior, and auto-recycle queues never use refill batching.
 
 ## Drive reset and final cleanup
 
@@ -359,8 +426,14 @@ phase.drop_objection(this);
 On a machine where VCS and the UVM license environment are already loaded:
 
 ```bash
-make run TEST=gq_regression_test
+make run TEST=gq_regression_test LIBS=mailbox TEST_SUITE=gq
 ```
+
+`LIBS` is a comma-separated library list and defaults to `mailbox`.
+`TEST_SUITE` selects the matching test package and defaults to `gq`. Unknown
+library or suite names fail during Make parsing, before compilation. Later
+business libraries extend only the library, package, and preprocessor-define
+maps; generic and selected business sources retain their dependency order.
 
 The repository helper copies the current working-tree contents to
 `10.11.10.53`, enters the host's interactive login environment, builds with
@@ -371,26 +444,32 @@ imply a committed or clean tree.
 
 ```bash
 ./scripts/run_vcs_remote.sh gq_regression_test
+./scripts/run_vcs_remote.sh gq_regression_test mailbox gq
 ```
+
+The runner accepts `TEST [LIBRARIES [TEST_SUITE]]`. Its one-argument form keeps
+the mailbox/GQ defaults. Without an explicit suite, `mailbox` and any
+comma-separated library set select `gq`; another single library selects its own
+suite name. All three values are validated before the first SSH connection.
 
 Run the complete checked regression with these exact commands:
 
 ```bash
-./scripts/run_vcs_remote.sh gq_config_test
-./scripts/run_vcs_remote.sh mailbox_desc_test
-./scripts/run_vcs_remote.sh mailbox_ptr_codec_test
-./scripts/run_vcs_remote.sh mailbox_reg_adapter_test
-./scripts/run_vcs_remote.sh mailbox_wrap_test
-./scripts/run_vcs_remote.sh gq_submit_test
-./scripts/run_vcs_remote.sh gq_completion_test
-./scripts/run_vcs_remote.sh gq_refill_test
-./scripts/run_vcs_remote.sh gq_reset_test
-./scripts/run_vcs_remote.sh gq_regression_test
+./scripts/run_vcs_remote.sh gq_config_test mailbox
+./scripts/run_vcs_remote.sh mailbox_desc_test mailbox
+./scripts/run_vcs_remote.sh mailbox_ptr_codec_test mailbox
+./scripts/run_vcs_remote.sh mailbox_reg_adapter_test mailbox
+./scripts/run_vcs_remote.sh mailbox_wrap_test mailbox
+./scripts/run_vcs_remote.sh gq_submit_test mailbox
+./scripts/run_vcs_remote.sh gq_completion_test mailbox
+./scripts/run_vcs_remote.sh gq_refill_test mailbox
+./scripts/run_vcs_remote.sh gq_reset_test mailbox
+./scripts/run_vcs_remote.sh gq_regression_test mailbox
 ```
 
 The underlying remote command used by the helper is:
 
 ```bash
 ssh ubuntu@10.11.10.53 \
-  "cd '<temporary-copy>' && bash -lc 'bash -ic \"make run TEST=gq_regression_test\"'"
+  "cd '<temporary-copy>' && bash -lc 'bash -ic \"make run TEST=gq_regression_test LIBS=mailbox TEST_SUITE=gq\"'"
 ```

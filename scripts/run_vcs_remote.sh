@@ -1,12 +1,33 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -ne 1 || ! $1 =~ ^[A-Za-z0-9_]+$ ]]; then
-    echo "usage: $0 TEST" >&2
+if [[ $# -lt 1 || $# -gt 3 || ! $1 =~ ^[A-Za-z0-9_]+$ ]]; then
+    echo "usage: $0 TEST [LIBRARIES [TEST_SUITE]]" >&2
     exit 2
 fi
 
 test_name=$1
+libraries=${2:-mailbox}
+test_suite=${3:-}
+
+if [[ ! $libraries =~ ^[A-Za-z0-9_]+(,[A-Za-z0-9_]+)*$ ]]; then
+    echo "invalid library selection: $libraries" >&2
+    exit 2
+fi
+
+if [[ -z $test_suite ]]; then
+    if [[ $libraries == mailbox || $libraries == *,* ]]; then
+        test_suite=gq
+    else
+        test_suite=$libraries
+    fi
+fi
+
+if [[ ! $test_suite =~ ^[A-Za-z0-9_]+$ ]]; then
+    echo "invalid test suite: $test_suite" >&2
+    exit 2
+fi
+
 remote_host=ubuntu@10.11.10.53
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 
@@ -31,4 +52,5 @@ rsync -a \
     -e ssh \
     "$repo_root/" "$remote_host:$remote_dir/"
 
-ssh "$remote_host" "cd '$remote_dir' && bash -lc 'bash -ic \"make run TEST=$test_name\"'"
+ssh "$remote_host" \
+    "cd '$remote_dir' && bash -lc 'bash -ic \"make run TEST=$test_name LIBS=$libraries TEST_SUITE=$test_suite\"'"
