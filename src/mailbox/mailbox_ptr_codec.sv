@@ -1,26 +1,11 @@
 `ifndef MAILBOX_PTR_CODEC_SV
 `define MAILBOX_PTR_CODEC_SV
 
-class mailbox_ptr_codec extends gq_ptr_codec;
+class mailbox_ptr_codec extends gq_index_phase_ptr_codec;
     `uvm_object_utils(mailbox_ptr_codec)
 
     function new(string name = "mailbox_ptr_codec");
-        super.new(name);
-    endfunction
-
-    virtual function gq_raw_ptr_t encode_publish(
-        gq_logical_seq_t old_tail,
-        gq_logical_seq_t new_tail,
-        int unsigned depth);
-        gq_raw_ptr_t raw;
-
-        raw = '0;
-        if (depth == 0 || depth > 32768)
-            return raw;
-
-        raw[14:0] = 15'(new_tail % depth);
-        raw[15] = bit'((new_tail / depth) & 1);
-        return raw;
+        super.new(name, 15, 15);
     endfunction
 
     virtual function bit decode_completion(

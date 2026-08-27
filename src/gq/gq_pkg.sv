@@ -11,6 +11,7 @@ package gq_pkg;
     `include "gq_refill_profile.sv"
     `include "gq_request.sv"
     `include "gq_ptr_codec.sv"
+    `include "gq_index_phase_ptr_codec.sv"
     `include "gq_hw_adapter.sv"
     `include "gq_completion_source.sv"
     `include "gq_desc_writeback_completion.sv"
