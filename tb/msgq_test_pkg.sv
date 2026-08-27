@@ -8,8 +8,11 @@ package msgq_test_pkg;
     import msgq_pkg::*;
     `include "uvm_macros.svh"
 
+    `include "host_mem_manager.sv"
+    `include "mocks/msgq_mock_adapter.sv"
     `include "tests/msgq_profile_test.sv"
     `include "tests/msgq_entry_test.sv"
+    `include "tests/msgq_completion_test.sv"
 endpackage
 
 `endif
