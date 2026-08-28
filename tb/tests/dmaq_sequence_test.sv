@@ -1,6 +1,98 @@
 `ifndef DMAQ_SEQUENCE_TEST_SV
 `define DMAQ_SEQUENCE_TEST_SV
 
+class dmaq_scripted_driver extends uvm_driver #(gq_request, gq_response);
+    `uvm_component_utils(dmaq_scripted_driver)
+
+    dmaq_operation_e expected_operation;
+    dmaq_endpoint_t expected_source;
+    dmaq_endpoint_t expected_destination;
+    int unsigned expected_transfer_length;
+    time completion_delay;
+    bit complete_before_response;
+    bit complete_after_nba;
+    bit complete_one_step_late;
+    bit return_submit_error;
+    int unsigned request_count;
+    int unsigned completion_count;
+    bit completed_before_response;
+
+    function new(string name = "dmaq_scripted_driver",
+                 uvm_component parent = null);
+        super.new(name, parent);
+        expected_operation = DMAQ_AF_TO_HOST;
+        expected_source = '0;
+        expected_destination = '0;
+        expected_transfer_length = 0;
+        completion_delay = 0;
+        complete_before_response = 0;
+        complete_after_nba = 0;
+        complete_one_step_late = 0;
+        return_submit_error = 0;
+        request_count = 0;
+        completion_count = 0;
+        completed_before_response = 0;
+    endfunction
+
+    protected task complete_desc(dmaq_tx_desc desc);
+        if (completion_delay != 0)
+            #(completion_delay);
+        if (complete_after_nba)
+            uvm_wait_for_nba_region();
+        if (complete_one_step_late)
+            #1step;
+        desc.flags = DMAQ_DESC_AVAIL | DMAQ_DESC_USED;
+        if (!desc.parse_completion())
+            `uvm_fatal("DMAQ_SCRIPT", "delayed completion parse failed")
+        completion_count++;
+    endtask
+
+    task run_phase(uvm_phase phase);
+        gq_request request;
+        gq_response response;
+        dmaq_tx_desc desc;
+
+        forever begin
+            seq_item_port.get_next_item(request);
+            request_count++;
+            if (request == null || request.kind != GQ_SUBMIT ||
+                request.size() != 1 || !$cast(desc, request.descs[0]))
+                `uvm_fatal("DMAQ_SCRIPT",
+                           "sequence did not submit exactly one DMAQ descriptor")
+            if (desc.operation != expected_operation ||
+                desc.source !== expected_source ||
+                desc.destination !== expected_destination ||
+                desc.transfer_length != expected_transfer_length)
+                `uvm_fatal("DMAQ_SCRIPT",
+                           "sequence descriptor inputs do not match public inputs")
+
+            response = gq_response::type_id::create("response");
+            response.set_id_info(request);
+            if (return_submit_error || !desc.prepare()) begin
+                response.status = GQ_RESOURCE_ERROR;
+                response.committed_count = 0;
+            end else begin
+                response.status = GQ_OK;
+                response.committed_count = 1;
+                desc.mark_available(1'b0);
+                if (complete_before_response) begin
+                    desc.flags = DMAQ_DESC_AVAIL | DMAQ_DESC_USED;
+                    if (!desc.parse_completion())
+                        `uvm_fatal("DMAQ_SCRIPT",
+                                   "early completion parse failed")
+                    completion_count++;
+                    completed_before_response = desc.completion_event.is_on();
+                end else begin
+                    fork
+                        complete_desc(desc);
+                    join_none
+                end
+            end
+            seq_item_port.item_done(response);
+        end
+    endtask
+endclass
+
 class dmaq_wrong_adapter extends gq_hw_adapter;
     `uvm_object_utils(dmaq_wrong_adapter)
 
@@ -48,11 +140,171 @@ class dmaq_sequence_test extends uvm_test;
     `uvm_component_utils(dmaq_sequence_test)
 
     host_mem_manager mem;
+    gq_sequencer transfer_sequencer;
+    dmaq_scripted_driver transfer_driver;
 
     function new(string name = "dmaq_sequence_test",
                  uvm_component parent = null);
         super.new(name, parent);
     endfunction
+
+    function void set_valid_transfer(dmaq_transfer_sequence seq);
+        seq.operation = DMAQ_AF_TO_HOST;
+        seq.source = '{DMAQ_ENDPOINT_AF, 64'h1111_2222_3333_4444,
+                       16'h0053, 16'h0123};
+        seq.destination = '{DMAQ_ENDPOINT_HOST, 64'haaaa_bbbb_cccc_dddd,
+                            16'h0097, 16'h4567};
+        seq.transfer_length = 4096;
+        seq.completion_timeout = 75ns;
+
+        transfer_driver.expected_operation = DMAQ_AF_TO_HOST;
+        transfer_driver.expected_source =
+            '{DMAQ_ENDPOINT_AF, 64'h1111_2222_3333_4444,
+              16'h0053, 16'h0123};
+        transfer_driver.expected_destination =
+            '{DMAQ_ENDPOINT_HOST, 64'haaaa_bbbb_cccc_dddd,
+              16'h0097, 16'h4567};
+        transfer_driver.expected_transfer_length = 4096;
+    endfunction
+
+    function void reset_transfer_script();
+        transfer_driver.completion_delay = 0;
+        transfer_driver.complete_before_response = 0;
+        transfer_driver.complete_after_nba = 0;
+        transfer_driver.complete_one_step_late = 0;
+        transfer_driver.return_submit_error = 0;
+        transfer_driver.completed_before_response = 0;
+    endfunction
+
+    task start_and_expect(dmaq_transfer_sequence seq,
+                          dmaq_result_status_e expected_status,
+                          realtime expected_elapsed, string label);
+        realtime started_at;
+        realtime elapsed;
+
+        started_at = $realtime;
+        seq.start(transfer_sequencer);
+        elapsed = $realtime - started_at;
+        if (seq.result_status != expected_status)
+            `uvm_fatal("DMAQ_SEQUENCE_RESULT", $sformatf(
+                "%s returned status %0d, expected %0d", label,
+                seq.result_status, expected_status))
+        if (elapsed != expected_elapsed)
+            `uvm_fatal("DMAQ_SEQUENCE_TIMING", $sformatf(
+                "%s took %0t, expected %0t", label, elapsed,
+                expected_elapsed))
+    endtask
+
+    task check_transfer_sequence();
+        dmaq_transfer_sequence seq;
+        dmaq_endpoint_t source_before;
+        dmaq_endpoint_t destination_before;
+        int unsigned requests_before;
+
+        reset_transfer_script();
+        seq = dmaq_transfer_sequence::type_id::create("early_seq");
+        set_valid_transfer(seq);
+        transfer_driver.complete_before_response = 1;
+        requests_before = transfer_driver.request_count;
+        start_and_expect(seq, DMAQ_RESULT_OK, 0ns, "early completion");
+        if (!transfer_driver.completed_before_response ||
+            transfer_driver.request_count != requests_before + 1)
+            `uvm_fatal("DMAQ_SEQUENCE_EARLY",
+                       "persistent early completion or single submit failed")
+
+        reset_transfer_script();
+        seq = dmaq_transfer_sequence::type_id::create("submit_error_seq");
+        set_valid_transfer(seq);
+        transfer_driver.return_submit_error = 1;
+        requests_before = transfer_driver.request_count;
+        start_and_expect(seq, DMAQ_RESULT_SUBMIT_ERROR, 0ns,
+                         "driver submission error");
+        if (transfer_driver.request_count != requests_before + 1)
+            `uvm_fatal("DMAQ_SEQUENCE_SUBMIT", "submission count diverged")
+
+        reset_transfer_script();
+        seq = dmaq_transfer_sequence::type_id::create("invalid_role_seq");
+        set_valid_transfer(seq);
+        seq.source.role = DMAQ_ENDPOINT_HOST;
+        transfer_driver.expected_source.role = DMAQ_ENDPOINT_HOST;
+        requests_before = transfer_driver.request_count;
+        start_and_expect(seq, DMAQ_RESULT_SUBMIT_ERROR, 0ns,
+                         "invalid endpoint pairing");
+        if (transfer_driver.request_count != requests_before + 1)
+            `uvm_fatal("DMAQ_SEQUENCE_VALIDATE", "role request count diverged")
+
+        reset_transfer_script();
+        seq = dmaq_transfer_sequence::type_id::create("zero_length_seq");
+        set_valid_transfer(seq);
+        seq.transfer_length = 0;
+        transfer_driver.expected_transfer_length = 0;
+        requests_before = transfer_driver.request_count;
+        start_and_expect(seq, DMAQ_RESULT_SUBMIT_ERROR, 0ns,
+                         "zero transfer length");
+        if (transfer_driver.request_count != requests_before + 1)
+            `uvm_fatal("DMAQ_SEQUENCE_VALIDATE", "zero length request count diverged")
+
+        reset_transfer_script();
+        seq = dmaq_transfer_sequence::type_id::create("large_length_seq");
+        set_valid_transfer(seq);
+        seq.transfer_length = 65536;
+        transfer_driver.expected_transfer_length = 65536;
+        requests_before = transfer_driver.request_count;
+        start_and_expect(seq, DMAQ_RESULT_SUBMIT_ERROR, 0ns,
+                         "oversize transfer length");
+        if (transfer_driver.request_count != requests_before + 1)
+            `uvm_fatal("DMAQ_SEQUENCE_VALIDATE", "large length request count diverged")
+
+        reset_transfer_script();
+        seq = dmaq_transfer_sequence::type_id::create("zero_timeout_seq");
+        set_valid_transfer(seq);
+        seq.completion_timeout = 0;
+        requests_before = transfer_driver.request_count;
+        start_and_expect(seq, DMAQ_RESULT_SUBMIT_ERROR, 0ns,
+                         "zero completion timeout");
+        if (transfer_driver.request_count != requests_before)
+            `uvm_fatal("DMAQ_SEQUENCE_ZERO_TIMEOUT",
+                       "zero timeout issued a request")
+
+        reset_transfer_script();
+        seq = dmaq_transfer_sequence::type_id::create("timeout_seq");
+        set_valid_transfer(seq);
+        source_before = seq.source;
+        destination_before = seq.destination;
+        transfer_driver.completion_delay = 100ns;
+        requests_before = transfer_driver.request_count;
+        start_and_expect(seq, DMAQ_RESULT_TIMEOUT, 75001ps,
+                         "ordinary timeout");
+        if (seq.source !== source_before ||
+            seq.destination !== destination_before ||
+            transfer_driver.request_count != requests_before + 1)
+            `uvm_fatal("DMAQ_SEQUENCE_TIMEOUT",
+                       "timeout mutated endpoints or submission count")
+        #25ns;
+
+        reset_transfer_script();
+        seq = dmaq_transfer_sequence::type_id::create("deadline_seq");
+        set_valid_transfer(seq);
+        transfer_driver.completion_delay = 75ns;
+        transfer_driver.complete_after_nba = 1;
+        requests_before = transfer_driver.request_count;
+        start_and_expect(seq, DMAQ_RESULT_OK, 75ns,
+                         "inclusive deadline completion");
+        if (transfer_driver.request_count != requests_before + 1)
+            `uvm_fatal("DMAQ_SEQUENCE_DEADLINE", "deadline request count diverged")
+
+        reset_transfer_script();
+        seq = dmaq_transfer_sequence::type_id::create("late_seq");
+        set_valid_transfer(seq);
+        transfer_driver.completion_delay = 75ns;
+        transfer_driver.complete_after_nba = 1;
+        transfer_driver.complete_one_step_late = 1;
+        requests_before = transfer_driver.request_count;
+        start_and_expect(seq, DMAQ_RESULT_TIMEOUT, 75001ps,
+                         "one-step-late completion");
+        if (transfer_driver.request_count != requests_before + 1)
+            `uvm_fatal("DMAQ_SEQUENCE_LATE", "late request count diverged")
+    endtask
 
     function dmaq_tx_desc make_desc(string name);
         dmaq_tx_desc desc;
@@ -267,6 +519,10 @@ class dmaq_sequence_test extends uvm_test;
 
         super.build_phase(phase);
         mem = new("mem");
+        transfer_sequencer = gq_sequencer::type_id::create(
+            "transfer_sequencer", this);
+        transfer_driver = dmaq_scripted_driver::type_id::create(
+            "transfer_driver", this);
         mem.init_region(64'h0000_0001_2000_0000,
                         64'h0000_0001_20ff_ffff, MODE_LINEAR, 16);
         hw_cfg.queue_hid = 32'h01020304;
@@ -381,10 +637,17 @@ class dmaq_sequence_test extends uvm_test;
             `uvm_fatal("DMAQ_PROFILE_DUPLICATE", "duplicate request changed state")
     endfunction
 
+    function void connect_phase(uvm_phase phase);
+        super.connect_phase(phase);
+        transfer_driver.seq_item_port.connect(
+            transfer_sequencer.seq_item_export);
+    endfunction
+
     task run_phase(uvm_phase phase);
         phase.raise_objection(this);
         check_pointer_and_completion();
         check_adapter();
+        check_transfer_sequence();
         phase.drop_objection(this);
     endtask
 endclass
