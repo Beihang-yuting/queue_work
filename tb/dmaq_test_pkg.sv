@@ -9,7 +9,9 @@ package dmaq_test_pkg;
     `include "uvm_macros.svh"
 
     `include "host_mem_manager.sv"
+    `include "mocks/dmaq_mock_adapter.sv"
     `include "tests/dmaq_desc_test.sv"
+    `include "tests/dmaq_sequence_test.sv"
 endpackage
 
 `endif

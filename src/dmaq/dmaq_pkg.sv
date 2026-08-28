@@ -9,6 +9,10 @@ package dmaq_pkg;
 
     `include "dmaq_types.sv"
     `include "dmaq_tx_desc.sv"
+    `include "dmaq_ptr_codec.sv"
+    `include "dmaq_completion.sv"
+    `include "dmaq_reg_adapter.sv"
+    `include "dmaq_env.sv"
 endpackage
 
 `endif
