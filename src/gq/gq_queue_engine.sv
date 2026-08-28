@@ -553,60 +553,100 @@ class gq_queue_engine extends uvm_component;
     // gives one report per oldest published logical sequence.
     protected task check_completion_deadline();
         bit deadline_violation;
+        bit deadline_candidate;
         bit diagnostic_current;
         bit retry_deadline;
+        bit settle_deadline;
+        bit settled_candidate;
         longint unsigned diagnostic_epoch;
+        longint unsigned settled_epoch;
         gq_logical_seq_t diagnostic_head;
+        gq_logical_seq_t settled_head;
         time diagnostic_timeout;
         string diagnostic_state;
 
-        deadline_violation = 0;
-        retry_deadline = 0;
-        completion_commit_boundary.get(1);
-        state_lock.get(1);
-        deadline_violation = ready_value && !reset_requested_value &&
-                             !shutdown_requested && allocated &&
-                             cfg.completion_timeout != 0 &&
-                             logical_tail_seq > logical_head_seq &&
-                             outstanding_since.exists(logical_head_seq) &&
-                             outstanding_published.exists(logical_head_seq) &&
-                             outstanding_published[logical_head_seq] &&
-                             !oldest_timeout_reported &&
-                             $time >= outstanding_since[logical_head_seq] &&
-                             ($time - outstanding_since[logical_head_seq]) >=
-                                 cfg.completion_timeout;
-        if (deadline_violation) begin
-            oldest_timeout_reported = 1;
-            diagnostic_epoch = reset_epoch_value;
-            diagnostic_head = logical_head_seq;
-            diagnostic_timeout = cfg.completion_timeout;
-        end
-        state_lock.put(1);
-
-        if (deadline_violation) begin
-            capture_completion_diagnostic_state(
-                diagnostic_epoch, diagnostic_head, 1,
-                diagnostic_current, diagnostic_state);
-            if (diagnostic_current)
-                `uvm_error("GQ_COMPLETION_TIMEOUT", $sformatf(
-                    "oldest outstanding completion exceeded timeout=%0t; %s",
-                    diagnostic_timeout, diagnostic_state))
-            else begin
-                state_lock.get(1);
-                if (ready_value && !reset_requested_value &&
-                    !shutdown_requested &&
-                    reset_epoch_value == diagnostic_epoch &&
-                    logical_head_seq == diagnostic_head &&
-                    oldest_timeout_reported) begin
-                    oldest_timeout_reported = 0;
-                    retry_deadline = 1;
+        settled_candidate = 0;
+        forever begin
+            deadline_violation = 0;
+            retry_deadline = 0;
+            settle_deadline = 0;
+            completion_commit_boundary.get(1);
+            state_lock.get(1);
+            deadline_candidate = ready_value && !reset_requested_value &&
+                                 !shutdown_requested && allocated &&
+                                 cfg.completion_timeout != 0 &&
+                                 logical_tail_seq > logical_head_seq &&
+                                 outstanding_since.exists(logical_head_seq) &&
+                                 outstanding_published.exists(
+                                     logical_head_seq) &&
+                                 outstanding_published[logical_head_seq] &&
+                                 !oldest_timeout_reported &&
+                                 $time >=
+                                     outstanding_since[logical_head_seq];
+            if (deadline_candidate) begin
+                settle_deadline =
+                    ($time - outstanding_since[logical_head_seq]) ==
+                        cfg.completion_timeout &&
+                    (!settled_candidate ||
+                     settled_epoch != reset_epoch_value ||
+                     settled_head != logical_head_seq);
+                deadline_violation =
+                    ($time - outstanding_since[logical_head_seq]) >=
+                        cfg.completion_timeout;
+                if (settle_deadline) begin
+                    settled_candidate = 1;
+                    settled_epoch = reset_epoch_value;
+                    settled_head = logical_head_seq;
                 end
-                state_lock.put(1);
             end
+            if (deadline_violation && !settle_deadline) begin
+                oldest_timeout_reported = 1;
+                diagnostic_epoch = reset_epoch_value;
+                diagnostic_head = logical_head_seq;
+                diagnostic_timeout = cfg.completion_timeout;
+            end
+            state_lock.put(1);
+
+            // Give post-NBA completion writes in the inclusive deadline slot
+            // a deterministic chance to drain without advancing simulation
+            // time. The producer crosses one NBA barrier before committing,
+            // so the checker crosses a second barrier before re-evaluating.
+            // Remembering the exact epoch/head candidate bounds this zero-time
+            // settlement to one pass; a lifecycle or head change earns a new
+            // pass because it represents different outstanding work.
+            if (settle_deadline) begin
+                completion_commit_boundary.put(1);
+                uvm_wait_for_nba_region();
+                uvm_wait_for_nba_region();
+                continue;
+            end
+
+            if (deadline_violation) begin
+                capture_completion_diagnostic_state(
+                    diagnostic_epoch, diagnostic_head, 1,
+                    diagnostic_current, diagnostic_state);
+                if (diagnostic_current)
+                    `uvm_error("GQ_COMPLETION_TIMEOUT", $sformatf(
+                        "oldest outstanding completion exceeded timeout=%0t; %s",
+                        diagnostic_timeout, diagnostic_state))
+                else begin
+                    state_lock.get(1);
+                    if (ready_value && !reset_requested_value &&
+                        !shutdown_requested &&
+                        reset_epoch_value == diagnostic_epoch &&
+                        logical_head_seq == diagnostic_head &&
+                        oldest_timeout_reported) begin
+                        oldest_timeout_reported = 0;
+                        retry_deadline = 1;
+                    end
+                    state_lock.put(1);
+                end
+            end
+            completion_commit_boundary.put(1);
+            if (retry_deadline)
+                completion_deadline_state_event.trigger();
+            return;
         end
-        completion_commit_boundary.put(1);
-        if (retry_deadline)
-            completion_deadline_state_event.trigger();
     endtask
 
     task drain_completed();

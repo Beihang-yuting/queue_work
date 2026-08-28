@@ -86,14 +86,17 @@ class dmaq_driver_report_catcher extends uvm_report_catcher;
             return CAUGHT;
         end
         if (get_id() == "GQ_COMPLETION_TIMEOUT" &&
-            get_severity() == UVM_ERROR && expect_timeout) begin
-            if (uvm_re_match(".*head=31.*slot=31.*", get_message()) != 0)
-                `uvm_fatal("DMAQ_TIMEOUT_DIAGNOSTIC",
-                           "timeout diagnostic lost configured logical identity")
+            get_severity() == UVM_ERROR) begin
             timeout_count++;
             timeout_messages.push_back(get_message());
             timeout_event.trigger();
-            return CAUGHT;
+            if (expect_timeout) begin
+                if (uvm_re_match(".*head=31.*slot=31.*",
+                                 get_message()) != 0)
+                    `uvm_fatal("DMAQ_TIMEOUT_DIAGNOSTIC",
+                               "timeout diagnostic lost configured logical identity")
+                return CAUGHT;
+            end
         end
         return THROW;
     endfunction
@@ -581,6 +584,13 @@ class dmaq_driver_conformance_test extends uvm_test;
             engines[MAIN_Q].ring_base() != 64'h0000_0001_d000_0000)
             `uvm_fatal("DMAQ_DRIVER_DEFAULT",
                        "default queue did not begin empty at logical 31")
+        if (cfgs[MAIN_Q].wait_mode != GQ_POLL ||
+            cfgs[MAIN_Q].poll_policy != GQ_POLL_FIXED ||
+            cfgs[MAIN_Q].poll_min_interval != 10ns ||
+            cfgs[MAIN_Q].poll_max_interval != 10ns ||
+            cfgs[MAIN_Q].poll_backoff_factor != 1)
+            `uvm_fatal("DMAQ_DRIVER_DEFAULT_POLL",
+                       "default queue did not select fixed 10 ns Poll cadence")
 
         for (int unsigned index = 0; index < 3; index++) begin
             select_literal_transfer(index, operation, source, destination,
@@ -627,12 +637,18 @@ class dmaq_driver_conformance_test extends uvm_test;
                     `uvm_fatal("DMAQ_DRIVER_ORDER",
                                "first publish did not follow reset/configure/enable or inspect committed bytes")
                 query_before = completions[MAIN_Q].query_times.size();
-                #100ns;
+                wait_for_queries(MAIN_Q, query_before + 3,
+                                 "default fixed poll");
                 if (adapter.published_tails[MAIN_Q].size() != 1 ||
                     sequence_done.is_on() ||
-                    completions[MAIN_Q].query_times.size() <= query_before)
+                    completions[MAIN_Q].query_times[query_before + 1] -
+                        completions[MAIN_Q].query_times[query_before] != 10ns ||
+                    completions[MAIN_Q].query_times[query_before + 2] -
+                        completions[MAIN_Q].query_times[query_before + 1] !=
+                            10ns)
                     `uvm_fatal("DMAQ_DRIVER_TAIL_ON_CHANGE",
-                               "polling, waiting, or idle time rewrote the unchanged tail")
+                               {"default pending polls were not exactly 10 ns ",
+                                "apart or rewrote the unchanged tail"})
             end
 
             if (!dut.complete_slot(engines[MAIN_Q], 31 + index, 32))
@@ -829,8 +845,10 @@ class dmaq_driver_conformance_test extends uvm_test;
         allocation_before = mem.allocation_calls;
         free_before = mem.free_calls;
         timeout_before = report_catcher.timeout_count;
-        if (timing_case == 2)
+        if (timing_case == 2) begin
+            report_catcher.timeout_event.reset();
             report_catcher.expect_timeout = 1;
+        end
 
         fork
             begin
@@ -844,7 +862,10 @@ class dmaq_driver_conformance_test extends uvm_test;
                 wait_for_publish_count(queue_id, 1, label);
                 case (timing_case)
                     0: #490ns;
-                    1: #500ns;
+                    1: begin
+                        #500ns;
+                        uvm_wait_for_nba_region();
+                    end
                     default: begin
                         #500ns;
                         #1step;
@@ -865,6 +886,10 @@ class dmaq_driver_conformance_test extends uvm_test;
             adapter.published_tails[queue_id][0] != 16'h8000)
             `uvm_fatal("DMAQ_DRIVER_TIMEOUT_DESC",
                        {label, " did not publish the default literal slot"})
+        if (timing_case == 1) begin
+            completion_injected.wait_on();
+            #1step;
+        end
         if (!sequence_done.is_on())
             sequence_done.wait_on();
         if (transfer_seq.result_status != expected_status)
@@ -873,13 +898,17 @@ class dmaq_driver_conformance_test extends uvm_test;
                 transfer_seq.result_status, expected_status))
 
         if (timing_case == 2) begin
+            if (!report_catcher.timeout_event.is_on())
+                report_catcher.timeout_event.wait_on();
             if (engines[queue_id].head_seq() != 31 ||
                 engines[queue_id].tail_seq() != 32 ||
                 engines[queue_id].outstanding_count() != 1 ||
                 adapter.published_tails[queue_id].size() != 1 ||
-                collectors[queue_id].observations.size() != 0)
+                collectors[queue_id].observations.size() != 0 ||
+                report_catcher.timeout_count != timeout_before + 1)
                 `uvm_fatal("DMAQ_DRIVER_LATE_STATE",
-                           "sequence timeout changed queue state or tail history")
+                           {"deadline settlement did not report exactly once ",
+                            "or changed queue state or tail history"})
             dut.read_slot(engines[queue_id], 31, 32, raw);
             if (!bytes_equal(raw, expected))
                 `uvm_fatal("DMAQ_DRIVER_LATE_BYTES",
