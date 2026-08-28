@@ -1,7 +1,7 @@
 # DMAQ Reuse of the Generic Queue Library
 
 **Date:** 2026-08-28
-**Status:** Approved baseline; configurable-profile revision pending written-spec review
+**Status:** Approved
 
 ## 1. Purpose
 
