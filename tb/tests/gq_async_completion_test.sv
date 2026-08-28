@@ -1,6 +1,28 @@
 `ifndef GQ_ASYNC_COMPLETION_TEST_SV
 `define GQ_ASYNC_COMPLETION_TEST_SV
 
+class gq_async_invalid_query_catcher extends uvm_report_catcher;
+    `uvm_object_utils(gq_async_invalid_query_catcher)
+
+    bit armed;
+    int unsigned caught_count;
+
+    function new(string name = "gq_async_invalid_query_catcher");
+        super.new(name);
+        armed = 0;
+        caught_count = 0;
+    endfunction
+
+    virtual function action_e catch();
+        if (armed && get_severity() == UVM_WARNING &&
+            get_id() == "GQ_COMPLETION_QUERY") begin
+            caught_count++;
+            return CAUGHT;
+        end
+        return THROW;
+    endfunction
+endclass
+
 class gq_async_completion_test extends uvm_test;
     `uvm_component_utils(gq_async_completion_test)
 
@@ -89,8 +111,10 @@ class gq_async_completion_test extends uvm_test;
 
     task check_invalid_and_stale_query();
         mailbox_tx_desc desc;
+        gq_async_invalid_query_catcher invalid_query_catcher;
         bit drain_returned;
         bit reset_entered;
+        int unsigned invalid_query_count_before;
         longint unsigned starting_epoch;
 
         engine.initialize();
@@ -100,7 +124,20 @@ class gq_async_completion_test extends uvm_test;
         async_source.next_valid = 0;
         async_source.next_count = 1;
         async_source.release_query.trigger();
+        invalid_query_catcher = gq_async_invalid_query_catcher::type_id::create(
+            "invalid_query_catcher");
+        uvm_report_cb::add(engine, invalid_query_catcher);
+        invalid_query_count_before = invalid_query_catcher.caught_count;
+        invalid_query_catcher.armed = 1;
         engine.drain_completed();
+        invalid_query_catcher.armed = 0;
+        uvm_report_cb::delete(engine, invalid_query_catcher);
+        if (invalid_query_catcher.caught_count !=
+            invalid_query_count_before + 1)
+            `uvm_fatal("ASYNC_INVALID_REPORT", $sformatf(
+                "expected one invalid-query warning, caught %0d",
+                invalid_query_catcher.caught_count -
+                invalid_query_count_before))
         if (engine.head_seq() != 0 || engine.outstanding_count() != 1)
             `uvm_fatal("ASYNC_INVALID",
                        "invalid completion query retired a descriptor")
