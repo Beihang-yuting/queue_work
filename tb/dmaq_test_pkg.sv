@@ -10,8 +10,10 @@ package dmaq_test_pkg;
 
     `include "host_mem_manager.sv"
     `include "mocks/dmaq_mock_adapter.sv"
+    `include "mocks/dmaq_mock_dut.sv"
     `include "tests/dmaq_desc_test.sv"
     `include "tests/dmaq_sequence_test.sv"
+    `include "tests/dmaq_driver_conformance_test.sv"
 endpackage
 
 `endif
