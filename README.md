@@ -687,6 +687,102 @@ the adapter receives no data, keep, TUSER, or control callbacks after the
 failed ready wait and performs no later-chunk ready waits for that transaction.
 The per-channel lock is then released, so a subsequent transaction can run.
 
+## Use the DMAQ transfer queue
+
+DMAQ is an independent EMP transfer-queue library. Its one TX descriptor is
+always exactly **`DMAQ_DESC_BYTES==32`** bytes; descriptor size is not a
+profile field and does not change when queue geometry is customized. The
+little-endian wire layout is:
+
+| Offset | Size | Field |
+| ---: | ---: | --- |
+| `0x00` | 2 | flags |
+| `0x02` | 2 | destination BDF raw |
+| `0x04` | 2 | destination host ID |
+| `0x06` | 2 | destination length |
+| `0x08` | 8 | destination address |
+| `0x10` | 8 | source address |
+| `0x18` | 2 | source BDF raw |
+| `0x1a` | 2 | source host ID |
+| `0x1c` | 2 | source length |
+| `0x1e` | 2 | reserved (always zero) |
+
+`mark_available()` writes `AVAIL=1, USED=0`; hardware completion sets `USED`.
+Only the two-byte flags field may change after preparation. `unpack()` rejects
+any change to BDF, host ID, either length, either address, or reserved bytes.
+DMAQ never allocates or frees transfer buffers: source and destination
+addresses are borrowed from the caller, whose storage must remain valid until
+the engine has retired the descriptor or reset/cleanup has released engine
+ownership. A transfer length must be in `1..65535` and is stored identically
+in the source and destination length fields.
+
+Each `dmaq_endpoint_t` carries an endpoint role, a 64-bit address, a 16-bit
+host ID, and a raw 16-bit BDF. The supported operations require these role
+pairs:
+
+| Operation | Source | Destination |
+| --- | --- | --- |
+| `DMAQ_AF_TO_HOST` | AF | Host |
+| `DMAQ_HOST_TO_AF` | Host | AF |
+| `DMAQ_HOST_TO_HOST` | Host | Host |
+
+`dmaq_ep_bdf(function_number, vf_number, vf_valid)` packs function in
+bits `[3:0]`, VF number in `[11:4]`, VF-valid in bit 12, and clears
+`[15:13]`. `dmaq_switch_bdf(raw_bdf)` preserves the supplied raw 16-bit Switch
+identity without adding a mode bit.
+
+`dmaq_env_cfg` builds exactly one TX queue. Its public fields have these
+defaults: `int unsigned depth = DMAQ_DEFAULT_DEPTH` (32),
+`gq_logical_seq_t initial_logical_seq = DMAQ_DEFAULT_INITIAL_LOGICAL_SEQ`
+(31), `time poll_interval = DMAQ_DEFAULT_POLL_INTERVAL` (10 ns), and
+`time completion_timeout = DMAQ_DEFAULT_COMPLETION_TIMEOUT` (500 ns). Depth
+must be a power of two in `2..32768`, the initial sequence must be below
+depth, Poll must be nonzero, and the environment timeout must exceed it. For
+example, configure the independent custom 64/5 profile as follows:
+
+```systemverilog
+dmaq_env_cfg cfg = dmaq_env_cfg::type_id::create("cfg");
+cfg.depth = 64;
+cfg.initial_logical_seq = 5;
+cfg.poll_interval = 25ns;
+cfg.completion_timeout = 750ns;
+if (!cfg.add_dmaq(0, hw_cfg, reason))
+    `uvm_fatal("DMAQ_CFG", reason)
+```
+
+The default logical head/tail starts at 31: the first descriptor uses slot 31
+and its actual advance publishes `16'h8000`. Under any valid custom geometry,
+the first slot is `initial_logical_seq` and the raw tail is encoded as
+`raw[14:0] = logical_tail % depth`, `raw[15] = (logical_tail / depth) & 1`,
+and `raw[31:16] = 0`; depth 64 with initial sequence 5 therefore first uses
+slot 5 and publishes `16'h0006`.
+
+The standard EMP profile is fixed Poll: equal minimum/maximum intervals use
+`poll_interval`, backoff is 1, and no IRQ watchdog is installed. An advanced
+user may instead construct an explicit DMAQ `gq_queue_cfg` with IRQ and a
+nonzero watchdog; IRQ wait/ACK and watchdog behavior are optional GQ
+extensions, not EMP-standard behavior. `dmaq_reg_adapter` keeps the hardware
+boundary semantic through `reset_dmaq`, `configure_dmaq_registers`,
+`enable_dmaq`, `disable_dmaq`, `write_dmaq_tail`, `wait_dmaq_irq`, and
+`ack_dmaq_irq`. Configuration is reset, configure, enable. A tail write occurs
+exactly once only when a committed logical tail actually advances; polling,
+timeouts, and an unchanged tail do not create another write.
+
+`dmaq_transfer_sequence` submits one descriptor and exposes public
+`operation`, `source`, `destination`, `transfer_length`, and
+`completion_timeout` fields. Its per-sequence timeout defaults to 500 ns and
+may override the environment's diagnostic timeout for that transfer. A
+completion at the inclusive deadline succeeds; after a sequence timeout, a
+late completion remains owned by the engine and may still retire normally.
+Timeout does not advance DMAQ pointers, alter descriptor bytes, or write a
+tail.
+
+Run DMAQ's independent driver conformance test with:
+
+```bash
+make run TEST=dmaq_driver_conformance_test LIBS=dmaq TEST_SUITE=dmaq
+```
+
 ## Run with VCS
 
 On a machine where VCS and the UVM license environment are already loaded:

@@ -260,7 +260,7 @@ for command_name in find sort grep git perl; do
     fi
 done
 
-for required_dir in src tb/mocks tb/tests; do
+for required_dir in src src/dmaq tb/mocks tb/tests; do
     if [[ ! -d "$required_dir" ]]; then
         printf 'required directory not found: %s\n' "$required_dir" >&2
         status=1
@@ -272,6 +272,14 @@ for required_file in \
     src/gq/gq_desc_writeback_completion.sv \
     src/gq/gq_index_phase_ptr_codec.sv \
     src/mailbox/mailbox_pkg.sv \
+    src/dmaq/dmaq_pkg.sv \
+    src/dmaq/dmaq_types.sv \
+    src/dmaq/dmaq_tx_desc.sv \
+    src/dmaq/dmaq_completion.sv \
+    src/dmaq/dmaq_ptr_codec.sv \
+    src/dmaq/dmaq_reg_adapter.sv \
+    src/dmaq/dmaq_env.sv \
+    src/dmaq/dmaq_sequences.sv \
     src/cmdq/cmdq_pkg.sv \
     src/cmdq/cmdq_types.sv \
     src/cmdq/cmdq_tx_desc.sv \
@@ -309,6 +317,82 @@ for required_file in \
         status=1
     fi
 done
+
+required_dmaq_files=(
+    src/dmaq/dmaq_completion.sv
+    src/dmaq/dmaq_env.sv
+    src/dmaq/dmaq_pkg.sv
+    src/dmaq/dmaq_ptr_codec.sv
+    src/dmaq/dmaq_reg_adapter.sv
+    src/dmaq/dmaq_sequences.sv
+    src/dmaq/dmaq_tx_desc.sv
+    src/dmaq/dmaq_types.sv
+)
+dmaq_symlinks=()
+if [[ -L src/dmaq ]]; then
+    dmaq_symlinks+=(src/dmaq)
+elif [[ -d src/dmaq ]]; then
+    mapfile -t dmaq_symlinks < <(
+        find src/dmaq -type l -print | sort
+    )
+fi
+if ((${#dmaq_symlinks[@]} != 0)); then
+    printf 'src/dmaq must not contain symbolic links:\n' >&2
+    printf '  %s\n' "${dmaq_symlinks[@]}" >&2
+    status=1
+fi
+
+dmaq_non_sv_files=()
+if [[ -d src/dmaq ]]; then
+    mapfile -t dmaq_non_sv_files < <(
+        find src/dmaq -type f ! -name '*.sv' -print | sort
+    )
+fi
+if ((${#dmaq_non_sv_files[@]} != 0)); then
+    printf 'src/dmaq must contain only .sv files:\n' >&2
+    printf '  %s\n' "${dmaq_non_sv_files[@]}" >&2
+    status=1
+fi
+
+actual_dmaq_files=()
+if [[ -d src/dmaq ]]; then
+    mapfile -t actual_dmaq_files < <(
+        find src/dmaq -type f -name '*.sv' -print | sort
+    )
+fi
+if ((${#actual_dmaq_files[@]} != ${#required_dmaq_files[@]})); then
+    printf 'src/dmaq must contain exactly the %d planned .sv files\n' \
+        "${#required_dmaq_files[@]}" >&2
+    status=1
+else
+    for ((i = 0; i < ${#required_dmaq_files[@]}; i++)); do
+        if [[ ${actual_dmaq_files[i]} != "${required_dmaq_files[i]}" ]]; then
+            printf 'unexpected src/dmaq .sv layout: got %s, expected %s\n' \
+                "${actual_dmaq_files[i]}" "${required_dmaq_files[i]}" >&2
+            status=1
+        fi
+    done
+fi
+
+dmaq_business_imports=()
+dmaq_business_import_pattern='^[[:space:]]*import[[:space:]]+(mailbox_pkg|msgq_pkg|cmdq_pkg|tlpq_pkg|pcie_pkg)[[:space:]]*::'
+if dmaq_business_import_output=$(
+    grep -nirEH "$dmaq_business_import_pattern" src/dmaq
+); then
+    mapfile -t dmaq_business_imports <<< "$dmaq_business_import_output"
+else
+    scan_status=$?
+    if ((scan_status != 1)); then
+        printf 'failed to scan DMAQ business isolation (exit %d)\n' \
+            "$scan_status" >&2
+        exit "$scan_status"
+    fi
+fi
+if ((${#dmaq_business_imports[@]} != 0)); then
+    printf 'DMAQ business-library dependencies remain:\n' >&2
+    printf '  %s\n' "${dmaq_business_imports[@]}" >&2
+    status=1
+fi
 
 required_tlpq_files=(
     src/tlpq/tlpq_completion.sv
