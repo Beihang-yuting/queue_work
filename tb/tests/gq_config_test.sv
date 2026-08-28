@@ -284,6 +284,7 @@ class gq_config_test extends uvm_test;
         bit irq_wait_returned;
         uvm_component default_component;
         gq_queue_engine default_engine;
+        int unsigned lifecycle_disable_before_cleanup;
 
         phase.raise_objection(this);
         env_cfg.wait_ready();
@@ -384,22 +385,32 @@ class gq_config_test extends uvm_test;
         if (lifecycle_engine.head_seq() != 7 || lifecycle_engine.tail_seq() != 7 ||
             lifecycle_engine.outstanding_count() != 0)
             `uvm_fatal("CFG_INITIAL_SEQ", "release reset did not preserve initial logical sequence")
+        lifecycle_disable_before_cleanup = lifecycle_adapter.disable_calls;
         lifecycle_engine.cleanup();
+        if (lifecycle_adapter.disable_calls !=
+            lifecycle_disable_before_cleanup + 1)
+            `uvm_fatal("LIFECYCLE", "cleanup did not disable the queue exactly once")
         if (lifecycle_engine.head_seq() != 7 || lifecycle_engine.tail_seq() != 7 ||
             lifecycle_engine.outstanding_count() != 0)
             `uvm_fatal("CFG_INITIAL_SEQ", "cleanup did not restore initial logical sequence")
         lifecycle_engine.cleanup();
-        if (lifecycle_adapter.disable_calls != 1)
+        if (lifecycle_adapter.disable_calls !=
+            lifecycle_disable_before_cleanup + 1)
             `uvm_fatal("LIFECYCLE", "idempotent cleanup disabled the queue more than once")
 
         lifecycle_engine.initialize();
         if (lifecycle_engine.ring_size() != 2176 ||
             lifecycle_engine.status_addr() != lifecycle_engine.ring_base() + 2048 ||
-            lifecycle_adapter.configure_calls != 2)
+            lifecycle_adapter.configure_calls != 3)
             `uvm_fatal("LIFECYCLE", "sequential reinitialize did not recreate the ring")
+        lifecycle_disable_before_cleanup = lifecycle_adapter.disable_calls;
         lifecycle_engine.cleanup();
+        if (lifecycle_adapter.disable_calls !=
+            lifecycle_disable_before_cleanup + 1)
+            `uvm_fatal("LIFECYCLE", "second cleanup did not disable the queue exactly once")
         lifecycle_engine.cleanup();
-        if (lifecycle_adapter.disable_calls != 2)
+        if (lifecycle_adapter.disable_calls !=
+            lifecycle_disable_before_cleanup + 1)
             `uvm_fatal("LIFECYCLE", "second idempotent cleanup count is incorrect")
 
         env.cleanup();
