@@ -1,7 +1,7 @@
 # DMAQ Reuse of the Generic Queue Library
 
 **Date:** 2026-08-28
-**Status:** Approved in design discussion; pending review of this written specification
+**Status:** Approved baseline; configurable-profile revision pending written-spec review
 
 ## 1. Purpose
 
@@ -11,9 +11,11 @@ generic queue lifecycle. The implementation covers the three EMP transfer
 operations, exact descriptor layout, bit-15 phase wrap, polling completion,
 timeout behavior, reset/cleanup, and a semantic register adapter.
 
-The library must model only behavior established by the reference source. It
-does not reproduce the EMP retry that writes an unchanged tail while waiting;
-the approved contract publishes only when the logical tail advances.
+The default profile models behavior established by the reference source.
+Configurable depth, initial logical sequence, timing, and optional IRQ are
+explicit user extensions and are not presented as EMP-validated settings. The
+library does not reproduce the EMP retry that writes an unchanged tail while
+waiting; the approved contract publishes only when the logical tail advances.
 
 ## 2. Reference Sources
 
@@ -46,14 +48,15 @@ rather than an EMP-validated default.
 
 - An independent `src/dmaq` package with no dependency on another business
   package.
-- A depth-32 TX ring with exact 32-byte descriptors.
-- EMP-compatible initial logical position 31 and first publication
-  `16'h8000`.
+- A configurable TX ring whose EMP-compatible defaults are depth 32, initial
+  logical position 31, and first publication `16'h8000`.
+- Exact 32-byte descriptors; descriptor size is not configurable.
 - AF-to-Host, Host-to-AF, and Host-to-Host transfer operations.
 - Explicit source/destination address, host ID, and raw BDF identity.
 - EP and Switch helper functions for constructing the 16-bit BDF union value.
 - Descriptor writeback completion through `USED`.
-- Fixed polling every 10 ns and a 500 ns synchronous/final timeout.
+- Fixed-interval polling whose default interval is 10 ns and configurable
+  synchronous/final timeouts whose default is 500 ns.
 - Optional IRQ, ACK, and watchdog behavior through existing GQ configuration.
 - Reset, disable, late completion, cleanup, and leak-free lifetime behavior.
 - Driver-conformance tests on `ubuntu@10.11.10.53` with VCS.
@@ -119,10 +122,12 @@ initialization and every completed reset set both logical head and logical tail
 to this value. Outstanding count remains zero because head equals tail.
 
 Every existing business retains the default zero and therefore keeps its
-current slot, pointer, diagnostic, and reset behavior. DMAQ sets the value to
-`DMAQ_DEPTH-1`, which is 31. The existing physical slot expression
-`logical_seq % depth` then selects slot 31 for the first descriptor. Advancing
-from logical tail 31 to 32 produces index 0 with phase 1.
+current slot, pointer, diagnostic, and reset behavior. The DMAQ standard
+profile defaults this value to `DMAQ_DEFAULT_INITIAL_LOGICAL_SEQ`, which is
+31, while allowing a caller to select another value below the configured
+depth. The existing physical slot expression `logical_seq % depth` selects
+the configured initial slot. With the default depth and initial value,
+advancing from logical tail 31 to 32 produces index 0 with phase 1.
 
 The extension applies consistently to submission, completion scanning,
 diagnostics, timeout identity, reset state, and public head/tail accessors.
@@ -132,11 +137,21 @@ diagnostics, timeout identity, reset state, and public head/tail accessors.
 Constants are:
 
 ```systemverilog
-localparam int unsigned DMAQ_DEPTH      = 32;
+localparam int unsigned DMAQ_DEFAULT_DEPTH = 32;
+localparam gq_logical_seq_t DMAQ_DEFAULT_INITIAL_LOGICAL_SEQ = 31;
 localparam int unsigned DMAQ_DESC_BYTES = 32;
+localparam time DMAQ_DEFAULT_POLL_INTERVAL = 10ns;
+localparam time DMAQ_DEFAULT_COMPLETION_TIMEOUT = 500ns;
 localparam bit [15:0] DMAQ_DESC_AVAIL   = 16'h0001;
 localparam bit [15:0] DMAQ_DESC_USED    = 16'h0002;
 ```
+
+There is no independent hardware-format depth constant: depth is a profile
+setting. It must be a power of two from 2 through 32768 so the generic bit-15
+index/phase codec can represent it. `initial_logical_seq` is selected
+independently and must be less than depth. The default pair 32/31 reproduces
+EMP; other valid pairs are supported user extensions. Descriptor size remains
+exactly `DMAQ_DESC_BYTES` for every profile and cannot be overridden.
 
 Operations and endpoint roles are:
 
@@ -206,14 +221,17 @@ triggers a persistent descriptor completion event and returns no payload.
 `[14:0]` and phase bit 15:
 
 ```text
-raw[14:0] = logical_tail % 32
-raw[15]   = (logical_tail / 32) & 1
+raw[14:0] = logical_tail % depth
+raw[15]   = (logical_tail / depth) & 1
 raw[31:16]= 0
 ```
 
-With initial head/tail 31, the first descriptor is slot 31 and the first
-published tail is `16'h8000`. Subsequent publications are `16'h8001` through
-`16'h801f`; the next wrap returns to `16'h0000`.
+With the default depth and initial head/tail 31, the first descriptor is slot
+31 and the first published tail is `16'h8000`. Subsequent publications are
+`16'h8001` through `16'h801f`; the next wrap returns to `16'h0000`. For a
+custom profile, the same formula uses the configured depth and initial logical
+sequence. For example, depth 64 with initial sequence 5 first uses slot 5 and
+publishes raw tail `16'h0006`.
 
 `dmaq_completion` derives from `gq_desc_writeback_completion`. It reads pending
 descriptors in logical order and returns only a contiguous `USED` count. A
@@ -222,15 +240,31 @@ writeback with corrupted stable fields is not retired.
 ## 9. Environment and Register Adapter
 
 The standard `dmaq_env_cfg::add_dmaq()` creates exactly one TX queue per
-environment/adapter instance. It installs:
+environment/adapter instance. Before calling it, a user may set these public
+profile fields:
 
-- depth 32 and descriptor size 32;
-- `initial_logical_seq=31`;
+```systemverilog
+int unsigned     depth;
+gq_logical_seq_t initial_logical_seq;
+time             poll_interval;
+time             completion_timeout;
+```
+
+The constructor initializes them to `DMAQ_DEFAULT_DEPTH`,
+`DMAQ_DEFAULT_INITIAL_LOGICAL_SEQ`, `DMAQ_DEFAULT_POLL_INTERVAL`, and
+`DMAQ_DEFAULT_COMPLETION_TIMEOUT`. `add_dmaq()` validates the complete profile
+before changing queue ownership or adapter metadata. Depth must be a power of
+two in 2..32768, initial logical sequence must be below depth, poll interval
+must be nonzero, and completion timeout must be greater than the poll
+interval. It installs:
+
+- the configured depth and initial logical sequence;
+- fixed descriptor size 32;
 - `dmaq_ptr_codec`;
 - `dmaq_completion`;
-- fixed Poll with min/max interval 10 ns;
+- fixed Poll with equal min/max interval set to `poll_interval`;
 - polling backoff factor 1;
-- completion timeout 500 ns;
+- the configured completion timeout;
 - no IRQ watchdog in the standard EMP profile.
 
 A second queue is rejected before changing the existing queue or adapter
@@ -254,17 +288,20 @@ upper tail bits and calls `write_dmaq_tail()` exactly once for each committed
 logical-tail advance. Polling and timeout do not call it again. Disable is the
 cancellation boundary for blocked register operations and cleanup.
 
-Advanced users may build an explicit DMAQ `gq_queue_cfg` selecting IRQ plus a
-nonzero watchdog while retaining the DMAQ pointer and completion strategies.
-That path is a GQ extension and is tested separately from the standard EMP
-profile.
+Advanced users may also build an explicit DMAQ `gq_queue_cfg` selecting IRQ
+plus a nonzero watchdog while retaining the DMAQ descriptor size, pointer, and
+completion strategies. Configurable depth, initial sequence, timing, and IRQ
+paths outside the default values are GQ extensions and are tested separately
+from the standard EMP profile.
 
 ## 10. Transfer Sequence and Result Semantics
 
 `dmaq_transfer_sequence` submits exactly one descriptor and waits for its
 persistent completion event. Public inputs are operation, source endpoint,
-destination endpoint, transfer length, and completion timeout. The default
-timeout is 500 ns.
+destination endpoint, transfer length, and completion timeout. The public
+sequence timeout defaults to `DMAQ_DEFAULT_COMPLETION_TIMEOUT`, must be
+nonzero, and may be overridden for each transfer independently of the
+environment's final diagnostic timeout.
 
 Result status is one of:
 
@@ -291,10 +328,17 @@ activity without freeing caller-owned transfer buffers.
 
 ### 11.2 Pointer and environment tests
 
-- Initial head/tail 31 and outstanding zero.
-- First slot 31 and first published tail `16'h8000`.
-- Phase progression and wrap through the next `16'h0000`.
-- Reset returns to 31 without affecting queues whose initial value is zero.
+- Default head/tail 31 and outstanding zero.
+- Default first slot 31 and first published tail `16'h8000`.
+- Default phase progression and wrap through the next `16'h0000`.
+- Custom depth 64/initial sequence 5 first uses slot 5 and publishes
+  `16'h0006`.
+- Reset returns to the configured initial sequence without affecting queues
+  whose initial value is zero.
+- Depths below 2, above 32768, or not powers of two and initial sequences at
+  or above depth are rejected without changing adapter metadata.
+- Default timing is 10 ns/500 ns; valid custom poll and final-timeout values
+  reach the generated GQ configuration unchanged.
 - Exact reset/configure/enable/disable callback ordering.
 - Duplicate queue rejection and hardware metadata preservation.
 
@@ -304,8 +348,10 @@ activity without freeing caller-owned transfer buffers.
   engine and a mock DMAQ device.
 - Exactly one tail callback for each newly committed descriptor and no
   unchanged-tail write while waiting.
-- Fixed 10 ns polling, completion before/at/after the 500 ns boundary, and
-  deterministic result status.
+- Default fixed 10 ns polling and completion before/at/after the default
+  500 ns boundary.
+- A non-default fixed poll interval and environment/sequence timeout produce
+  the configured query cadence and inclusive deadline result.
 - Optional IRQ, real/spurious IRQ ACK, watchdog query, reset race, blocked
   adapter operation cancellation, cleanup, and zero leaks.
 
@@ -321,7 +367,8 @@ activity without freeing caller-owned transfer buffers.
 
 DMAQ is complete for the established EMP capability when:
 
-1. the exact descriptor and initial slot/tail behavior match this spec;
+1. the exact descriptor and default EMP slot/tail behavior match this spec,
+   and valid custom depth/initial settings follow the same pointer formula;
 2. all three transfer operations complete through real GQ submission and
    writeback retirement;
 3. no unchanged tail is written during completion waiting;
