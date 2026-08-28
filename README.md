@@ -771,11 +771,11 @@ timeouts, and an unchanged tail do not create another write.
 `dmaq_transfer_sequence` submits one descriptor and exposes public
 `operation`, `source`, `destination`, `transfer_length`, and
 `completion_timeout` fields. Its per-sequence timeout defaults to 500 ns and
-may override the environment's diagnostic timeout for that transfer. A
-completion at the inclusive deadline succeeds; after a sequence timeout, a
-late completion remains owned by the engine and may still retire normally.
-Timeout does not advance DMAQ pointers, alter descriptor bytes, or write a
-tail.
+is independently configurable from the environment's final diagnostic
+timeout. Both timeouts remain active; neither replaces the other. A completion
+at the inclusive deadline succeeds; after a sequence timeout, a late
+completion remains owned by the engine and may still retire normally. Timeout
+does not advance DMAQ pointers, alter descriptor bytes, or write a tail.
 
 Run DMAQ's independent driver conformance test with:
 

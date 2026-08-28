@@ -228,6 +228,147 @@ for my $file (@ARGV) {
 PERL
 }
 
+scan_dmaq_business_imports() {
+    perl - "$@" <<'PERL'
+use strict;
+use warnings;
+
+sub mask_sv_noncode {
+    my ($text) = @_;
+    my $masked = '';
+    my $state = 'code';
+    my $length = length($text);
+    my $i = 0;
+
+    while ($i < $length) {
+        my $ch = substr($text, $i, 1);
+        my $next = ($i + 1 < $length) ? substr($text, $i + 1, 1) : '';
+
+        if ($state eq 'code') {
+            if ($ch eq '/' && $next eq '/') {
+                $masked .= '  ';
+                $i += 2;
+                $state = 'line_comment';
+                next;
+            }
+            if ($ch eq '/' && $next eq '*') {
+                $masked .= '  ';
+                $i += 2;
+                $state = 'block_comment';
+                next;
+            }
+            if ($ch eq '"') {
+                $masked .= ' ';
+                $i++;
+                $state = 'string';
+                next;
+            }
+            $masked .= $ch;
+            $i++;
+            next;
+        }
+
+        if ($state eq 'line_comment') {
+            if ($ch eq "\n") {
+                $masked .= "\n";
+                $state = 'code';
+            } else {
+                $masked .= ' ';
+            }
+            $i++;
+            next;
+        }
+
+        if ($state eq 'block_comment') {
+            if ($ch eq '*' && $next eq '/') {
+                $masked .= '  ';
+                $i += 2;
+                $state = 'code';
+                next;
+            }
+            $masked .= ($ch eq "\n") ? "\n" : ' ';
+            $i++;
+            next;
+        }
+
+        if ($ch eq '\\' && $next ne '') {
+            $masked .= ' ';
+            $masked .= ($next eq "\n") ? "\n" : ' ';
+            $i += 2;
+            next;
+        }
+        if ($ch eq '"') {
+            $masked .= ' ';
+            $i++;
+            $state = 'code';
+            next;
+        }
+        $masked .= ($ch eq "\n") ? "\n" : ' ';
+        $i++;
+    }
+    return $masked;
+}
+
+sub forbidden_business_package {
+    my ($package_name) = @_;
+    return $package_name =~
+        /^(?:mailbox_pkg|msgq_pkg|cmdq_pkg|tlpq_pkg|pcie(?:_[A-Za-z0-9_\$]+)*_pkg)$/i;
+}
+
+for my $file (@ARGV) {
+    open my $fh, '<', $file or die "cannot read $file: $!\n";
+    local $/;
+    my $raw = <$fh>;
+    close $fh or die "cannot close $file: $!\n";
+    my $masked = mask_sv_noncode($raw);
+
+    while ($masked =~ /\bimport\b(.*?);/sg) {
+        my $declaration_start = $-[0];
+        my $declaration_end = $+[0];
+        my $body = $1;
+        my $line = 1 + (substr($masked, 0, $declaration_start) =~ tr/\n//);
+        my $display = substr(
+            $raw, $declaration_start, $declaration_end - $declaration_start);
+        $display =~ s/\/\*.*?\*\// /sg;
+        $display =~ s{//[^\n]*}{ }g;
+        $display =~ s/^\s+|\s+$//g;
+        $display =~ s/\s+/ /g;
+
+        for my $item (split /,/, $body) {
+            next unless $item =~
+                /^\s*([A-Za-z_\$][A-Za-z0-9_\$]*)\s*::/s;
+            my $package_name = $1;
+            next unless forbidden_business_package($package_name);
+            print "$file:$line:forbidden DMAQ import $package_name in $display\n";
+        }
+    }
+}
+PERL
+}
+
+if [[ ${1:-} == --scan-dmaq-imports-only ]]; then
+    shift
+    if (($# == 0)); then
+        printf '%s requires at least one SystemVerilog file\n' \
+            '--scan-dmaq-imports-only' >&2
+        exit 2
+    fi
+    if ! command -v perl >/dev/null 2>&1; then
+        printf 'required command not found: perl\n' >&2
+        exit 2
+    fi
+    if ! dmaq_business_output=$(scan_dmaq_business_imports "$@"); then
+        printf 'failed to scan DMAQ business isolation\n' >&2
+        exit 2
+    fi
+    if [[ -n $dmaq_business_output ]]; then
+        printf 'DMAQ business-library dependencies remain:\n' >&2
+        printf '  %s\n' "$dmaq_business_output" >&2
+        exit 1
+    fi
+    exit 0
+fi
+
 if [[ ${1:-} == --scan-tlpq-addresses-only ]]; then
     shift
     if (($# == 0)); then
@@ -375,20 +516,14 @@ else
 fi
 
 dmaq_business_imports=()
-dmaq_business_import_pattern='^[[:space:]]*import[[:space:]]+(mailbox_pkg|msgq_pkg|cmdq_pkg|tlpq_pkg|pcie_pkg)[[:space:]]*::'
-if dmaq_business_import_output=$(
-    grep -nirEH "$dmaq_business_import_pattern" src/dmaq
+if ! dmaq_business_import_output=$(
+    scan_dmaq_business_imports "${actual_dmaq_files[@]}"
 ); then
-    mapfile -t dmaq_business_imports <<< "$dmaq_business_import_output"
-else
-    scan_status=$?
-    if ((scan_status != 1)); then
-        printf 'failed to scan DMAQ business isolation (exit %d)\n' \
-            "$scan_status" >&2
-        exit "$scan_status"
-    fi
+    printf 'failed to scan DMAQ business isolation\n' >&2
+    exit 2
 fi
-if ((${#dmaq_business_imports[@]} != 0)); then
+if [[ -n $dmaq_business_import_output ]]; then
+    mapfile -t dmaq_business_imports <<< "$dmaq_business_import_output"
     printf 'DMAQ business-library dependencies remain:\n' >&2
     printf '  %s\n' "${dmaq_business_imports[@]}" >&2
     status=1
