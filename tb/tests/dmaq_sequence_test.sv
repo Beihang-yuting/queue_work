@@ -118,7 +118,10 @@ class dmaq_sequence_test extends uvm_test;
             codec.encode_publish(63, 64, 64) != 32'h0000_8000)
             `uvm_fatal("DMAQ_PTR", "index/phase encoding diverged")
 
-        ring_base = 64'h0000_0001_2000_0000;
+        ring_base = mem.alloc(3 * DMAQ_DESC_BYTES, 64,
+                              `__FILE__, `__LINE__);
+        if (ring_base == '1)
+            `uvm_fatal("DMAQ_COMPLETION_SETUP", "ring allocation failed")
         first = make_desc("first");
         second = make_desc("second");
         third = make_desc("third");
@@ -145,6 +148,8 @@ class dmaq_sequence_test extends uvm_test;
         if (valid || completed_count != 0)
             `uvm_fatal("DMAQ_COMPLETION_STABLE",
                        "stable-field corruption retired a descriptor")
+        mem.free(ring_base, `__FILE__, `__LINE__);
+        mem.leak_check(`__FILE__, `__LINE__);
     endtask
 
     function void check_profile(dmaq_env_cfg cfg, int unsigned queue_id,
