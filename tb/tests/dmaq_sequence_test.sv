@@ -16,6 +16,7 @@ class dmaq_scripted_driver extends uvm_driver #(gq_request, gq_response);
     int unsigned request_count;
     int unsigned completion_count;
     bit completed_before_response;
+    dmaq_tx_desc submitted_desc;
 
     function new(string name = "dmaq_scripted_driver",
                  uvm_component parent = null);
@@ -32,6 +33,7 @@ class dmaq_scripted_driver extends uvm_driver #(gq_request, gq_response);
         request_count = 0;
         completion_count = 0;
         completed_before_response = 0;
+        submitted_desc = null;
     endfunction
 
     protected task complete_desc(dmaq_tx_desc desc);
@@ -59,6 +61,7 @@ class dmaq_scripted_driver extends uvm_driver #(gq_request, gq_response);
                 request.size() != 1 || !$cast(desc, request.descs[0]))
                 `uvm_fatal("DMAQ_SCRIPT",
                            "sequence did not submit exactly one DMAQ descriptor")
+            submitted_desc = desc;
             if (desc.operation != expected_operation ||
                 desc.source !== expected_source ||
                 desc.destination !== expected_destination ||
@@ -200,6 +203,7 @@ class dmaq_sequence_test extends uvm_test;
         dmaq_endpoint_t source_before;
         dmaq_endpoint_t destination_before;
         int unsigned requests_before;
+        int unsigned completions_before;
 
         reset_transfer_script();
         seq = dmaq_transfer_sequence::type_id::create("early_seq");
@@ -300,10 +304,16 @@ class dmaq_sequence_test extends uvm_test;
         transfer_driver.complete_after_nba = 1;
         transfer_driver.complete_one_step_late = 1;
         requests_before = transfer_driver.request_count;
+        completions_before = transfer_driver.completion_count;
         start_and_expect(seq, DMAQ_RESULT_TIMEOUT, 75001ps,
                          "one-step-late completion");
-        if (transfer_driver.request_count != requests_before + 1)
-            `uvm_fatal("DMAQ_SEQUENCE_LATE", "late request count diverged")
+        uvm_wait_for_nba_region();
+        if (transfer_driver.request_count != requests_before + 1 ||
+            transfer_driver.completion_count != completions_before + 1 ||
+            transfer_driver.submitted_desc == null ||
+            !transfer_driver.submitted_desc.completion_event.is_on())
+            `uvm_fatal("DMAQ_SEQUENCE_LATE",
+                       "late descriptor did not parse and trigger completion")
     endtask
 
     function dmaq_tx_desc make_desc(string name);
