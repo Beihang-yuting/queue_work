@@ -120,7 +120,7 @@ class dmaq_driver_conformance_test extends uvm_test;
     localparam int unsigned QUEUE_COUNT       = 12;
 
     dmaq_driver_mem mem;
-    dmaq_mock_adapter adapter;
+    dmaq_mock_adapter adapters[int unsigned];
     dmaq_mock_dut dut;
     gq_queue_cfg cfgs[int unsigned];
     dmaq_mock_completion completions[int unsigned];
@@ -235,7 +235,7 @@ class dmaq_driver_conformance_test extends uvm_test;
         profile = dmaq_env_cfg::type_id::create(
             $sformatf("default_profile_%0d", queue_id));
         profile.mem = mem;
-        profile.adapter = adapter;
+        profile.adapter = adapters[queue_id];
         if (!profile.add_dmaq(queue_id, hw_cfg, reason))
             `uvm_fatal("DMAQ_DRIVER_PROFILE", $sformatf(
                 "default queue %0d was rejected: %s", queue_id, reason))
@@ -250,6 +250,11 @@ class dmaq_driver_conformance_test extends uvm_test;
 
     function gq_queue_cfg make_custom_cfg(int unsigned queue_id);
         gq_queue_cfg custom_cfg;
+        string reason;
+
+        if (!adapters[queue_id].reserve_queue_binding(queue_id, hw_cfg,
+                                                       reason))
+            `uvm_fatal("DMAQ_DRIVER_BIND", reason)
 
         custom_cfg = gq_queue_cfg::type_id::create(
             $sformatf("custom_cfg_%0d", queue_id));
@@ -291,6 +296,11 @@ class dmaq_driver_conformance_test extends uvm_test;
     function gq_queue_cfg make_irq_cfg(int unsigned queue_id);
         gq_queue_cfg irq_cfg;
         dmaq_mock_completion irq_completion;
+        string reason;
+
+        if (!adapters[queue_id].reserve_queue_binding(queue_id, hw_cfg,
+                                                       reason))
+            `uvm_fatal("DMAQ_DRIVER_BIND", reason)
 
         irq_cfg = gq_queue_cfg::type_id::create(
             $sformatf("irq_cfg_%0d", queue_id));
@@ -332,19 +342,19 @@ class dmaq_driver_conformance_test extends uvm_test;
         mem = new("mem");
         mem.init_region(64'h0000_0001_d000_0000,
                         64'h0000_0001_d0ff_ffff, MODE_LINEAR, 16);
-        adapter = dmaq_mock_adapter::type_id::create("adapter");
-        adapter.mem = mem;
         hw_cfg.queue_hid = 32'h5aa5_5aa5;
         hw_cfg.queue_bdf = 16'h2345;
         hw_cfg.msix_index = 16'h0042;
         hw_cfg.msix_valid = 1'b1;
-        adapter.hw_cfg = hw_cfg;
         dut = dmaq_mock_dut::type_id::create("dut");
         dut.mem = mem;
-        dut.adapter = adapter;
 
         for (int unsigned queue_id = 0; queue_id < QUEUE_COUNT;
              queue_id++) begin
+            adapters[queue_id] = dmaq_mock_adapter::type_id::create(
+                $sformatf("adapter_%0d", queue_id));
+            adapters[queue_id].mem = mem;
+            dut.adapters[queue_id] = adapters[queue_id];
             if (queue_id == CUSTOM_Q)
                 cfgs[queue_id] = make_custom_cfg(queue_id);
             else if (queue_id == ZERO_Q)
@@ -369,7 +379,7 @@ class dmaq_driver_conformance_test extends uvm_test;
             uvm_config_db#(host_mem_api)::set(
                 this, engine_name, "mem", mem);
             uvm_config_db#(gq_hw_adapter)::set(
-                this, engine_name, "adapter", adapter);
+                this, engine_name, "adapter", adapters[queue_id]);
             engines[queue_id] = gq_queue_engine::type_id::create(
                 engine_name, this);
             sequencers[queue_id] = gq_sequencer::type_id::create(
@@ -403,19 +413,24 @@ class dmaq_driver_conformance_test extends uvm_test;
         int unsigned configure_before;
         int unsigned enable_before;
 
-        reset_before = adapter.reset_count.exists(queue_id) ?
-                       adapter.reset_count[queue_id] : 0;
-        configure_before = adapter.configure_count.exists(queue_id) ?
-                           adapter.configure_count[queue_id] : 0;
-        enable_before = adapter.enable_count.exists(queue_id) ?
-                        adapter.enable_count[queue_id] : 0;
+        reset_before = adapters[queue_id].reset_count.exists(queue_id) ?
+                       adapters[queue_id].reset_count[queue_id] : 0;
+        configure_before =
+            adapters[queue_id].configure_count.exists(queue_id) ?
+            adapters[queue_id].configure_count[queue_id] : 0;
+        enable_before = adapters[queue_id].enable_count.exists(queue_id) ?
+                        adapters[queue_id].enable_count[queue_id] : 0;
         engines[queue_id].initialize();
         if (!engines[queue_id].is_ready() ||
-            adapter.reset_count[queue_id] != reset_before + 1 ||
-            adapter.configure_count[queue_id] != configure_before + 1 ||
-            adapter.enable_count[queue_id] != enable_before + 1 ||
-            adapter.configured_depth[queue_id] != cfgs[queue_id].depth ||
-            adapter.configured_desc_size[queue_id] != DMAQ_DESC_BYTES)
+            adapters[queue_id].reset_count[queue_id] != reset_before + 1 ||
+            adapters[queue_id].configure_count[queue_id] !=
+                configure_before + 1 ||
+            adapters[queue_id].enable_count[queue_id] != enable_before + 1 ||
+            adapters[queue_id].configured_depth[queue_id] !=
+                cfgs[queue_id].depth ||
+            adapters[queue_id].configured_desc_size[queue_id] !=
+                DMAQ_DESC_BYTES ||
+            adapters[queue_id].configured_hw_cfg[queue_id] != hw_cfg)
             `uvm_fatal("DMAQ_DRIVER_SETUP", $sformatf(
                 "queue %0d did not reset/configure/enable its public profile",
                 queue_id))
@@ -424,12 +439,15 @@ class dmaq_driver_conformance_test extends uvm_test;
     task wait_for_publish_count(int unsigned queue_id,
                                 int unsigned expected_count,
                                 string label);
-        while (adapter.published_tails[queue_id].size() < expected_count) begin
-            adapter.publish_events[queue_id].reset();
-            if (adapter.published_tails[queue_id].size() < expected_count)
-                adapter.publish_events[queue_id].wait_on();
+        while (adapters[queue_id].published_tails[queue_id].size() <
+               expected_count) begin
+            adapters[queue_id].publish_events[queue_id].reset();
+            if (adapters[queue_id].published_tails[queue_id].size() <
+                expected_count)
+                adapters[queue_id].publish_events[queue_id].wait_on();
         end
-        if (adapter.published_tails[queue_id].size() != expected_count)
+        if (adapters[queue_id].published_tails[queue_id].size() !=
+            expected_count)
             `uvm_fatal("DMAQ_DRIVER_PUBLISH", {label,
                        " observed an unexpected extra tail write"})
     endtask
@@ -463,12 +481,13 @@ class dmaq_driver_conformance_test extends uvm_test;
     task wait_for_irq_waits(int unsigned queue_id,
                             int unsigned expected_count,
                             string label);
-        while (adapter.wait_irq_count[queue_id] < expected_count) begin
-            adapter.irq_wait_events[queue_id].reset();
-            if (adapter.wait_irq_count[queue_id] < expected_count)
-                adapter.irq_wait_events[queue_id].wait_on();
+        while (adapters[queue_id].wait_irq_count[queue_id] <
+               expected_count) begin
+            adapters[queue_id].irq_wait_events[queue_id].reset();
+            if (adapters[queue_id].wait_irq_count[queue_id] < expected_count)
+                adapters[queue_id].irq_wait_events[queue_id].wait_on();
         end
-        if (adapter.wait_irq_count[queue_id] != expected_count)
+        if (adapters[queue_id].wait_irq_count[queue_id] != expected_count)
             `uvm_fatal("DMAQ_DRIVER_IRQ_WAIT", {label,
                        " observed an unexpected IRQ wait count"})
     endtask
@@ -476,12 +495,12 @@ class dmaq_driver_conformance_test extends uvm_test;
     task wait_for_disable_count(int unsigned queue_id,
                                 int unsigned expected_count,
                                 string label);
-        while (adapter.disable_count[queue_id] < expected_count) begin
-            adapter.disable_events[queue_id].reset();
-            if (adapter.disable_count[queue_id] < expected_count)
-                adapter.disable_events[queue_id].wait_on();
+        while (adapters[queue_id].disable_count[queue_id] < expected_count) begin
+            adapters[queue_id].disable_events[queue_id].reset();
+            if (adapters[queue_id].disable_count[queue_id] < expected_count)
+                adapters[queue_id].disable_events[queue_id].wait_on();
         end
-        if (adapter.disable_count[queue_id] != expected_count)
+        if (adapters[queue_id].disable_count[queue_id] != expected_count)
             `uvm_fatal("DMAQ_DRIVER_DISABLE", {label,
                        " observed an unexpected disable count"})
     endtask
@@ -576,7 +595,7 @@ class dmaq_driver_conformance_test extends uvm_test;
         dmaq_tx_desc desc;
         gq_response response;
 
-        adapter.clear_trace();
+        adapters[MAIN_Q].clear_trace();
         initialize_queue(MAIN_Q);
         if (engines[MAIN_Q].head_seq() != 31 ||
             engines[MAIN_Q].tail_seq() != 31 ||
@@ -614,7 +633,7 @@ class dmaq_driver_conformance_test extends uvm_test;
             wait_for_publish_count(MAIN_Q, index + 1, "literal transfer");
             dut.read_slot(engines[MAIN_Q], 31 + index, 32, raw);
             if (sequence_done.is_on() || !bytes_equal(raw, expected) ||
-                adapter.published_tails[MAIN_Q][index] !=
+                adapters[MAIN_Q].published_tails[MAIN_Q][index] !=
                     literal_tails[index] ||
                 mem.allocation_calls != allocation_before ||
                 mem.free_calls != free_before)
@@ -622,24 +641,24 @@ class dmaq_driver_conformance_test extends uvm_test;
                            "literal descriptor, tail, block, or ownership diverged")
 
             if (index == 0) begin
-                if (adapter.trace.size() != 4 ||
-                    adapter.trace[0] != "RESET(queue=0)" ||
-                    adapter.trace[1] !=
+                if (adapters[MAIN_Q].trace.size() != 4 ||
+                    adapters[MAIN_Q].trace[0] != "RESET(queue=0)" ||
+                    adapters[MAIN_Q].trace[1] !=
                         {"CONFIGURE(queue=0,base=0x00000001d0000000,",
                          "depth=32,size=32,hid=0x5aa55aa5,bdf=0x2345,",
                          "msix=0x0042,valid=1)"} ||
-                    adapter.trace[2] != "ENABLE(queue=0)" ||
-                    adapter.trace[3] !=
+                    adapters[MAIN_Q].trace[2] != "ENABLE(queue=0)" ||
+                    adapters[MAIN_Q].trace[3] !=
                         "PUBLISH(queue=0,tail=0x8000)" ||
-                    adapter.publish_inspection_count[MAIN_Q] != 1 ||
-                    !bytes_equal(adapter.last_published_slot[MAIN_Q],
+                    adapters[MAIN_Q].publish_inspection_count[MAIN_Q] != 1 ||
+                    !bytes_equal(adapters[MAIN_Q].last_published_slot[MAIN_Q],
                                  expected))
                     `uvm_fatal("DMAQ_DRIVER_ORDER",
                                "first publish did not follow reset/configure/enable or inspect committed bytes")
                 query_before = completions[MAIN_Q].query_times.size();
                 wait_for_queries(MAIN_Q, query_before + 3,
                                  "default fixed poll");
-                if (adapter.published_tails[MAIN_Q].size() != 1 ||
+                if (adapters[MAIN_Q].published_tails[MAIN_Q].size() != 1 ||
                     sequence_done.is_on() ||
                     completions[MAIN_Q].query_times[query_before + 1] -
                         completions[MAIN_Q].query_times[query_before] != 10ns ||
@@ -681,9 +700,9 @@ class dmaq_driver_conformance_test extends uvm_test;
             free_before = mem.free_calls;
             submit_one(MAIN_Q, DMAQ_AF_TO_HOST, source, destination,
                        int'(logical_seq - 33), desc, response);
-            if (adapter.published_tails[MAIN_Q].size() !=
+            if (adapters[MAIN_Q].published_tails[MAIN_Q].size() !=
                     int'(logical_seq - 30) ||
-                adapter.published_tails[MAIN_Q][logical_seq - 31] !=
+                adapters[MAIN_Q].published_tails[MAIN_Q][logical_seq - 31] !=
                     literal_tails[logical_seq - 31] ||
                 mem.allocation_calls != allocation_before ||
                 mem.free_calls != free_before)
@@ -701,18 +720,18 @@ class dmaq_driver_conformance_test extends uvm_test;
                 `uvm_fatal("DMAQ_DRIVER_WRAP_STATE",
                            "wrap did not retire once without business buffers")
         end
-        if (adapter.published_tails[MAIN_Q].size() != 33 ||
-            adapter.published_tails[MAIN_Q][0] != 16'h8000 ||
-            adapter.published_tails[MAIN_Q][1] != 16'h8001 ||
-            adapter.published_tails[MAIN_Q][31] != 16'h801f ||
-            adapter.published_tails[MAIN_Q][32] != 16'h0000 ||
+        if (adapters[MAIN_Q].published_tails[MAIN_Q].size() != 33 ||
+            adapters[MAIN_Q].published_tails[MAIN_Q][0] != 16'h8000 ||
+            adapters[MAIN_Q].published_tails[MAIN_Q][1] != 16'h8001 ||
+            adapters[MAIN_Q].published_tails[MAIN_Q][31] != 16'h801f ||
+            adapters[MAIN_Q].published_tails[MAIN_Q][32] != 16'h0000 ||
             engines[MAIN_Q].head_seq() != 64 ||
             engines[MAIN_Q].tail_seq() != 64)
             `uvm_fatal("DMAQ_DRIVER_WRAP",
                        "logical tail 64 did not publish the exact phase series")
         query_before = completions[MAIN_Q].query_times.size();
         #100ns;
-        if (adapter.published_tails[MAIN_Q].size() != 33 ||
+        if (adapters[MAIN_Q].published_tails[MAIN_Q].size() != 33 ||
             completions[MAIN_Q].query_times.size() != query_before)
             `uvm_fatal("DMAQ_DRIVER_IDLE",
                        "idle time queried or rewrote a zero-outstanding queue")
@@ -752,7 +771,7 @@ class dmaq_driver_conformance_test extends uvm_test;
         wait_for_publish_count(CUSTOM_Q, 1, "custom first publish");
         dut.read_slot(engines[CUSTOM_Q], 5, 64, raw);
         if (!bytes_equal(raw, expected) ||
-            adapter.published_tails[CUSTOM_Q][0] != 16'h0006)
+            adapters[CUSTOM_Q].published_tails[CUSTOM_Q][0] != 16'h0006)
             `uvm_fatal("DMAQ_DRIVER_CUSTOM_SLOT",
                        "custom descriptor was not in physical slot five")
         wait_for_queries(CUSTOM_Q, query_before + 3, "custom fixed poll");
@@ -875,7 +894,8 @@ class dmaq_driver_conformance_test extends uvm_test;
                 if (!dut.complete_slot(engines[queue_id], 31, 32))
                     `uvm_fatal("DMAQ_DRIVER_DUT",
                                {label, " scheduled completion was rejected"})
-                engines[queue_id].drain_completed();
+                if (timing_case != 1)
+                    engines[queue_id].drain_completed();
                 completion_injected.trigger();
             end
         join_none
@@ -883,7 +903,7 @@ class dmaq_driver_conformance_test extends uvm_test;
         wait_for_publish_count(queue_id, 1, label);
         dut.read_slot(engines[queue_id], 31, 32, raw);
         if (!bytes_equal(raw, expected) ||
-            adapter.published_tails[queue_id][0] != 16'h8000)
+            adapters[queue_id].published_tails[queue_id][0] != 16'h8000)
             `uvm_fatal("DMAQ_DRIVER_TIMEOUT_DESC",
                        {label, " did not publish the default literal slot"})
         if (timing_case == 1) begin
@@ -903,7 +923,7 @@ class dmaq_driver_conformance_test extends uvm_test;
             if (engines[queue_id].head_seq() != 31 ||
                 engines[queue_id].tail_seq() != 32 ||
                 engines[queue_id].outstanding_count() != 1 ||
-                adapter.published_tails[queue_id].size() != 1 ||
+                adapters[queue_id].published_tails[queue_id].size() != 1 ||
                 collectors[queue_id].observations.size() != 0 ||
                 report_catcher.timeout_count != timeout_before + 1)
                 `uvm_fatal("DMAQ_DRIVER_LATE_STATE",
@@ -965,6 +985,10 @@ class dmaq_driver_conformance_test extends uvm_test;
         int unsigned allocation_before;
         int unsigned free_before;
         int unsigned invalid_before;
+        int unsigned completion_writes_before;
+        byte slot_before[];
+        byte slot_after[];
+        gq_addr_t slot_addr;
 
         initialize_queue(ERROR_Q);
         select_literal_transfer(0, operation, source, destination,
@@ -973,6 +997,35 @@ class dmaq_driver_conformance_test extends uvm_test;
         free_before = mem.free_calls;
         submit_one(ERROR_Q, operation, source, destination,
                    transfer_length, desc, response);
+        slot_addr = engines[ERROR_Q].ring_base() +
+                    (31 * DMAQ_DESC_BYTES);
+        dut.read_slot(engines[ERROR_Q], 31, 32, slot_before);
+        for (int invalid_offset = 0; invalid_offset <= 1;
+             invalid_offset++) begin
+            completion_writes_before = dut.completion_write_count;
+            if (dut.complete_slot(engines[ERROR_Q], 31, 32,
+                                  invalid_offset))
+                `uvm_fatal("DMAQ_DRIVER_CORRUPT_FLAGS",
+                           "flags-byte corruption was accepted")
+            dut.read_slot(engines[ERROR_Q], 31, 32, slot_after);
+            if (dut.completion_write_count != completion_writes_before ||
+                !bytes_equal(slot_after, slot_before))
+                `uvm_fatal("DMAQ_DRIVER_CORRUPT_FLAGS",
+                           "rejected flags-byte corruption changed the slot")
+        end
+
+        if (!dut.complete_slot(engines[ERROR_Q], 31, 32))
+            `uvm_fatal("DMAQ_DRIVER_CORRUPT_SENTINEL",
+                       "no-corruption sentinel was rejected")
+        mem.write_mem(slot_addr, slot_before, `__FILE__, `__LINE__);
+        for (int stable_offset = 2; stable_offset < DMAQ_DESC_BYTES;
+             stable_offset++) begin
+            if (!dut.complete_slot(engines[ERROR_Q], 31, 32,
+                                   stable_offset))
+                `uvm_fatal("DMAQ_DRIVER_CORRUPT_STABLE",
+                           "stable descriptor corruption was rejected")
+            mem.write_mem(slot_addr, slot_before, `__FILE__, `__LINE__);
+        end
         report_catcher.expect_invalid_query = 1;
         invalid_before = report_catcher.invalid_query_count;
         if (!dut.complete_slot(engines[ERROR_Q], 31, 32, 2))
@@ -1018,12 +1071,12 @@ class dmaq_driver_conformance_test extends uvm_test;
         wait_for_irq_waits(IRQ_Q, 1, "real IRQ");
         if (!dut.complete_slot(engines[IRQ_Q], 31, 32))
             `uvm_fatal("DMAQ_DRIVER_DUT", "real IRQ completion failed")
-        ack_before = adapter.ack_irq_count.exists(IRQ_Q) ?
-                     adapter.ack_irq_count[IRQ_Q] : 0;
+        ack_before = adapters[IRQ_Q].ack_irq_count.exists(IRQ_Q) ?
+                     adapters[IRQ_Q].ack_irq_count[IRQ_Q] : 0;
         query_before = completions[IRQ_Q].query_times.size();
         dut.trigger_irq(IRQ_Q);
         wait_for_observations(IRQ_Q, 1, "real IRQ");
-        if (adapter.ack_irq_count[IRQ_Q] != ack_before + 1 ||
+        if (adapters[IRQ_Q].ack_irq_count[IRQ_Q] != ack_before + 1 ||
             completions[IRQ_Q].query_times.size() != query_before + 1 ||
             completions[IRQ_Q].ack_counts_at_query[query_before] !=
                 ack_before + 1 ||
@@ -1036,11 +1089,11 @@ class dmaq_driver_conformance_test extends uvm_test;
         submit_one(IRQ_Q, operation, source, destination,
                    transfer_length, desc, response);
         wait_for_irq_waits(IRQ_Q, 2, "spurious IRQ");
-        ack_before = adapter.ack_irq_count[IRQ_Q];
+        ack_before = adapters[IRQ_Q].ack_irq_count[IRQ_Q];
         query_before = completions[IRQ_Q].query_times.size();
         dut.trigger_irq(IRQ_Q);
         wait_for_queries(IRQ_Q, query_before + 1, "spurious IRQ");
-        if (adapter.ack_irq_count[IRQ_Q] != ack_before + 1 ||
+        if (adapters[IRQ_Q].ack_irq_count[IRQ_Q] != ack_before + 1 ||
             completions[IRQ_Q].ack_counts_at_query[query_before] !=
                 ack_before + 1 ||
             collectors[IRQ_Q].observations.size() != 1 ||
@@ -1053,17 +1106,17 @@ class dmaq_driver_conformance_test extends uvm_test;
         wait_for_irq_waits(IRQ_Q, 3, "lost IRQ watchdog");
         if (!dut.complete_slot(engines[IRQ_Q], 32, 32))
             `uvm_fatal("DMAQ_DRIVER_DUT", "lost IRQ completion failed")
-        ack_before = adapter.ack_irq_count[IRQ_Q];
+        ack_before = adapters[IRQ_Q].ack_irq_count[IRQ_Q];
         query_before = completions[IRQ_Q].query_times.size();
-        trigger_before = adapter.trigger_irq_count[IRQ_Q];
+        trigger_before = adapters[IRQ_Q].trigger_irq_count[IRQ_Q];
         wait_for_observations(IRQ_Q, 2, "lost IRQ watchdog");
         if (cfgs[IRQ_Q].irq_watchdog_interval != 100ns ||
-            adapter.ack_irq_count[IRQ_Q] != ack_before ||
+            adapters[IRQ_Q].ack_irq_count[IRQ_Q] != ack_before ||
             completions[IRQ_Q].query_times.size() < query_before + 1 ||
             completions[IRQ_Q].ack_counts_at_query[query_before] !=
                 ack_before ||
-            adapter.trigger_irq_count[IRQ_Q] != trigger_before ||
-            adapter.published_tails[IRQ_Q].size() != 2 ||
+            adapters[IRQ_Q].trigger_irq_count[IRQ_Q] != trigger_before ||
+            adapters[IRQ_Q].published_tails[IRQ_Q].size() != 2 ||
             engines[IRQ_Q].outstanding_count() != 0)
             `uvm_fatal("DMAQ_DRIVER_LOST_IRQ",
                        "nonzero watchdog failed to recover without an IRQ ACK")
@@ -1093,16 +1146,16 @@ class dmaq_driver_conformance_test extends uvm_test;
         wait_for_irq_waits(RESET_IRQ_Q, 1, "blocked IRQ reset");
         ring_addr = engines[RESET_IRQ_Q].ring_base();
         ring_free_before = mem.free_count(ring_addr);
-        ack_before = adapter.ack_irq_count.exists(RESET_IRQ_Q) ?
-                     adapter.ack_irq_count[RESET_IRQ_Q] : 0;
+        ack_before = adapters[RESET_IRQ_Q].ack_irq_count.exists(RESET_IRQ_Q) ?
+                     adapters[RESET_IRQ_Q].ack_irq_count[RESET_IRQ_Q] : 0;
         epoch_before = engines[RESET_IRQ_Q].reset_epoch();
         engines[RESET_IRQ_Q].begin_reset();
         if (engines[RESET_IRQ_Q].reset_epoch() != epoch_before + 1)
             `uvm_fatal("DMAQ_DRIVER_RESET_IRQ_EPOCH",
                        "reset did not advance while IRQ wait was blocked")
         engines[RESET_IRQ_Q].finish_reset();
-        if (adapter.disable_count[RESET_IRQ_Q] != 1 ||
-            adapter.ack_irq_count[RESET_IRQ_Q] != ack_before ||
+        if (adapters[RESET_IRQ_Q].disable_count[RESET_IRQ_Q] != 1 ||
+            adapters[RESET_IRQ_Q].ack_irq_count[RESET_IRQ_Q] != ack_before ||
             collectors[RESET_IRQ_Q].observations.size() != 0 ||
             engines[RESET_IRQ_Q].head_seq() != 31 ||
             engines[RESET_IRQ_Q].tail_seq() != 31 ||
@@ -1209,9 +1262,9 @@ class dmaq_driver_conformance_test extends uvm_test;
         ring_addr = engines[RESET_ACK_Q].ring_base();
         ring_free_before = mem.free_count(ring_addr);
         query_before = completions[RESET_ACK_Q].query_times.size();
-        adapter.block_next_irq_ack(RESET_ACK_Q);
+        adapters[RESET_ACK_Q].block_next_irq_ack(RESET_ACK_Q);
         dut.trigger_irq(RESET_ACK_Q);
-        adapter.irq_ack_blocked[RESET_ACK_Q].wait_on();
+        adapters[RESET_ACK_Q].irq_ack_blocked[RESET_ACK_Q].wait_on();
         epoch_before = engines[RESET_ACK_Q].reset_epoch();
         engines[RESET_ACK_Q].begin_reset();
         if (engines[RESET_ACK_Q].reset_epoch() != epoch_before + 1 ||
@@ -1229,9 +1282,9 @@ class dmaq_driver_conformance_test extends uvm_test;
         if (finish_done || mem.free_count(ring_addr) != ring_free_before)
             `uvm_fatal("DMAQ_DRIVER_RESET_ACK_BLOCK",
                        "reset freed the ring before ACK callback returned")
-        adapter.release_irq_ack(RESET_ACK_Q);
+        adapters[RESET_ACK_Q].release_irq_ack(RESET_ACK_Q);
         wait (finish_done);
-        if (adapter.ack_irq_count[RESET_ACK_Q] != 1 ||
+        if (adapters[RESET_ACK_Q].ack_irq_count[RESET_ACK_Q] != 1 ||
             completions[RESET_ACK_Q].query_times.size() != query_before ||
             collectors[RESET_ACK_Q].observations.size() != 0 ||
             engines[RESET_ACK_Q].outstanding_count() != 0 ||
@@ -1263,7 +1316,7 @@ class dmaq_driver_conformance_test extends uvm_test;
                                 transfer_length, expected);
         ring_addr = engines[CLEANUP_PUBLISH_Q].ring_base();
         ring_free_before = mem.free_count(ring_addr);
-        adapter.block_next_publish(CLEANUP_PUBLISH_Q);
+        adapters[CLEANUP_PUBLISH_Q].block_next_publish(CLEANUP_PUBLISH_Q);
         submit_done = 0;
         fork
             begin
@@ -1272,10 +1325,14 @@ class dmaq_driver_conformance_test extends uvm_test;
                 submit_done = 1;
             end
         join_none
-        adapter.publish_blocked[CLEANUP_PUBLISH_Q].wait_on();
-        if (adapter.published_tails[CLEANUP_PUBLISH_Q].size() != 0 ||
-            adapter.publish_inspection_count[CLEANUP_PUBLISH_Q] != 1 ||
-            !bytes_equal(adapter.last_published_slot[CLEANUP_PUBLISH_Q],
+        adapters[CLEANUP_PUBLISH_Q].publish_blocked[
+            CLEANUP_PUBLISH_Q].wait_on();
+        if (adapters[CLEANUP_PUBLISH_Q].published_tails[
+                CLEANUP_PUBLISH_Q].size() != 0 ||
+            adapters[CLEANUP_PUBLISH_Q].publish_inspection_count[
+                CLEANUP_PUBLISH_Q] != 1 ||
+            !bytes_equal(adapters[CLEANUP_PUBLISH_Q].last_published_slot[
+                             CLEANUP_PUBLISH_Q],
                          expected))
             `uvm_fatal("DMAQ_DRIVER_BLOCKED_PUBLISH",
                        "blocked tail callback did not inspect committed memory")
@@ -1289,10 +1346,12 @@ class dmaq_driver_conformance_test extends uvm_test;
         wait_for_disable_count(CLEANUP_PUBLISH_Q, 1,
                                "blocked publish cleanup");
         wait (submit_done && cleanup_done);
-        if (!adapter.publish_returned[CLEANUP_PUBLISH_Q].is_on() ||
+        if (!adapters[CLEANUP_PUBLISH_Q].publish_returned[
+                CLEANUP_PUBLISH_Q].is_on() ||
             response == null || response.status != GQ_ABORTED_BY_RESET ||
             response.committed_count != 0 ||
-            adapter.published_tails[CLEANUP_PUBLISH_Q].size() != 0 ||
+            adapters[CLEANUP_PUBLISH_Q].published_tails[
+                CLEANUP_PUBLISH_Q].size() != 0 ||
             engines[CLEANUP_PUBLISH_Q].ring_base() != 0 ||
             engines[CLEANUP_PUBLISH_Q].head_seq() != 31 ||
             engines[CLEANUP_PUBLISH_Q].tail_seq() != 31 ||

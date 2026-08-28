@@ -350,14 +350,26 @@ class dmaq_sequence_test extends uvm_test;
                                         dmaq_mock_adapter candidate_adapter,
                                         dmaq_hw_cfg_t requested_hw_cfg,
                                         string label);
+        bit before_bound;
+        bit after_bound;
+        int unsigned before_queue_id;
+        int unsigned after_queue_id;
         dmaq_hw_cfg_t before_hw_cfg;
+        dmaq_hw_cfg_t after_hw_cfg;
         string reason;
 
-        before_hw_cfg = candidate_adapter.hw_cfg;
+        before_bound = candidate_adapter.get_queue_binding(before_queue_id,
+                                                            before_hw_cfg);
         if (candidate.add_dmaq(0, requested_hw_cfg, reason) || reason == "" ||
-            candidate.queues.num() != 0 ||
-            candidate_adapter.hw_cfg != before_hw_cfg)
+            candidate.queues.num() != 0)
             `uvm_fatal("DMAQ_PROFILE_REJECT", {label, " was not atomic"})
+        after_bound = candidate_adapter.get_queue_binding(after_queue_id,
+                                                           after_hw_cfg);
+        if (after_bound != before_bound ||
+            (before_bound && (after_queue_id != before_queue_id ||
+                              after_hw_cfg != before_hw_cfg)))
+            `uvm_fatal("DMAQ_PROFILE_REJECT",
+                       {label, " changed the adapter binding"})
     endfunction
 
     task check_pointer_and_completion();
@@ -445,13 +457,15 @@ class dmaq_sequence_test extends uvm_test;
         dmaq_reg_reject_catcher reject_catcher;
         int unsigned configure_before;
         bit wait_returned;
+        string reason;
 
         adapter = dmaq_mock_adapter::type_id::create("semantic_adapter");
         hw_cfg.queue_hid = 32'h89abcdef;
         hw_cfg.queue_bdf = 16'h1234;
         hw_cfg.msix_index = 16'h0055;
         hw_cfg.msix_valid = 1;
-        adapter.hw_cfg = hw_cfg;
+        if (!adapter.reserve_queue_binding(7, hw_cfg, reason))
+            `uvm_fatal("DMAQ_ADAPTER_BIND", reason)
         adapter.configure_queue(GQ_TX, 7, 64'h0000_0001_2000_0000, 64,
                                 DMAQ_DESC_BYTES);
         adapter.publish(GQ_TX, 7, 32'h0000_0006);
@@ -517,15 +531,21 @@ class dmaq_sequence_test extends uvm_test;
         dmaq_env_cfg null_cfg;
         dmaq_env_cfg wrong_cfg;
         dmaq_env_cfg rejected_cfg;
+        dmaq_env_cfg shared_first_cfg;
+        dmaq_env_cfg shared_second_cfg;
         dmaq_mock_adapter default_adapter;
         dmaq_mock_adapter custom_adapter;
         dmaq_mock_adapter duplicate_adapter;
         dmaq_mock_adapter rejected_adapter;
+        dmaq_mock_adapter shared_adapter;
         dmaq_wrong_adapter wrong_adapter;
+        gq_queue_cfg shared_first_queue;
         dmaq_hw_cfg_t hw_cfg;
         dmaq_hw_cfg_t distinct_hw_cfg;
         string reason;
         int unsigned queue_count;
+        int unsigned bound_queue_id;
+        dmaq_hw_cfg_t bound_hw_cfg;
 
         super.build_phase(phase);
         mem = new("mem");
@@ -643,8 +663,36 @@ class dmaq_sequence_test extends uvm_test;
         queue_count = duplicate_cfg.queues.num();
         if (duplicate_cfg.add_dmaq(0, distinct_hw_cfg, reason) || reason == "" ||
             duplicate_cfg.queues.num() != queue_count ||
-            duplicate_adapter.hw_cfg != hw_cfg)
+            !duplicate_adapter.get_queue_binding(bound_queue_id,
+                                                  bound_hw_cfg) ||
+            bound_queue_id != 0 || bound_hw_cfg != hw_cfg)
             `uvm_fatal("DMAQ_PROFILE_DUPLICATE", "duplicate request changed state")
+
+        shared_adapter = dmaq_mock_adapter::type_id::create(
+            "shared_adapter");
+        shared_first_cfg = dmaq_env_cfg::type_id::create(
+            "shared_first_cfg");
+        shared_first_cfg.mem = mem;
+        shared_first_cfg.adapter = shared_adapter;
+        if (!shared_first_cfg.add_dmaq(1, hw_cfg, reason))
+            `uvm_fatal("DMAQ_SHARED_ADAPTER_FIRST", reason)
+        shared_first_queue = shared_first_cfg.queues[
+            gq_queue_key(GQ_TX, 1)];
+
+        shared_second_cfg = dmaq_env_cfg::type_id::create(
+            "shared_second_cfg");
+        shared_second_cfg.mem = mem;
+        shared_second_cfg.adapter = shared_adapter;
+        if (shared_second_cfg.add_dmaq(2, distinct_hw_cfg, reason) ||
+            reason == "" || shared_second_cfg.queues.num() != 0 ||
+            shared_first_cfg.queues.num() != 1 ||
+            shared_first_cfg.queues[gq_queue_key(GQ_TX, 1)] !=
+                shared_first_queue ||
+            !shared_adapter.get_queue_binding(bound_queue_id,
+                                               bound_hw_cfg) ||
+            bound_queue_id != 1 || bound_hw_cfg != hw_cfg)
+            `uvm_fatal("DMAQ_SHARED_ADAPTER_SECOND",
+                       "second environment changed a one-ring adapter binding")
     endfunction
 
     function void connect_phase(uvm_phase phase);

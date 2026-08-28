@@ -34,9 +34,8 @@ class dmaq_mock_adapter extends dmaq_reg_adapter;
     bit block_irq_ack_once[int unsigned];
     bit block_publish_once[int unsigned];
 
-    function new(string name = "dmaq_mock_adapter",
-                 dmaq_hw_cfg_t hw_cfg = '0);
-        super.new(name, hw_cfg);
+    function new(string name = "dmaq_mock_adapter");
+        super.new(name);
         mem = null;
     endfunction
 

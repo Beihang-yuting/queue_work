@@ -85,9 +85,13 @@ class dmaq_env_cfg extends gq_env_cfg;
             reason = {"DMAQ queue configuration: ", queue_reason};
             return 0;
         end
-        if (!add_queue(queue_cfg, reason))
+        if (!installed_adapter.reserve_queue_binding(queue_id, hw_cfg,
+                                                      reason))
             return 0;
-        installed_adapter.hw_cfg = hw_cfg;
+        if (!add_queue(queue_cfg, reason)) begin
+            void'(installed_adapter.release_queue_binding(queue_id, hw_cfg));
+            return 0;
+        end
         return 1;
     endfunction
 endclass

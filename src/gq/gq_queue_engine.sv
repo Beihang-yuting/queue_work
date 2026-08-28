@@ -564,6 +564,8 @@ class gq_queue_engine extends uvm_component;
         gq_logical_seq_t settled_head;
         time diagnostic_timeout;
         string diagnostic_state;
+        bit final_query_valid;
+        int unsigned final_retired_count;
 
         settled_candidate = 0;
         forever begin
@@ -618,7 +620,43 @@ class gq_queue_engine extends uvm_component;
                 completion_commit_boundary.put(1);
                 uvm_wait_for_nba_region();
                 uvm_wait_for_nba_region();
-                continue;
+                drain_completed_once(final_query_valid,
+                                     final_retired_count, 0);
+
+                // The inclusive deadline candidate gets exactly one final,
+                // serialized query after NBA settlement. Revalidate the same
+                // epoch/head under the lifecycle boundary before reserving a
+                // timeout; retirement, reset, or cleanup wins cleanly.
+                completion_commit_boundary.get(1);
+                state_lock.get(1);
+                deadline_violation = ready_value &&
+                                     !reset_requested_value &&
+                                     !shutdown_requested && allocated &&
+                                     reset_epoch_value == settled_epoch &&
+                                     logical_head_seq == settled_head &&
+                                     cfg.completion_timeout != 0 &&
+                                     logical_tail_seq > logical_head_seq &&
+                                     outstanding_since.exists(
+                                         logical_head_seq) &&
+                                     outstanding_published.exists(
+                                         logical_head_seq) &&
+                                     outstanding_published[
+                                         logical_head_seq] &&
+                                     !oldest_timeout_reported &&
+                                     ($time - outstanding_since[
+                                         logical_head_seq]) >=
+                                         cfg.completion_timeout;
+                if (deadline_violation) begin
+                    oldest_timeout_reported = 1;
+                    diagnostic_epoch = reset_epoch_value;
+                    diagnostic_head = logical_head_seq;
+                    diagnostic_timeout = cfg.completion_timeout;
+                end
+                state_lock.put(1);
+                if (!deadline_violation) begin
+                    completion_commit_boundary.put(1);
+                    return;
+                end
             end
 
             if (deadline_violation) begin
@@ -653,12 +691,13 @@ class gq_queue_engine extends uvm_component;
         bit query_valid;
         int unsigned retired_count;
 
-        drain_completed_once(query_valid, retired_count);
+        drain_completed_once(query_valid, retired_count, 1);
     endtask
 
     protected task drain_completed_once(
         output bit query_valid,
-        output int unsigned retired_count);
+        output int unsigned retired_count,
+        input bit check_deadline_after);
         gq_desc_base pending[$];
         gq_desc_base desc;
         gq_logical_seq_t query_head;
@@ -725,7 +764,8 @@ class gq_queue_engine extends uvm_component;
                          "completion source returned an invalid query")
             completion_commit_boundary.put(1);
             completion_serialization.put(1);
-            check_completion_deadline();
+            if (check_deadline_after)
+                check_completion_deadline();
             return;
         end
         if (protocol_violation) begin
@@ -772,7 +812,8 @@ class gq_queue_engine extends uvm_component;
             completion_deadline_state_event.trigger();
         if (retired_count != 0)
             refill_after_progress(retired_count);
-        check_completion_deadline();
+        if (check_deadline_after)
+            check_completion_deadline();
     endtask
 
     // Protected synchronization seam for completion sources that need to
@@ -905,7 +946,7 @@ class gq_queue_engine extends uvm_component;
             if (!ready_snapshot)
                 return;
         end
-        drain_completed_once(query_valid, retired_count);
+        drain_completed_once(query_valid, retired_count, 1);
         if (retired_count != 0)
             wait_policy.note_progress();
         else if (query_valid)
@@ -1908,7 +1949,7 @@ class gq_queue_engine extends uvm_component;
             for (int unsigned i = 0;
                  i < recovery_profile.initial_post_count; i++) begin
                 desc = recovery_profile.create_desc(cfg.queue_id,
-                                                     gq_logical_seq_t'(i));
+                    cfg.initial_logical_seq + gq_logical_seq_t'(i));
                 if (desc == null) begin
                     release_generated(generated_descs);
                     generated_descs.delete();

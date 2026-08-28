@@ -501,6 +501,7 @@ class gq_reset_test extends uvm_test;
         repost_cfg.queue_id           = 22;
         repost_cfg.role               = GQ_RX;
         repost_cfg.depth              = 32;
+        repost_cfg.initial_logical_seq = 9;
         repost_cfg.desc_size          = 16;
         repost_cfg.alignment          = 64;
         repost_cfg.status_area_size   = 0;
@@ -635,6 +636,12 @@ class gq_reset_test extends uvm_test;
         bit repost_configuration_done;
         int unsigned repost_publish_count_before;
         int unsigned repost_disable_count_before;
+        int unsigned repost_start_publish_count_before;
+        gq_deterministic_refill_profile nonzero_restart_profile;
+        gq_request nonzero_restart_request;
+        gq_response nonzero_restart_response;
+        mailbox_rx_desc nonzero_first_desc;
+        mailbox_rx_desc nonzero_second_desc;
         gq_request publish_reset_request;
         gq_response publish_reset_response;
         bit publish_reset_submit_returned;
@@ -1595,8 +1602,65 @@ class gq_reset_test extends uvm_test;
         stale_adapter.disable_delay = 0;
         stale_mem.leak_check(`__FILE__, `__LINE__);
 
+        // Reset restart must recreate RX descriptors from the configured
+        // absolute logical origin, not from a relative zero-based index.
+        repost_engine.initialize();
+        nonzero_restart_profile =
+            gq_deterministic_refill_profile::type_id::create(
+                "nonzero_restart_profile");
+        nonzero_restart_profile.initial_post_count  = 2;
+        nonzero_restart_profile.low_watermark       = 0;
+        nonzero_restart_profile.high_watermark      = 2;
+        nonzero_restart_profile.restart_after_reset = 1;
+        nonzero_restart_profile.base_len            = 300;
+        nonzero_restart_request = gq_request::type_id::create(
+            "nonzero_restart_request");
+        nonzero_restart_request.kind = GQ_START_RX;
+        nonzero_restart_request.set_refill_profile(
+            nonzero_restart_profile);
+        nonzero_restart_response = gq_response::type_id::create(
+            "nonzero_restart_response");
+        repost_engine.start_rx(nonzero_restart_request,
+                               nonzero_restart_response);
+        if (nonzero_restart_response.status != GQ_OK ||
+            repost_engine.head_seq() != 9 || repost_engine.tail_seq() != 11 ||
+            repost_engine.outstanding_count() != 2 ||
+            !$cast(nonzero_first_desc, repost_engine.get_outstanding(9)) ||
+            !$cast(nonzero_second_desc, repost_engine.get_outstanding(10)) ||
+            nonzero_first_desc.get_name() != "rx_22_desc_9" ||
+            nonzero_second_desc.get_name() != "rx_22_desc_10" ||
+            nonzero_first_desc.buf_len != 309 ||
+            nonzero_second_desc.buf_len != 310)
+            `uvm_fatal("RESET_RX_ABSOLUTE_START",
+                       "nonzero-origin RX startup did not use absolute sequences")
+        repost_engine.assert_reset();
+        if (repost_engine.head_seq() != 9 || repost_engine.tail_seq() != 9 ||
+            repost_engine.outstanding_count() != 0 ||
+            repost_engine.ring_base() != 0)
+            `uvm_fatal("RESET_RX_ABSOLUTE_ASSERT",
+                       "nonzero-origin reset did not clear queue ownership")
+        repost_engine.release_reset();
+        if (repost_engine.head_seq() != 9 || repost_engine.tail_seq() != 11 ||
+            repost_engine.outstanding_count() != 2 ||
+            !$cast(nonzero_first_desc, repost_engine.get_outstanding(9)) ||
+            !$cast(nonzero_second_desc, repost_engine.get_outstanding(10)) ||
+            nonzero_first_desc.get_name() != "rx_22_desc_9" ||
+            nonzero_second_desc.get_name() != "rx_22_desc_10" ||
+            nonzero_first_desc.buf_len != 309 ||
+            nonzero_second_desc.buf_len != 310)
+            `uvm_fatal("RESET_RX_ABSOLUTE_RESTART",
+                       "RX reset restart passed relative logical sequences")
+        repost_engine.cleanup();
+        if (repost_engine.ring_base() != 0 ||
+            repost_engine.outstanding_count() != 0)
+            `uvm_fatal("RESET_RX_ABSOLUTE_CLEANUP",
+                       "nonzero-origin RX cleanup retained resources")
+        repost_mem.leak_check(`__FILE__, `__LINE__);
+
         // Cleanup must cancel a reset-release RX repost without returning
         // before release_reset has committed its final lifecycle state.
+        repost_start_publish_count_before = repost_adapter.publish_count[
+            "rx_22"];
         repost_engine.initialize();
         repost_profile = gq_deterministic_refill_profile::type_id::create(
             "repost_profile");
@@ -1613,7 +1677,8 @@ class gq_reset_test extends uvm_test;
             "repost_start_response");
         repost_engine.start_rx(repost_start_request, repost_start_response);
         if (repost_start_response.status != GQ_OK ||
-            repost_adapter.publish_count["rx_22"] != 1)
+            repost_adapter.publish_count["rx_22"] !=
+                repost_start_publish_count_before + 1)
             `uvm_fatal("RESET_REPOST_CLEANUP",
                        "standalone RX startup did not publish")
         repost_engine.assert_reset();

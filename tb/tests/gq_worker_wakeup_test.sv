@@ -926,7 +926,7 @@ class gq_worker_wakeup_test extends uvm_test;
                 $sformatf("watchdog-zero timeout arrived at delta %0t",
                     report_catcher.timeout_times[timeout_before] -
                         publish_time));
-        check_expectation(lost_irq_source.query_calls == 0 &&
+        check_expectation(lost_irq_source.query_calls == 1 &&
                           lost_irq_adapter.ack_irq_calls == 0,
                $sformatf("watchdog-zero deadline queried/ACKed: queries=%0d ack=%0d",
                          lost_irq_source.query_calls,
@@ -967,7 +967,7 @@ class gq_worker_wakeup_test extends uvm_test;
                 $sformatf("late-watchdog timeout arrived at delta %0t",
                     report_catcher.timeout_times[timeout_before] -
                         publish_time));
-        check_expectation(late_watchdog_source.query_calls == 0 &&
+        check_expectation(late_watchdog_source.query_calls == 1 &&
                           late_watchdog_adapter.ack_irq_calls == 0,
                $sformatf("deadline later than watchdog ordering was wrong: queries=%0d ack=%0d",
                          late_watchdog_source.query_calls,
@@ -1009,8 +1009,8 @@ class gq_worker_wakeup_test extends uvm_test;
                     report_catcher.timeout_times[timeout_before] -
                         publish_time));
         check_expectation(
-            report_catcher.invalid_query_count - query_before == 4,
-            $sformatf("persistent-invalid case caught %0d query warnings instead of 4 before deadline",
+            report_catcher.invalid_query_count - query_before == 5,
+            $sformatf("persistent-invalid case caught %0d query warnings instead of 5 including deadline settlement",
                 report_catcher.invalid_query_count - query_before));
         invalid_deadline_engine.cleanup();
         wait_for_worker_stop(invalid_deadline_worker_returned,
@@ -1050,8 +1050,8 @@ class gq_worker_wakeup_test extends uvm_test;
         rx_mem.leak_check(`__FILE__, `__LINE__);
 
         uvm_report_cb::delete(null, report_catcher);
-        check_expectation(report_catcher.invalid_query_count == 5,
-               $sformatf("expected five caught invalid-query warnings, got %0d",
+        check_expectation(report_catcher.invalid_query_count == 6,
+               $sformatf("expected six caught invalid-query warnings, got %0d",
                          report_catcher.invalid_query_count));
         if (expectation_failures != 0)
             `uvm_fatal("GQ_WORKER_WAKEUP", $sformatf(

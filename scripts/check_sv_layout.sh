@@ -335,9 +335,16 @@ for my $file (@ARGV) {
         $display =~ s/\s+/ /g;
 
         for my $item (split /,/, $body) {
-            next unless $item =~
-                /^\s*([A-Za-z_\$][A-Za-z0-9_\$]*)\s*::/s;
-            my $package_name = $1;
+            my $package_name;
+            if ($item =~
+                /^\s*([A-Za-z_\$][A-Za-z0-9_\$]*)\s*::/s) {
+                $package_name = $1;
+            } elsif ($item =~ /^\s*(\\\S+)\s+::/s) {
+                $package_name = $1;
+                $package_name =~ s/^\\//;
+            } else {
+                next;
+            }
             next unless forbidden_business_package($package_name);
             print "$file:$line:forbidden DMAQ import $package_name in $display\n";
         }

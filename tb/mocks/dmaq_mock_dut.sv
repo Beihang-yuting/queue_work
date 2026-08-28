@@ -112,13 +112,12 @@ class dmaq_mock_dut extends uvm_object;
     `uvm_object_utils(dmaq_mock_dut)
 
     host_mem_api mem;
-    dmaq_mock_adapter adapter;
+    dmaq_mock_adapter adapters[int unsigned];
     int unsigned completion_write_count;
 
     function new(string name = "dmaq_mock_dut");
         super.new(name);
         mem = null;
-        adapter = null;
         completion_write_count = 0;
     endfunction
 
@@ -148,13 +147,16 @@ class dmaq_mock_dut extends uvm_object;
         if (mem == null || engine == null || engine.ring_base() == 0 ||
             depth == 0)
             return 0;
+        if (stable_corrupt_offset != -1 &&
+            (stable_corrupt_offset < 2 ||
+             stable_corrupt_offset >= DMAQ_DESC_BYTES))
+            return 0;
         read_slot(engine, logical_seq, depth, raw);
         if (raw.size() != DMAQ_DESC_BYTES)
             return 0;
         raw[0] = byte'(DMAQ_DESC_AVAIL | DMAQ_DESC_USED);
         raw[1] = 8'h00;
-        if (stable_corrupt_offset >= 0 &&
-            stable_corrupt_offset < DMAQ_DESC_BYTES)
+        if (stable_corrupt_offset != -1)
             raw[stable_corrupt_offset] ^= 8'h01;
         slot_addr = engine.ring_base() +
                     ((logical_seq % depth) * DMAQ_DESC_BYTES);
@@ -164,8 +166,8 @@ class dmaq_mock_dut extends uvm_object;
     endfunction
 
     function void trigger_irq(int unsigned queue_id);
-        if (adapter != null)
-            adapter.trigger_irq(queue_id);
+        if (adapters.exists(queue_id) && adapters[queue_id] != null)
+            adapters[queue_id].trigger_irq(queue_id);
     endfunction
 endclass
 

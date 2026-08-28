@@ -112,6 +112,9 @@ expect_dmaq_import_reject same_line_prefixed_import \
 expect_dmaq_import_reject multiline_import \
     $'import uvm_pkg::*,\n    tlpq_pkg::*,\n    gq_pkg::*;'
 
+expect_dmaq_import_reject escaped_import \
+    'import \mailbox_pkg ::*;'
+
 expect_dmaq_import_accept permitted_imports \
     'import uvm_pkg::*, host_mem_pkg::*, gq_pkg::*;'
 
