@@ -112,6 +112,8 @@ class gq_config_test extends uvm_test;
 
         ptr_codec = gq_test_ptr_codec::type_id::create("ptr_codec");
         cfg = gq_queue_cfg::type_id::create("cfg");
+        if (cfg.initial_logical_seq != 0)
+            `uvm_fatal("CFG_INITIAL_SEQ", "default initial logical sequence is not zero")
         cfg.queue_id           = 7;
         cfg.role               = GQ_TX;
         cfg.depth              = 48;
@@ -130,6 +132,13 @@ class gq_config_test extends uvm_test;
         cfg.depth = 32;
         if (!cfg.validate(reason))
             `uvm_fatal("CFG", reason)
+
+        cfg.initial_logical_seq = 31;
+        if (!cfg.validate(reason))
+            `uvm_fatal("CFG_INITIAL_SEQ", {"valid initial sequence rejected: ", reason})
+        cfg.initial_logical_seq = 32;
+        expect_invalid(cfg, "initial logical sequence equal to depth");
+        cfg.initial_logical_seq = 0;
 
         cfg.depth = 0;
         expect_invalid(cfg, "zero depth");
@@ -228,6 +237,7 @@ class gq_config_test extends uvm_test;
         lifecycle_adapter = mailbox_mock_adapter::type_id::create("lifecycle_adapter");
         lifecycle_cfg = make_queue_cfg("lifecycle_cfg", GQ_TX, 77, 32, 64);
         lifecycle_cfg.status_area_size = 128;
+        lifecycle_cfg.initial_logical_seq = 7;
         uvm_config_db#(gq_queue_cfg)::set(this, "lifecycle_engine", "cfg", lifecycle_cfg);
         uvm_config_db#(host_mem_api)::set(this, "lifecycle_engine", "mem", mem);
         uvm_config_db#(gq_hw_adapter)::set(this, "lifecycle_engine", "adapter",
@@ -272,6 +282,8 @@ class gq_config_test extends uvm_test;
         gq_addr_t tx100_base;
         gq_addr_t rx9_base;
         bit irq_wait_returned;
+        uvm_component default_component;
+        gq_queue_engine default_engine;
 
         phase.raise_objection(this);
         env_cfg.wait_ready();
@@ -284,6 +296,11 @@ class gq_config_test extends uvm_test;
         if (!env.has_agent("tx_3") || !env.has_agent("tx_100") ||
             !env.has_agent("rx_9") || env.has_agent("tx_4"))
             `uvm_fatal("SPARSE", "sparse agent keys are incorrect")
+
+        default_component = uvm_root::get().find("uvm_test_top.env.tx_3.engine");
+        if (!$cast(default_engine, default_component) ||
+            default_engine.head_seq() != 0 || default_engine.tail_seq() != 0)
+            `uvm_fatal("CFG_INITIAL_SEQ", "default GQ queue did not start at zero")
 
         if (env.ring_size("tx_3") != 2048 ||
             env.ring_size("tx_100") != 2048 ||
@@ -347,6 +364,9 @@ class gq_config_test extends uvm_test;
             `uvm_fatal("IRQ", "disable_queue did not clear the persistent interrupt")
 
         lifecycle_engine.initialize();
+        if (lifecycle_engine.head_seq() != 7 || lifecycle_engine.tail_seq() != 7 ||
+            lifecycle_engine.outstanding_count() != 0)
+            `uvm_fatal("CFG_INITIAL_SEQ", "initialize did not apply initial logical sequence")
         if (lifecycle_engine.ring_size() != 2176)
             `uvm_fatal("LIFECYCLE", "status-area ring allocation size is incorrect")
         if (lifecycle_engine.status_addr() != lifecycle_engine.ring_base() + 2048)
@@ -356,7 +376,18 @@ class gq_config_test extends uvm_test;
         lifecycle_engine.initialize();
         if (lifecycle_adapter.configure_calls != 1)
             `uvm_fatal("LIFECYCLE", "idempotent initialize configured the queue again")
+        lifecycle_engine.assert_reset();
+        if (lifecycle_engine.head_seq() != 7 || lifecycle_engine.tail_seq() != 7 ||
+            lifecycle_engine.outstanding_count() != 0)
+            `uvm_fatal("CFG_INITIAL_SEQ", "assert reset did not restore initial logical sequence")
+        lifecycle_engine.release_reset();
+        if (lifecycle_engine.head_seq() != 7 || lifecycle_engine.tail_seq() != 7 ||
+            lifecycle_engine.outstanding_count() != 0)
+            `uvm_fatal("CFG_INITIAL_SEQ", "release reset did not preserve initial logical sequence")
         lifecycle_engine.cleanup();
+        if (lifecycle_engine.head_seq() != 7 || lifecycle_engine.tail_seq() != 7 ||
+            lifecycle_engine.outstanding_count() != 0)
+            `uvm_fatal("CFG_INITIAL_SEQ", "cleanup did not restore initial logical sequence")
         lifecycle_engine.cleanup();
         if (lifecycle_adapter.disable_calls != 1)
             `uvm_fatal("LIFECYCLE", "idempotent cleanup disabled the queue more than once")

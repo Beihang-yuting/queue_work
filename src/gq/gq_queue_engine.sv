@@ -279,6 +279,8 @@ class gq_queue_engine extends uvm_component;
         initialize_valid = !shutdown_requested &&
                            reset_epoch_value == initialize_epoch;
         if (initialize_valid) begin
+            logical_head_seq = cfg.initial_logical_seq;
+            logical_tail_seq = cfg.initial_logical_seq;
             reset_requested_value = 0;
             ready_value = 1;
             check_state_invariants("initialize");
@@ -1698,8 +1700,8 @@ class gq_queue_engine extends uvm_component;
         outstanding_since.delete();
         outstanding_published.delete();
         oldest_timeout_reported = 0;
-        logical_head_seq = 0;
-        logical_tail_seq = 0;
+        logical_head_seq = cfg.initial_logical_seq;
+        logical_tail_seq = cfg.initial_logical_seq;
         if (preserve_restart_profile && cfg.role == GQ_RX &&
             refill_profile != null && refill_profile.restart_after_reset)
             preserved_profile = refill_profile;

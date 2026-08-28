@@ -18,6 +18,7 @@ class gq_queue_cfg extends uvm_object;
     time              irq_watchdog_interval;
     time              completion_timeout;
     gq_rx_slot_mode_e rx_slot_mode;
+    gq_logical_seq_t  initial_logical_seq;
 
     gq_ptr_codec         ptr_codec;
     gq_completion_source completion_source;
@@ -38,6 +39,7 @@ class gq_queue_cfg extends uvm_object;
         irq_watchdog_interval = 0;
         completion_timeout    = 0;
         rx_slot_mode           = GQ_RX_EXPLICIT_REFILL;
+        initial_logical_seq    = 0;
         ptr_codec             = null;
         completion_source     = null;
     endfunction
@@ -48,6 +50,13 @@ class gq_queue_cfg extends uvm_object;
 
         if (!gq_is_pow2(depth)) begin
             reason = $sformatf("depth must be a power of two and at least 2 (got %0d)", depth);
+            return 0;
+        end
+
+        if (initial_logical_seq >= depth) begin
+            reason = $sformatf(
+                "initial logical sequence must be below depth (initial=%0d depth=%0d)",
+                initial_logical_seq, depth);
             return 0;
         end
 
