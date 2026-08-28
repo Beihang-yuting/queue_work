@@ -691,11 +691,12 @@ class gq_queue_engine extends uvm_component;
             capture_completion_diagnostic_state(
                 query_epoch, diagnostic_head, 0,
                 diagnostic_current, diagnostic_state);
-            if (diagnostic_current)
-                `uvm_error("GQ_COMPLETION_PROTOCOL", $sformatf(
-                    "completion count %0d exceeds pending=%0d/outstanding=%0d or query head changed; %s",
-                    count, pending.size(), current_outstanding,
-                    diagnostic_state))
+            if (!diagnostic_current)
+                diagnostic_state = "no current outstanding descriptor context";
+            `uvm_error("GQ_COMPLETION_PROTOCOL", $sformatf(
+                "completion count %0d exceeds pending=%0d/outstanding=%0d or query head changed; %s",
+                count, pending.size(), current_outstanding,
+                diagnostic_state))
             completion_commit_boundary.put(1);
             completion_serialization.put(1);
             return;

@@ -738,6 +738,26 @@ class gq_completion_test extends uvm_test;
         protocol_mem.leak_check(`__FILE__, `__LINE__);
     endtask
 
+    task check_empty_window_overcount_protocol();
+        gq_completion_protocol_catcher catcher;
+
+        protocol_engine.initialize();
+        catcher = new("empty_window_protocol_catcher");
+        uvm_report_cb::add(null, catcher);
+        protocol_engine.drain_completed();
+        uvm_report_cb::delete(null, catcher);
+        if (!catcher.caught_protocol_error)
+            `uvm_fatal("EMPTY_WINDOW_PROTOCOL",
+                       "empty-window over-count did not report a protocol error")
+        if (protocol_engine.head_seq() != 0 ||
+            protocol_engine.tail_seq() != 0 ||
+            protocol_engine.outstanding_count() != 0)
+            `uvm_fatal("EMPTY_WINDOW_PROTOCOL",
+                       "empty-window over-count changed engine state")
+        protocol_engine.cleanup();
+        protocol_mem.leak_check(`__FILE__, `__LINE__);
+    endtask
+
     task wait_for_irq_completion_or_timeout();
         irq_wait_timed_out = 0;
         fork : flag_or_timeout
@@ -1116,6 +1136,7 @@ class gq_completion_test extends uvm_test;
         check_tail_memory_endian();
         check_tail_engine_integration();
         check_overcount_protocol();
+        check_empty_window_overcount_protocol();
         check_irq_wait_watchdog();
         check_parallel_irq_waiters();
         run_wait_mode(poll_engine, poll_cfg, poll_mem, poll_adapter,
