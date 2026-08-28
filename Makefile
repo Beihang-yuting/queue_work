@@ -18,6 +18,7 @@ PCIE_INCDIRS := +incdir+$(PCIE_ROOT)/src \
   +incdir+$(PCIE_ROOT)/src/types +incdir+$(PCIE_ROOT)/src/shared \
   +incdir+$(PCIE_ROOT)/src/agent +incdir+$(PCIE_ROOT)/src/env \
   +incdir+$(PCIE_ROOT)/src/adapter +incdir+$(PCIE_ROOT)/src/switch \
+  +incdir+$(PCIE_ROOT)/src/topology \
   +incdir+$(PCIE_ROOT)/src/seq/base \
   +incdir+$(PCIE_ROOT)/src/seq/constraints \
   +incdir+$(PCIE_ROOT)/src/seq/scenario \
@@ -25,6 +26,7 @@ PCIE_INCDIRS := +incdir+$(PCIE_ROOT)/src \
 PCIE_SOURCES := $(PCIE_ROOT)/src/pcie_tl_if.sv \
   $(PCIE_ROOT)/src/shared/pcie_tl_bdf_utils_pkg.sv \
   $(PCIE_ROOT)/src/shared/pcie_tl_device_profile_pkg.sv \
+  $(PCIE_ROOT)/src/topology/pcie_topology_pkg.sv \
   $(PCIE_ROOT)/src/pcie_tl_pkg.sv
 endif
 TEST_SUITE ?= gq
@@ -65,6 +67,7 @@ vcs:
 
 check-layout:
 	./scripts/check_sv_layout.sh
+	./scripts/check_sv_layout_test.sh
 
 run: vcs
 	$(SIMV) +UVM_TESTNAME=$(TEST)

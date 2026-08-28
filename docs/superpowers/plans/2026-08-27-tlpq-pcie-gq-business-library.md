@@ -6,7 +6,7 @@
 
 **Architecture:** Two independent GQ RX engines own depth-32 descriptor rings and one-at-a-time explicit refill. `tlpq_packet_bridge` is the only DPU-layout translator and delegates standard PCIe header encode/decode to `pcie_tl_codec`; TX is a semantic register adapter outside the GQ ring.
 
-**Tech Stack:** SystemVerilog, UVM 1.2, GQ, `host_mem`, `pcie_work` `main@94930e1d69e7a059cd794eb08c5b2e97aa93dc27`, VCS, GNU Make, EMP `tlp.c/tlp.h` from archive SHA-256 `dbc70200...130cae`.
+**Tech Stack:** SystemVerilog, UVM 1.2, GQ, `host_mem`, `pcie_work` `main@a86860d0551af62b21a8faffadc7097e8118bb07`, VCS, GNU Make, EMP `tlp.c/tlp.h` from archive SHA-256 `dbc70200...130cae`.
 
 **Spec:** `docs/superpowers/specs/2026-08-27-msgq-cmdq-tlpq-gq-reuse-design.md`
 
@@ -72,11 +72,11 @@ Run:
 
 ```bash
 git submodule add -b main https://github.com/Beihang-yuting/pcie_work.git pcie_work
-git -C pcie_work checkout 94930e1d69e7a059cd794eb08c5b2e97aa93dc27
+git -C pcie_work checkout a86860d0551af62b21a8faffadc7097e8118bb07
 git submodule status pcie_work
 ```
 
-Expected: output begins with a blank/space status marker followed by `94930e1d69e7a059cd794eb08c5b2e97aa93dc27`; `.gitmodules` records URL and branch `main` without credentials.
+Expected: output begins with a blank/space status marker followed by `a86860d0551af62b21a8faffadc7097e8118bb07`; `.gitmodules` records URL and branch `main` without credentials.
 
 - [ ] **Step 2: Write a failing PCIe codec smoke compilation**
 
@@ -141,6 +141,7 @@ PCIE_INCDIRS := +incdir+$(PCIE_ROOT)/src \
   +incdir+$(PCIE_ROOT)/src/types +incdir+$(PCIE_ROOT)/src/shared \
   +incdir+$(PCIE_ROOT)/src/agent +incdir+$(PCIE_ROOT)/src/env \
   +incdir+$(PCIE_ROOT)/src/adapter +incdir+$(PCIE_ROOT)/src/switch \
+  +incdir+$(PCIE_ROOT)/src/topology \
   +incdir+$(PCIE_ROOT)/src/seq/base \
   +incdir+$(PCIE_ROOT)/src/seq/constraints \
   +incdir+$(PCIE_ROOT)/src/seq/scenario \
@@ -148,6 +149,7 @@ PCIE_INCDIRS := +incdir+$(PCIE_ROOT)/src \
 PCIE_SOURCES := $(PCIE_ROOT)/src/pcie_tl_if.sv \
   $(PCIE_ROOT)/src/shared/pcie_tl_bdf_utils_pkg.sv \
   $(PCIE_ROOT)/src/shared/pcie_tl_device_profile_pkg.sv \
+  $(PCIE_ROOT)/src/topology/pcie_topology_pkg.sv \
   $(PCIE_ROOT)/src/pcie_tl_pkg.sv
 ```
 
@@ -645,7 +647,7 @@ Require all eleven planned `src/tlpq/*.sv` files and the initialized `pcie_work`
 ```bash
 make check-layout
 test "$(git -C pcie_work rev-parse HEAD)" = \
-  94930e1d69e7a059cd794eb08c5b2e97aa93dc27
+  a86860d0551af62b21a8faffadc7097e8118bb07
 rg -n "0x[0-9a-fA-F]+|MSGQ|CMDQ|mailbox_pkg" src/tlpq
 rg -n "class[[:space:]]+pcie_tl_tlp|class[[:space:]]+pcie_tl_codec" src/tlpq
 ```

@@ -87,6 +87,11 @@ sub mask_sv_noncode {
 
 sub address_identifier {
     my ($identifier) = @_;
+    # Normalize ordinary camelCase/PascalCase boundaries before applying the
+    # semantic token match. This catches csrAddress and RXCsrAddress without
+    # turning unrelated substrings such as addressable into address tokens.
+    $identifier =~ s/([A-Z]+)([A-Z][a-z])/$1_$2/g;
+    $identifier =~ s/([a-z0-9])([A-Z])/$1_$2/g;
     return lc($identifier) =~
         /(?:^|_)(?:addr|address|base|offset|register|reg|mmio|csr|bar)(?:_|$)/;
 }
@@ -133,7 +138,8 @@ sub scan_statement {
         \s*;
     }{ }gx;
     my @identifiers = $relation_probe =~ /[A-Za-z_\$][A-Za-z0-9_\$]*/g;
-    my $has_address_identifier = grep { address_identifier($_) } @identifiers;
+    my @address_identifiers = grep { address_identifier($_) } @identifiers;
+    my $has_address_identifier = @address_identifiers != 0;
 
     my $literal_probe = $relation_probe;
     my $has_sv_based = $literal_probe =~
@@ -142,6 +148,22 @@ sub scan_statement {
     $literal_probe =~ s/(?<![A-Za-z0-9_\$])(?:[0-9][0-9_]*\s*)?'\s*[sS]?\s*[bBoOdDhH]\s*[0-9a-fA-F_xXzZ?]+/ /g;
     my $has_unsized_decimal = $literal_probe =~
         /(?<![A-Za-z0-9_\$'])[0-9][0-9_]*(?![A-Za-z0-9_\$])/;
+
+    # Width metadata may legitimately contain an address token and a plain
+    # decimal (for example `define TLPQ_ADDR_WIDTH 64). It is not a register
+    # mapping. Based and C-style hexadecimal literals remain prohibited.
+    my $only_address_width_identifiers = @address_identifiers != 0;
+    for my $identifier (@address_identifiers) {
+        my $normalized = $identifier;
+        $normalized =~ s/([A-Z]+)([A-Z][a-z])/$1_$2/g;
+        $normalized =~ s/([a-z0-9])([A-Z])/$1_$2/g;
+        if (lc($normalized) !~ /(?:^|_)width(?:_|$)/) {
+            $only_address_width_identifiers = 0;
+            last;
+        }
+    }
+    return if !$has_c_hex && !$has_sv_based && $has_unsized_decimal &&
+        $only_address_width_identifiers;
 
     return unless $has_c_hex ||
         ($has_address_identifier && ($has_sv_based || $has_unsized_decimal));
@@ -161,6 +183,30 @@ for my $file (@ARGV) {
     my $raw = <$fh>;
     close $fh or die "cannot close $file: $!\n";
     my $masked = mask_sv_noncode($raw);
+
+    # Preprocessor definitions are line-oriented and need no terminating
+    # semicolon. Scan each logical `define (including backslash continuations)
+    # before the ordinary statement pass, then blank it from that pass while
+    # preserving line numbers.
+    my @masked_lines = split /\n/, $masked, -1;
+    my @raw_lines = split /\n/, $raw, -1;
+    for (my $i = 0; $i < @masked_lines; $i++) {
+        next unless $masked_lines[$i] =~ /^\s*`define\b/;
+        my $start = $i;
+        my $logical_masked = $masked_lines[$i];
+        my $logical_raw = $raw_lines[$i];
+        while ($logical_masked =~ /\\\s*$/ && $i + 1 < @masked_lines) {
+            $i++;
+            $logical_masked .= "\n" . $masked_lines[$i];
+            $logical_raw .= "\n" . $raw_lines[$i];
+        }
+        scan_statement($file, $start + 1, $logical_masked, $logical_raw);
+        for my $line_index ($start .. $i) {
+            $masked_lines[$line_index] =~ s/./ /g;
+        }
+    }
+    $masked = join "\n", @masked_lines;
+
     my $cursor = 0;
     my $line = 1;
 
@@ -312,8 +358,8 @@ else
     done
 fi
 
-pcie_work_pin=94930e1d69e7a059cd794eb08c5b2e97aa93dc27
-expected_pcie_gitlink=$'160000 94930e1d69e7a059cd794eb08c5b2e97aa93dc27 0\tpcie_work'
+pcie_work_pin=a86860d0551af62b21a8faffadc7097e8118bb07
+expected_pcie_gitlink=$'160000 a86860d0551af62b21a8faffadc7097e8118bb07 0\tpcie_work'
 actual_pcie_gitlink=$(git ls-files --stage -- pcie_work)
 if [[ $actual_pcie_gitlink != "$expected_pcie_gitlink" ]]; then
     printf 'pcie_work must be a gitlink pinned at %s\n' \

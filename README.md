@@ -559,12 +559,12 @@ remains behind the one `write_cmdq_tail()` semantic callback for that publish.
 ## Bridge PCIe TLPs and operate TLPQ
 
 TLPQ consumes the `pcie_work` submodule at the exact gitlink
-`94930e1d69e7a059cd794eb08c5b2e97aa93dc27`. Initialize submodules before a
+`a86860d0551af62b21a8faffadc7097e8118bb07`. Initialize submodules before a
 TLPQ build and do not substitute a locally declared `pcie_tl_tlp` or
 `pcie_tl_codec`. For the complete combined build, the compile order is host
 memory; `pcie_tl_if.sv`, the PCIe BDF and device-profile helper packages, and
-`pcie_tl_pkg.sv`; GQ; `mailbox`, `msgq`, `cmdq`, and `tlpq`; then the selected
-test package and `tb_top.sv`.
+`pcie_topology_pkg.sv`; `pcie_tl_pkg.sv`; GQ; `mailbox`, `msgq`, `cmdq`, and
+`tlpq`; then the selected test package and `tb_top.sv`.
 
 `tlpq_packet_bridge` uses the pinned PCIe codec and maintains independent
 literal golden vectors for these nine valid packet categories: Configuration
@@ -595,16 +595,14 @@ nonzero padding is rejected rather than ignored. Each DWORD is represented in
 the DPU byte buffer least-significant byte first, while conversion to and from
 the canonical PCIe codec preserves the DWORD values shown above.
 
-The pinned `pcie_tl_codec.decode()` has a known Completion limitation: it fills
-the common `requester_id` and Tag from Completion DW1 even though Cpl/CplD carry
-those fields in DW2. Therefore generic Cpl/CplD requester/Tag correctness is
-not claimed when their DW2 values differ from the completer/status word. TLPQ
-does not repair or harmonize those semantics locally. Independently literal
-fixtures prove that the raw DW1/DW2 bytes traverse the bridge unchanged, and
-the decoded completer ID, status, BCM, byte count, lower address, and payload
-remain useful evidence; consumers that require requester ID or Tag must retain
-and interpret the raw descriptor bytes until an authorized corrected
-`pcie_work` pin is available.
+The pinned codec carries all ten Tag bits: T9 and T8 use DW0 bits 23 and 19,
+while the low eight bits remain in the type-specific request or Completion
+header field. Completion decode takes `requester_id` and `tag[7:0]` from DW2,
+so Cpl/CplD correlation no longer aliases the DW1 completer/status word. TLPQ
+does not maintain a local compatibility repair. The same pin provides detached
+clone semantics for current TLP subtypes, dynamic Vendor bytes, and Prefix
+objects, so a subscriber may retain a clone without sharing Prefix state with
+the producer.
 
 Each TLPQ RX ring entry is exactly 16 bytes, little-endian, and owns one fresh,
 zero-filled 128-byte receive buffer. The descriptor and owned-buffer contracts
@@ -633,10 +631,10 @@ Completion analysis callbacks are synchronous, so the delivered descriptor
 and decoded TLP are borrowed for callback duration. A subscriber that retains
 the result should clone the `tlpq_rx_desc`, whose clone is a detached snapshot:
 it deep-copies raw DPU bytes and metadata, re-decodes an independent TLP, and
-owns neither the ring nor the receive allocation. Do not retain or directly
-clone only the pinned TLP object. Its clone path omits `at`, shallow-copies
-Prefix handles, and does not preserve all Configuration- and Message-specific
-fields.
+owns neither the ring nor the receive allocation. The pinned PCIe revision also
+supports retaining a direct TLP clone: it preserves `at` and subtype-specific
+fields, copies dynamic Vendor data, and deep-copies Prefix objects. Neither
+clone owns the ring or receive allocation.
 
 Host and Switch RX are separate channels with separate depth-32 rings,
 configuration objects, pointer codecs, completion sources, refill profiles,

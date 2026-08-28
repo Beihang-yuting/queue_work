@@ -1505,14 +1505,10 @@ class tlpq_driver_conformance_test extends uvm_test;
                     cpl_tlp.byte_count != 12'h234 ||
                     cpl_tlp.lower_addr != 7'h5a ||
                     cpl_tlp.payload.size() != 0 ||
-                    // Raw DW2 carries requester/tag 0x1357/0xa6.  The pinned
-                    // codec incorrectly returns DW1 0x89ab/0x32 instead.
-                    cpl_tlp.requester_id != 16'h89ab ||
-                    cpl_tlp.tag[7:0] != 8'h32 ||
-                    cpl_tlp.requester_id == 16'h1357 ||
-                    cpl_tlp.tag[7:0] == 8'ha6)
-                    `uvm_fatal("TLPQ_GOLDEN_CPL_RESIDUAL", {label,
-                               " did not expose the pinned Completion defect"})
+                    cpl_tlp.requester_id != 16'h1357 ||
+                    cpl_tlp.tag != 10'h2a6)
+                    `uvm_fatal("TLPQ_GOLDEN_CPL", {label,
+                               " lost DW2 requester or 10-bit Tag"})
             end
             8: begin
                 if (!$cast(cpl_tlp, snapshot.decoded_tlp) ||
@@ -1529,14 +1525,10 @@ class tlpq_driver_conformance_test extends uvm_test;
                     cpl_tlp.payload[1] != 8'hdc ||
                     cpl_tlp.payload[2] != 8'hba ||
                     cpl_tlp.payload[3] != 8'h98 ||
-                    // Raw DW2 carries requester/tag 0x2468/0xb7; pinned
-                    // decode exposes the unrelated DW1 0x9abc/0x00 values.
-                    cpl_tlp.requester_id != 16'h9abc ||
-                    cpl_tlp.tag[7:0] != 8'h00 ||
-                    cpl_tlp.requester_id == 16'h2468 ||
-                    cpl_tlp.tag[7:0] == 8'hb7)
-                    `uvm_fatal("TLPQ_GOLDEN_CPLD_RESIDUAL", {label,
-                               " did not expose the pinned CplD defect"})
+                    cpl_tlp.requester_id != 16'h2468 ||
+                    cpl_tlp.tag != 10'h3b7)
+                    `uvm_fatal("TLPQ_GOLDEN_CPLD", {label,
+                               " lost DW2 requester or 10-bit Tag"})
             end
             default:
                 `uvm_fatal("TLPQ_GOLDEN_INDEX", "unknown golden vector")
@@ -1608,12 +1600,12 @@ class tlpq_driver_conformance_test extends uvm_test;
         vectors[7] = '{8'h00,8'h00,8'h00,8'h00,
                        8'h5a,8'ha6,8'h57,8'h13,
                        8'h34,8'h32,8'hab,8'h89,
-                       8'h00,8'h00,8'h00,8'h0a};
+                       8'h00,8'h00,8'h80,8'h0a};
         labels[8] = "Completion with Data";
         vectors[8] = '{8'h00,8'h00,8'h00,8'h00,
                        8'h3c,8'hb7,8'h68,8'h24,
                        8'h04,8'h00,8'hbc,8'h9a,
-                       8'h01,8'h00,8'h00,8'h4a,
+                       8'h01,8'h00,8'h88,8'h4a,
                        8'h98,8'hba,8'hdc,8'hfe};
 
         for (int unsigned i = 0; i < 9; i++) begin
@@ -1719,9 +1711,9 @@ class tlpq_driver_conformance_test extends uvm_test;
             check_golden_snapshot(i, labels[i], snapshot, vectors[i],
                                   metadata[i], retired_addr[i]);
         end
-        `uvm_info("TLPQ_COMPLETION_EXTERNAL_RESIDUAL",
-            {"raw Cpl DW2 requester/tag=1357/a6 and CplD=2468/b7; ",
-             "pinned decode exposes incorrect DW1 values 89ab/32 and 9abc/00"},
+        `uvm_info("TLPQ_COMPLETION_CODEC",
+            {"raw Cpl requester/tag=1357/2a6 and CplD=2468/3b7 ",
+             "decoded from DW2 plus DW0 T9/T8"},
             UVM_LOW)
         `uvm_info("TLPQ_GOLDEN_FULL_CHAIN",
             {"nine independent literal DPU byte fixtures traversed owned ",

@@ -111,7 +111,7 @@ class tlpq_bridge_test extends uvm_test;
                                 tlp_type_e expected_type,
                                 bit [9:0] expected_length,
                                 bit [15:0] expected_requester,
-                                bit [7:0] expected_tag,
+                                bit [9:0] expected_tag,
                                 int expected_payload_size);
         if (actual == null)
             `uvm_fatal("TLPQ_DECODE", {vector_name, ": decoded null TLP"})
@@ -119,14 +119,14 @@ class tlpq_bridge_test extends uvm_test;
             actual.type_f != expected_type ||
             actual.length != expected_length ||
             actual.requester_id != expected_requester ||
-            actual.tag[7:0] != expected_tag ||
+            actual.tag != expected_tag ||
             actual.payload.size() != expected_payload_size)
             `uvm_fatal("TLPQ_DECODE", $sformatf(
                 {"%s: common decode mismatch kind=%s fmt=%s type=0x%02h ",
-                 "len=%0d requester=0x%04h tag=0x%02h payload=%0d"},
+                 "len=%0d requester=0x%04h tag=0x%03h payload=%0d"},
                 vector_name, actual.kind.name(), actual.fmt.name(),
                 actual.type_f, actual.length, actual.requester_id,
-                actual.tag[7:0], actual.payload.size()))
+                actual.tag, actual.payload.size()))
     endfunction
 
     function pcie_tl_tlp run_literal_vector(
@@ -473,10 +473,8 @@ class tlpq_bridge_test extends uvm_test;
         request.fmt = FMT_3DW_NO_DATA;
         request.type_f = TLP_TYPE_CPL;
         request.length = 10'd0;
-        // Pinned decode reads common requester/tag from DW1 for every kind.
-        // Harmonize Completion values so public-codec round trip remains exact.
-        request.requester_id = 16'h89ab;
-        request.tag = 10'h032;
+        request.requester_id = 16'h1357;
+        request.tag = 10'h2a6;
         request.completer_id = 16'h89ab;
         request.cpl_status = CPL_STATUS_UR;
         request.bcm = 1'b1;
@@ -485,16 +483,16 @@ class tlpq_bridge_test extends uvm_test;
 
         expected = new[4];
         expected[0] = 32'h0000_0000;
-        expected[1] = 32'h89ab_325a;
+        expected[1] = 32'h1357_a65a;
         expected[2] = 32'h89ab_3234;
-        expected[3] = 32'h0a00_0000;
+        expected[3] = 32'h0a80_0000;
 
         decoded_base = run_literal_vector("completion", request, expected);
         if (!$cast(decoded, decoded_base))
             `uvm_fatal("TLPQ_CLASS", "completion did not decode as pcie_tl_cpl_tlp")
         expect_common("completion", decoded, TLP_CPL,
                       FMT_3DW_NO_DATA, TLP_TYPE_CPL, 10'd0,
-                      16'h89ab, 8'h32, 0);
+                      16'h1357, 10'h2a6, 0);
         if (decoded.completer_id != 16'h89ab ||
             decoded.cpl_status != CPL_STATUS_UR || !decoded.bcm ||
             decoded.byte_count != 12'h234 || decoded.lower_addr != 7'h5a)
@@ -513,10 +511,8 @@ class tlpq_bridge_test extends uvm_test;
         request.fmt = FMT_3DW_WITH_DATA;
         request.type_f = TLP_TYPE_CPL;
         request.length = 10'd1;
-        // DW1[15:8] is zero for this completion, matching the pinned common
-        // decode only when the explicit Tag is zero.
-        request.requester_id = 16'h9abc;
-        request.tag = 10'h000;
+        request.requester_id = 16'h2468;
+        request.tag = 10'h3b7;
         request.completer_id = 16'h9abc;
         request.cpl_status = CPL_STATUS_SC;
         request.bcm = 1'b0;
@@ -530,9 +526,9 @@ class tlpq_bridge_test extends uvm_test;
 
         expected = new[5];
         expected[0] = 32'h0000_0000;
-        expected[1] = 32'h9abc_003c;
+        expected[1] = 32'h2468_b73c;
         expected[2] = 32'h9abc_0004;
-        expected[3] = 32'h4a00_0001;
+        expected[3] = 32'h4a88_0001;
         expected[4] = 32'hfedc_ba98;
 
         decoded_base = run_literal_vector("completion_with_data", request, expected);
@@ -540,7 +536,7 @@ class tlpq_bridge_test extends uvm_test;
             `uvm_fatal("TLPQ_CLASS", "completion_with_data did not decode as pcie_tl_cpl_tlp")
         expect_common("completion_with_data", decoded, TLP_CPLD,
                       FMT_3DW_WITH_DATA, TLP_TYPE_CPL, 10'd1,
-                      16'h9abc, 8'h00, 4);
+                      16'h2468, 10'h3b7, 4);
         if (decoded.completer_id != 16'h9abc ||
             decoded.cpl_status != CPL_STATUS_SC || decoded.bcm ||
             decoded.byte_count != 12'h004 || decoded.lower_addr != 7'h3c ||
@@ -549,11 +545,9 @@ class tlpq_bridge_test extends uvm_test;
             `uvm_fatal("TLPQ_FIELDS", "completion_with_data fields/payload changed")
     endfunction
 
-    // Characterization only: the bridge preserves independent Completion
-    // DW1/DW2 values, while the pinned codec incorrectly sources the common
-    // requester/tag fields from DW1.  Do not harmonize these fixtures or turn
-    // this external residual into a local semantic repair.
-    function void check_completion_decode_residual();
+    // Independent literal Completion headers prove that the bridge preserves
+    // DW1/DW2 and that the pinned codec reconstructs requester and 10-bit Tag.
+    function void check_completion_decode_contract();
         bit [31:0] words[];
         bit [7:0] dpu_bytes[];
         bit [7:0] canonical[];
@@ -566,37 +560,34 @@ class tlpq_bridge_test extends uvm_test;
         words[0] = 32'h0000_0000;
         words[1] = 32'h1357_a65a;
         words[2] = 32'h89ab_3234;
-        words[3] = 32'h0a00_0000;
+        words[3] = 32'h0a80_0000;
         words_to_dpu_bytes(words, dpu_bytes);
-        expected_canonical = '{8'h0a,8'h00,8'h00,8'h00,
+        expected_canonical = '{8'h0a,8'h80,8'h00,8'h00,
                                8'h89,8'hab,8'h32,8'h34,
                                8'h13,8'h57,8'ha6,8'h5a};
         expect_success("noncoordinated_cpl raw conversion",
             bridge.dpu_bytes_to_codec(dpu_bytes, canonical, reason), reason);
         expect_bytes("noncoordinated_cpl canonical bytes",
                      canonical, expected_canonical);
-        expect_success("noncoordinated_cpl pinned decode",
+        expect_success("noncoordinated_cpl decode",
             bridge.decode_tlp(dpu_bytes, decoded_base, reason), reason);
         if (!$cast(decoded, decoded_base) || decoded == null ||
             decoded.completer_id != 16'h89ab ||
             decoded.cpl_status != CPL_STATUS_UR || !decoded.bcm ||
             decoded.byte_count != 12'h234 || decoded.lower_addr != 7'h5a ||
-            // Raw DW2 is 0x1357_a65a, but the pinned common decode reads DW1.
-            decoded.requester_id != 16'h89ab ||
-            decoded.tag[7:0] != 8'h32 ||
-            decoded.requester_id == 16'h1357 ||
-            decoded.tag[7:0] == 8'ha6)
-            `uvm_fatal("TLPQ_CPL_EXTERNAL_RESIDUAL",
-                "non-coordinated Cpl no longer exposes the pinned decode defect")
+            decoded.requester_id != 16'h1357 ||
+            decoded.tag != 10'h2a6)
+            `uvm_fatal("TLPQ_CPL_DECODE",
+                "non-coordinated Cpl lost DW2 requester or 10-bit Tag")
 
         words = new[5];
         words[0] = 32'h0000_0000;
         words[1] = 32'h2468_b73c;
         words[2] = 32'h9abc_0004;
-        words[3] = 32'h4a00_0001;
+        words[3] = 32'h4a88_0001;
         words[4] = 32'hfedc_ba98;
         words_to_dpu_bytes(words, dpu_bytes);
-        expected_canonical = '{8'h4a,8'h00,8'h00,8'h01,
+        expected_canonical = '{8'h4a,8'h88,8'h00,8'h01,
                                8'h9a,8'hbc,8'h00,8'h04,
                                8'h24,8'h68,8'hb7,8'h3c,
                                8'hfe,8'hdc,8'hba,8'h98};
@@ -604,7 +595,7 @@ class tlpq_bridge_test extends uvm_test;
             bridge.dpu_bytes_to_codec(dpu_bytes, canonical, reason), reason);
         expect_bytes("noncoordinated_cpld canonical bytes",
                      canonical, expected_canonical);
-        expect_success("noncoordinated_cpld pinned decode",
+        expect_success("noncoordinated_cpld decode",
             bridge.decode_tlp(dpu_bytes, decoded_base, reason), reason);
         if (!$cast(decoded, decoded_base) || decoded == null ||
             decoded.completer_id != 16'h9abc ||
@@ -613,13 +604,10 @@ class tlpq_bridge_test extends uvm_test;
             decoded.payload.size() != 4 ||
             decoded.payload[0] != 8'hfe || decoded.payload[1] != 8'hdc ||
             decoded.payload[2] != 8'hba || decoded.payload[3] != 8'h98 ||
-            // Raw DW2 is 0x2468_b73c, but the pinned common decode reads DW1.
-            decoded.requester_id != 16'h9abc ||
-            decoded.tag[7:0] != 8'h00 ||
-            decoded.requester_id == 16'h2468 ||
-            decoded.tag[7:0] == 8'hb7)
-            `uvm_fatal("TLPQ_CPLD_EXTERNAL_RESIDUAL",
-                "non-coordinated CplD no longer exposes the pinned decode defect")
+            decoded.requester_id != 16'h2468 ||
+            decoded.tag != 10'h3b7)
+            `uvm_fatal("TLPQ_CPLD_DECODE",
+                "non-coordinated CplD lost DW2 requester or 10-bit Tag")
     endfunction
 
     // Mutation caught: interpreting a data Length of zero as anything but 1024 DW.
@@ -969,7 +957,7 @@ class tlpq_bridge_test extends uvm_test;
         check_message_with_data();
         check_completion();
         check_completion_with_data();
-        check_completion_decode_residual();
+        check_completion_decode_contract();
         check_max_length_data();
         check_unsupported_prefix_and_ecrc();
         check_malformed_layouts();

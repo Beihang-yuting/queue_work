@@ -34,7 +34,7 @@ The design is based on these fixed references:
 - PCIe transaction-layer project:
   - URL: `https://github.com/Beihang-yuting/pcie_work.git`
   - branch: `main`
-  - pinned commit: `94930e1d69e7a059cd794eb08c5b2e97aa93dc27`
+  - pinned commit: `a86860d0551af62b21a8faffadc7097e8118bb07`
 - Host-memory project:
   - URL: `https://github.com/Beihang-yuting/host_mem.git`
   - existing pinned commit:
@@ -87,7 +87,7 @@ The repository structure will be:
 ```text
 queue_work/
 |-- host_mem/                 # existing Git submodule
-|-- pcie_work/                # new Git submodule, main@94930e1d...
+|-- pcie_work/                # new Git submodule, main@a86860d...
 |-- src/
 |   |-- gq/
 |   |   |-- gq_pkg.sv
@@ -713,4 +713,3 @@ The feature is accepted when:
    golden vectors.
 9. Poll, IRQ, lost-IRQ watchdog, spurious IRQ, and lifecycle races pass.
 10. The complete VCS regression passes on `10.11.10.53`.
-
