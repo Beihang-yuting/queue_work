@@ -10,6 +10,7 @@ LIB_SOURCE_mailbox := src/mailbox/mailbox_pkg.sv
 LIB_SOURCE_msgq := src/msgq/msgq_pkg.sv
 LIB_SOURCE_cmdq := src/cmdq/cmdq_pkg.sv
 LIB_SOURCE_tlpq := src/tlpq/tlpq_pkg.sv
+LIB_SOURCE_dmaq := src/dmaq/dmaq_pkg.sv
 LIB_SOURCES := $(foreach lib,$(LIB_LIST),$(LIB_SOURCE_$(lib)))
 LIB_INCDIRS := $(foreach lib,$(LIB_LIST),+incdir+src/$(lib))
 ifneq ($(filter tlpq,$(LIB_LIST)),)
@@ -34,10 +35,12 @@ TEST_PACKAGE_gq := tb/gq_test_pkg.sv
 TEST_PACKAGE_msgq := tb/msgq_test_pkg.sv
 TEST_PACKAGE_cmdq := tb/cmdq_test_pkg.sv
 TEST_PACKAGE_tlpq := tb/tlpq_test_pkg.sv
+TEST_PACKAGE_dmaq := tb/dmaq_test_pkg.sv
 TEST_DEFINE_gq := +define+QUEUE_TEST_GQ
 TEST_DEFINE_msgq := +define+QUEUE_TEST_MSGQ
 TEST_DEFINE_cmdq := +define+QUEUE_TEST_CMDQ
 TEST_DEFINE_tlpq := +define+QUEUE_TEST_TLPQ
+TEST_DEFINE_dmaq := +define+QUEUE_TEST_DMAQ
 TEST_PACKAGE_SOURCE := $(TEST_PACKAGE_$(TEST_SUITE))
 UNKNOWN_LIBS := $(foreach lib,$(LIB_LIST),\
                   $(if $(LIB_SOURCE_$(lib)),,$(lib)))
