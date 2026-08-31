@@ -884,6 +884,12 @@ class dmaq_driver_conformance_test extends uvm_test;
                     1: begin
                         #500ns;
                         uvm_wait_for_nba_region();
+                        completions[queue_id].query_blocked.wait_on();
+                        if (!dut.complete_slot(engines[queue_id], 31, 32))
+                            `uvm_fatal("DMAQ_DRIVER_DUT",
+                                       {label, " scheduled completion was rejected"})
+                        completions[queue_id].release_query();
+                        completion_injected.trigger();
                     end
                     default: begin
                         #500ns;
@@ -891,12 +897,14 @@ class dmaq_driver_conformance_test extends uvm_test;
                         allow_late_completion.wait_on();
                     end
                 endcase
-                if (!dut.complete_slot(engines[queue_id], 31, 32))
+                if (timing_case != 1 &&
+                    !dut.complete_slot(engines[queue_id], 31, 32))
                     `uvm_fatal("DMAQ_DRIVER_DUT",
                                {label, " scheduled completion was rejected"})
                 if (timing_case != 1)
                     engines[queue_id].drain_completed();
-                completion_injected.trigger();
+                if (timing_case != 1)
+                    completion_injected.trigger();
             end
         join_none
 
@@ -906,6 +914,8 @@ class dmaq_driver_conformance_test extends uvm_test;
                 $time + cfgs[queue_id].completion_timeout,
                 engines[queue_id].head_seq(),
                 engines[queue_id].reset_epoch());
+        if (timing_case == 1)
+            completions[queue_id].block_next_query();
         dut.read_slot(engines[queue_id], 31, 32, raw);
         if (!bytes_equal(raw, expected) ||
             adapters[queue_id].published_tails[queue_id][0] != 16'h8000)
@@ -964,17 +974,17 @@ class dmaq_driver_conformance_test extends uvm_test;
                 `uvm_fatal("DMAQ_DRIVER_DEADLINE",
                            {label, " did not honor the inclusive deadline"})
             if (timing_case == 1 &&
-                (completions[queue_id].settlement_query_count != 2 ||
+                (completions[queue_id].blocked_query_count != 1 ||
                  completions[queue_id].final_settlement_query_count != 1))
                 `uvm_fatal("DMAQ_DRIVER_DEADLINE_QUERY_CARDINALITY",
                            $sformatf("%s expected one final settlement query after one normal Poll query at epoch=%0d head=%0d; observed deadline_queries=%0d final_queries=%0d", label,
                                      completions[queue_id].settlement_epoch,
                                      completions[queue_id].settlement_head,
-                                     completions[queue_id].settlement_query_count,
+                                     completions[queue_id].blocked_query_count,
                                      completions[queue_id].final_settlement_query_count))
             else if (timing_case == 1)
                 `uvm_info("DMAQ_DRIVER_DEADLINE_QUERY_CARDINALITY",
-                          $sformatf("deadline_queries=%0d final_queries=%0d", completions[queue_id].settlement_query_count, completions[queue_id].final_settlement_query_count), UVM_LOW)
+                          $sformatf("normal_queries=%0d final_queries=%0d", completions[queue_id].normal_settlement_query_count, completions[queue_id].final_settlement_query_count), UVM_LOW)
         end
         if (mem.allocation_calls != allocation_before ||
             mem.free_calls != free_before)

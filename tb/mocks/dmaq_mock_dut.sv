@@ -60,6 +60,8 @@ class dmaq_mock_completion extends dmaq_completion;
     bit settlement_observation_armed;
     int unsigned settlement_query_count;
     int unsigned final_settlement_query_count;
+    int unsigned normal_settlement_query_count;
+    int unsigned blocked_query_count;
 
     function new(string name = "dmaq_mock_completion");
         super.new(name);
@@ -74,6 +76,8 @@ class dmaq_mock_completion extends dmaq_completion;
         settlement_observation_armed = 0;
         settlement_query_count = 0;
         final_settlement_query_count = 0;
+        normal_settlement_query_count = 0;
+        blocked_query_count = 0;
     endfunction
 
     function void arm_settlement_observation(time deadline_time,
@@ -85,6 +89,8 @@ class dmaq_mock_completion extends dmaq_completion;
         settlement_observation_armed = 1;
         settlement_query_count = 0;
         final_settlement_query_count = 0;
+        normal_settlement_query_count = 0;
+        blocked_query_count = 0;
     endfunction
 
     function void block_next_query();
@@ -110,14 +116,14 @@ class dmaq_mock_completion extends dmaq_completion;
         output int unsigned completed_count);
         dmaq_mock_adapter dmaq_adapter;
         bit block_this_query;
+        bit sampled_valid;
+        int unsigned sampled_count;
 
         query_times.push_back($time);
         if (settlement_observation_armed &&
             $time == settlement_deadline_time &&
             logical_head == settlement_head) begin
             settlement_query_count++;
-            if (settlement_query_count > 1)
-                final_settlement_query_count++;
         end
         if ($cast(dmaq_adapter, adapter) &&
             dmaq_adapter.ack_irq_count.exists(queue_id))
@@ -126,14 +132,26 @@ class dmaq_mock_completion extends dmaq_completion;
         else
             ack_counts_at_query.push_back(0);
         block_this_query = block_next_query_value;
-        if (block_this_query) begin
+        if (block_this_query)
             block_next_query_value = 0;
-            query_blocked.trigger();
-            query_release.wait_on();
+        if (settlement_observation_armed &&
+            $time == settlement_deadline_time &&
+            logical_head == settlement_head) begin
+            if (block_this_query)
+                normal_settlement_query_count++;
+            else
+                final_settlement_query_count++;
         end
         super.query_completed(mem, adapter, ring_base, status_addr,
                               depth, desc_size, logical_head, pending,
-                              valid, completed_count);
+                              sampled_valid, sampled_count);
+        if (block_this_query) begin
+            blocked_query_count++;
+            query_blocked.trigger();
+            query_release.wait_on();
+        end
+        valid = sampled_valid;
+        completed_count = sampled_count;
         query_event.trigger();
     endtask
 endclass
