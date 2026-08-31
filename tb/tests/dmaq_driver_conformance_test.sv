@@ -901,6 +901,11 @@ class dmaq_driver_conformance_test extends uvm_test;
         join_none
 
         wait_for_publish_count(queue_id, 1, label);
+        if (timing_case == 1)
+            completions[queue_id].arm_settlement_observation(
+                $time + cfgs[queue_id].completion_timeout,
+                engines[queue_id].head_seq(),
+                engines[queue_id].reset_epoch());
         dut.read_slot(engines[queue_id], 31, 32, raw);
         if (!bytes_equal(raw, expected) ||
             adapters[queue_id].published_tails[queue_id][0] != 16'h8000)
@@ -958,6 +963,18 @@ class dmaq_driver_conformance_test extends uvm_test;
                 report_catcher.timeout_count != timeout_before)
                 `uvm_fatal("DMAQ_DRIVER_DEADLINE",
                            {label, " did not honor the inclusive deadline"})
+            if (timing_case == 1 &&
+                (completions[queue_id].settlement_query_count != 2 ||
+                 completions[queue_id].final_settlement_query_count != 1))
+                `uvm_fatal("DMAQ_DRIVER_DEADLINE_QUERY_CARDINALITY",
+                           $sformatf("%s expected one final settlement query after one normal Poll query at epoch=%0d head=%0d; observed deadline_queries=%0d final_queries=%0d", label,
+                                     completions[queue_id].settlement_epoch,
+                                     completions[queue_id].settlement_head,
+                                     completions[queue_id].settlement_query_count,
+                                     completions[queue_id].final_settlement_query_count))
+            else if (timing_case == 1)
+                `uvm_info("DMAQ_DRIVER_DEADLINE_QUERY_CARDINALITY",
+                          $sformatf("deadline_queries=%0d final_queries=%0d", completions[queue_id].settlement_query_count, completions[queue_id].final_settlement_query_count), UVM_LOW)
         end
         if (mem.allocation_calls != allocation_before ||
             mem.free_calls != free_before)

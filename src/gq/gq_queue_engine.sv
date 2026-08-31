@@ -63,6 +63,9 @@ class gq_queue_engine extends uvm_component;
     protected time outstanding_since[gq_logical_seq_t];
     protected bit outstanding_published[gq_logical_seq_t];
     protected bit oldest_timeout_reported;
+    protected bit settlement_reserved;
+    protected longint unsigned settlement_reserved_epoch;
+    protected gq_logical_seq_t settlement_reserved_head;
     protected gq_logical_seq_t logical_head_seq;
     protected gq_logical_seq_t logical_tail_seq;
     protected gq_refill_profile refill_profile;
@@ -108,6 +111,9 @@ class gq_queue_engine extends uvm_component;
         logical_head_seq  = 0;
         logical_tail_seq  = 0;
         oldest_timeout_reported = 0;
+        settlement_reserved = 0;
+        settlement_reserved_epoch = 0;
+        settlement_reserved_head = 0;
         refill_profile    = null;
         rx_started        = 0;
         space_available   = new({name, "_space_available"});
@@ -399,8 +405,10 @@ class gq_queue_engine extends uvm_component;
     // completion retirement must remove both before advancing the logical head.
     protected function void install_outstanding(gq_logical_seq_t seq,
                                                 gq_desc_base desc);
-        if (outstanding.num() == 0)
+        if (outstanding.num() == 0) begin
             oldest_timeout_reported = 0;
+            settlement_reserved = 0;
+        end
         outstanding[seq] = desc;
         outstanding_ids[desc.get_inst_id()] = 1;
         outstanding_since[seq] = $time;
@@ -423,6 +431,7 @@ class gq_queue_engine extends uvm_component;
         outstanding_published.delete(seq);
         logical_head_seq++;
         oldest_timeout_reported = 0;
+        settlement_reserved = 0;
         check_state_invariants("completion retire");
     endfunction
 
@@ -557,21 +566,19 @@ class gq_queue_engine extends uvm_component;
         bit diagnostic_current;
         bit retry_deadline;
         bit settle_deadline;
-        bit settled_candidate;
+        bit reservation_match;
         longint unsigned diagnostic_epoch;
-        longint unsigned settled_epoch;
         gq_logical_seq_t diagnostic_head;
-        gq_logical_seq_t settled_head;
         time diagnostic_timeout;
         string diagnostic_state;
         bit final_query_valid;
         int unsigned final_retired_count;
 
-        settled_candidate = 0;
         forever begin
             deadline_violation = 0;
             retry_deadline = 0;
             settle_deadline = 0;
+            reservation_match = 0;
             completion_commit_boundary.get(1);
             state_lock.get(1);
             deadline_candidate = ready_value && !reset_requested_value &&
@@ -586,19 +593,22 @@ class gq_queue_engine extends uvm_component;
                                  $time >=
                                      outstanding_since[logical_head_seq];
             if (deadline_candidate) begin
+                reservation_match = settlement_reserved &&
+                                    settlement_reserved_epoch == reset_epoch_value &&
+                                    settlement_reserved_head == logical_head_seq;
                 settle_deadline =
                     ($time - outstanding_since[logical_head_seq]) ==
                         cfg.completion_timeout &&
-                    (!settled_candidate ||
-                     settled_epoch != reset_epoch_value ||
-                     settled_head != logical_head_seq);
+                    (!settlement_reserved ||
+                     settlement_reserved_epoch != reset_epoch_value ||
+                     settlement_reserved_head != logical_head_seq);
                 deadline_violation =
                     ($time - outstanding_since[logical_head_seq]) >=
-                        cfg.completion_timeout;
+                        cfg.completion_timeout && !reservation_match;
                 if (settle_deadline) begin
-                    settled_candidate = 1;
-                    settled_epoch = reset_epoch_value;
-                    settled_head = logical_head_seq;
+                    settlement_reserved = 1;
+                    settlement_reserved_epoch = reset_epoch_value;
+                    settlement_reserved_head = logical_head_seq;
                 end
             end
             if (deadline_violation && !settle_deadline) begin
@@ -632,8 +642,8 @@ class gq_queue_engine extends uvm_component;
                 deadline_violation = ready_value &&
                                      !reset_requested_value &&
                                      !shutdown_requested && allocated &&
-                                     reset_epoch_value == settled_epoch &&
-                                     logical_head_seq == settled_head &&
+                                     reset_epoch_value == settlement_reserved_epoch &&
+                                     logical_head_seq == settlement_reserved_head &&
                                      cfg.completion_timeout != 0 &&
                                      logical_tail_seq > logical_head_seq &&
                                      outstanding_since.exists(
@@ -1781,6 +1791,7 @@ class gq_queue_engine extends uvm_component;
         outstanding_since.delete();
         outstanding_published.delete();
         oldest_timeout_reported = 0;
+        settlement_reserved = 0;
         logical_head_seq = cfg.initial_logical_seq;
         logical_tail_seq = cfg.initial_logical_seq;
         if (preserve_restart_profile && cfg.role == GQ_RX &&
@@ -1831,6 +1842,7 @@ class gq_queue_engine extends uvm_component;
             reset_requested_value = 1;
             ready_value           = 0;
             reset_epoch_value++;
+            settlement_reserved = 0;
             ready_event.reset();
             wait_cancel = active_completion_wait_cancel;
             reset_completion_wait_cancel = wait_cancel;
@@ -2044,6 +2056,7 @@ class gq_queue_engine extends uvm_component;
                 cleanup_owner = 1;
                 if (!shutdown_requested)
                     reset_epoch_value++;
+                settlement_reserved = 0;
                 shutdown_requested    = 1;
                 reset_requested_value = 1;
                 ready_value           = 0;

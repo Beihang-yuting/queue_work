@@ -54,6 +54,12 @@ class dmaq_mock_completion extends dmaq_completion;
     uvm_event query_blocked;
     uvm_event query_release;
     bit block_next_query_value;
+    time settlement_deadline_time;
+    gq_logical_seq_t settlement_head;
+    longint unsigned settlement_epoch;
+    bit settlement_observation_armed;
+    int unsigned settlement_query_count;
+    int unsigned final_settlement_query_count;
 
     function new(string name = "dmaq_mock_completion");
         super.new(name);
@@ -62,6 +68,23 @@ class dmaq_mock_completion extends dmaq_completion;
         query_blocked = new({name, "_query_blocked"});
         query_release = new({name, "_query_release"});
         block_next_query_value = 0;
+        settlement_deadline_time = 0;
+        settlement_head = 0;
+        settlement_epoch = 0;
+        settlement_observation_armed = 0;
+        settlement_query_count = 0;
+        final_settlement_query_count = 0;
+    endfunction
+
+    function void arm_settlement_observation(time deadline_time,
+                                             gq_logical_seq_t head,
+                                             longint unsigned epoch);
+        settlement_deadline_time = deadline_time;
+        settlement_head = head;
+        settlement_epoch = epoch;
+        settlement_observation_armed = 1;
+        settlement_query_count = 0;
+        final_settlement_query_count = 0;
     endfunction
 
     function void block_next_query();
@@ -89,6 +112,13 @@ class dmaq_mock_completion extends dmaq_completion;
         bit block_this_query;
 
         query_times.push_back($time);
+        if (settlement_observation_armed &&
+            $time == settlement_deadline_time &&
+            logical_head == settlement_head) begin
+            settlement_query_count++;
+            if (settlement_query_count > 1)
+                final_settlement_query_count++;
+        end
         if ($cast(dmaq_adapter, adapter) &&
             dmaq_adapter.ack_irq_count.exists(queue_id))
             ack_counts_at_query.push_back(
