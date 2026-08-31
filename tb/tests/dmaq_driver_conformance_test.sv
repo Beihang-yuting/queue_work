@@ -902,12 +902,15 @@ class dmaq_driver_conformance_test extends uvm_test;
                         if (!dut.complete_slot(engines[queue_id], 31, 32))
                             `uvm_fatal("DMAQ_DRIVER_DUT",
                                        {label, " scheduled completion was rejected"})
-                        completions[queue_id].release_query();
-                        completion_injected.trigger();
                         fork
                             test_engine.invoke_deadline_check();
                             test_engine.invoke_deadline_check();
                         join_none
+                        #0;
+                        uvm_wait_for_nba_region();
+                        uvm_wait_for_nba_region();
+                        completions[queue_id].release_query();
+                        completion_injected.trigger();
                     end
                     default: begin
                         #500ns;
