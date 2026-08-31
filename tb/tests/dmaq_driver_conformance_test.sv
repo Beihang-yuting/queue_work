@@ -860,6 +860,7 @@ class dmaq_driver_conformance_test extends uvm_test;
         uvm_event sequence_done;
         uvm_event allow_late_completion;
         uvm_event completion_injected;
+        uvm_event deadline_check_done[2];
         int unsigned allocation_before;
         int unsigned free_before;
         int unsigned timeout_before;
@@ -875,6 +876,8 @@ class dmaq_driver_conformance_test extends uvm_test;
         sequence_done = new({label, "_sequence_done"});
         allow_late_completion = new({label, "_allow_late"});
         completion_injected = new({label, "_completion_injected"});
+        deadline_check_done[0] = new({label, "_deadline_done0"});
+        deadline_check_done[1] = new({label, "_deadline_done1"});
         allocation_before = mem.allocation_calls;
         free_before = mem.free_calls;
         timeout_before = report_catcher.timeout_count;
@@ -903,14 +906,16 @@ class dmaq_driver_conformance_test extends uvm_test;
                             `uvm_fatal("DMAQ_DRIVER_DUT",
                                        {label, " scheduled completion was rejected"})
                         fork
-                            test_engine.invoke_deadline_check();
-                            test_engine.invoke_deadline_check();
+                            begin test_engine.invoke_deadline_check(); deadline_check_done[0].trigger(); end
+                            begin test_engine.invoke_deadline_check(); deadline_check_done[1].trigger(); end
                         join_none
                         #0;
                         uvm_wait_for_nba_region();
                         uvm_wait_for_nba_region();
                         completions[queue_id].release_query();
                         completion_injected.trigger();
+                        deadline_check_done[0].wait_on();
+                        deadline_check_done[1].wait_on();
                     end
                     default: begin
                         #500ns;
