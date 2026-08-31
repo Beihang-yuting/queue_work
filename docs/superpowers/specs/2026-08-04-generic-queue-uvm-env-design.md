@@ -126,7 +126,7 @@ Each enabled queue configuration contains:
 - Optional refill profile for an active RX queue.
 
 Concrete environments validate additional limits. For example, mailbox
-requires IDs `0..4095` and depths from 32 through 65536.
+requires IDs `0..4095` and depths from 32 through 32768.
 
 ### 4.3 `gq_desc_base`
 
@@ -325,15 +325,14 @@ initial phase is one, and it toggles on every complete traversal of the ring.
 A descriptor receives the phase as an argument; the generic engine does not
 assume flag bit positions.
 
-For mailbox, both TX and RX use:
+For mailbox, both TX and RX use fixed ownership flags on every traversal:
 
 ```text
-first traversal:  submit avail=1, used=0; complete when used=1
-second traversal: submit avail=0, used=1; complete when used=0
+every traversal: submit avail=1, used=0; complete when used=1
 ```
 
-The pattern repeats on later traversals. On submission, mailbox explicitly
-writes `avail=phase` and `used=!phase`. Completion is `used==phase`.
+On submission, mailbox explicitly writes `avail=1` and `used=0`; completion is
+`used==1`. Mailbox descriptors ignore the generic phase argument.
 
 ## 10. Reset and Concurrency
 
@@ -381,7 +380,7 @@ Each mailbox queue has:
 
 - An enable and reset control supplied through the hardware adapter.
 - A 64-bit ring base.
-- A power-of-two depth from 32 through 65536 descriptors.
+- A power-of-two depth from 32 through 32768 descriptors.
 - TX descriptor size 64 bytes.
 - RX descriptor size 16 bytes.
 - Descriptor writeback completion.
@@ -431,7 +430,7 @@ extensions.
 Mailbox shares one descriptor-writeback source implementation between TX and
 RX. It uses each queue's configured descriptor size for slot addressing and
 delegates flag interpretation to the concrete descriptor. It synthesizes a
-logical completed position by scanning consecutive `used` phases; mailbox
+logical completed position by scanning consecutive fixed `used==1` flags; mailbox
 does not require a trailing completion status area.
 
 ## 12. Error Handling and Diagnostics

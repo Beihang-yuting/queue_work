@@ -37,6 +37,8 @@ class gq_queue_engine extends uvm_component;
     protected longint unsigned reset_epoch_value;
     protected uvm_event ready_event;
     protected uvm_event worker_state_event;
+    protected uvm_event new_work_event;
+    protected uvm_event completion_deadline_state_event;
     protected uvm_event active_completion_wait_cancel;
     protected uvm_event active_completion_wait_done;
     protected uvm_event active_completion_ack_done;
@@ -61,6 +63,9 @@ class gq_queue_engine extends uvm_component;
     protected time outstanding_since[gq_logical_seq_t];
     protected bit outstanding_published[gq_logical_seq_t];
     protected bit oldest_timeout_reported;
+    protected bit settlement_reserved;
+    protected longint unsigned settlement_reserved_epoch;
+    protected gq_logical_seq_t settlement_reserved_head;
     protected gq_logical_seq_t logical_head_seq;
     protected gq_logical_seq_t logical_tail_seq;
     protected gq_refill_profile refill_profile;
@@ -81,6 +86,9 @@ class gq_queue_engine extends uvm_component;
         reset_epoch_value     = 0;
         ready_event       = new({name, "_ready"});
         worker_state_event = new({name, "_worker_state"});
+        new_work_event    = new({name, "_new_work"});
+        completion_deadline_state_event = new(
+            {name, "_completion_deadline_state"});
         active_completion_wait_cancel = null;
         active_completion_wait_done = null;
         active_completion_ack_done = null;
@@ -103,6 +111,9 @@ class gq_queue_engine extends uvm_component;
         logical_head_seq  = 0;
         logical_tail_seq  = 0;
         oldest_timeout_reported = 0;
+        settlement_reserved = 0;
+        settlement_reserved_epoch = 0;
+        settlement_reserved_head = 0;
         refill_profile    = null;
         rx_started        = 0;
         space_available   = new({name, "_space_available"});
@@ -258,8 +269,23 @@ class gq_queue_engine extends uvm_component;
         end
         if (cfg == null)
             `uvm_fatal("GQ_ENGINE_CFG", "queue configuration must not be null")
-        if (!cfg.validate(reason))
+        if (!cfg.validate(reason)) begin
             `uvm_fatal("GQ_ENGINE_CFG", reason)
+            // A catcher may demote the fatal in a directed negative test.
+            // Close the initialization rendezvous without programming or
+            // allocating anything so all joiners observe the same failure.
+            state_lock.get(1);
+            if (configuration_in_progress &&
+                configuration_done == initialize_done) begin
+                configuration_in_progress = 0;
+                if (!shutdown_requested)
+                    reset_requested_value = 0;
+            end
+            state_lock.put(1);
+            worker_state_event.trigger();
+            initialize_done.trigger();
+            return;
+        end
         if (mem == null)
             `uvm_fatal("GQ_ENGINE_CFG", "host memory API must not be null")
         if (adapter == null)
@@ -277,6 +303,8 @@ class gq_queue_engine extends uvm_component;
         initialize_valid = !shutdown_requested &&
                            reset_epoch_value == initialize_epoch;
         if (initialize_valid) begin
+            logical_head_seq = cfg.initial_logical_seq;
+            logical_tail_seq = cfg.initial_logical_seq;
             reset_requested_value = 0;
             ready_value = 1;
             check_state_invariants("initialize");
@@ -286,6 +314,7 @@ class gq_queue_engine extends uvm_component;
         if (initialize_valid)
             ready_event.trigger();
         worker_state_event.trigger();
+        completion_deadline_state_event.trigger();
         initialize_done.trigger();
     endtask
 
@@ -394,8 +423,10 @@ class gq_queue_engine extends uvm_component;
     // completion retirement must remove both before advancing the logical head.
     protected function void install_outstanding(gq_logical_seq_t seq,
                                                 gq_desc_base desc);
-        if (outstanding.num() == 0)
+        if (outstanding.num() == 0) begin
             oldest_timeout_reported = 0;
+            settlement_reserved = 0;
+        end
         outstanding[seq] = desc;
         outstanding_ids[desc.get_inst_id()] = 1;
         outstanding_since[seq] = $time;
@@ -418,26 +449,24 @@ class gq_queue_engine extends uvm_component;
         outstanding_published.delete(seq);
         logical_head_seq++;
         oldest_timeout_reported = 0;
+        settlement_reserved = 0;
         check_state_invariants("completion retire");
     endfunction
 
-    // Caller holds state_lock and has established that the ring remains
-    // allocated. Diagnostics deliberately use only the public host-memory API
-    // so alternative memory implementations need no manager debug hooks.
-    protected function string completion_diagnostic_state(
-        gq_logical_seq_t head, gq_logical_seq_t tail);
-        int unsigned slot;
-        gq_addr_t slot_addr;
-        byte descriptor_bytes[];
+    protected function string format_completion_diagnostic_state(
+        input gq_role_e diagnostic_role,
+        input int unsigned diagnostic_queue_id,
+        input gq_logical_seq_t diagnostic_head,
+        input gq_logical_seq_t diagnostic_tail,
+        input int unsigned diagnostic_depth,
+        input gq_addr_t diagnostic_ring_base,
+        input gq_addr_t diagnostic_slot_addr,
+        input byte descriptor_bytes[]);
+        int unsigned diagnostic_slot;
         string descriptor_hex;
         bit [7:0] value;
 
-        slot = int'(head % cfg.depth);
-        slot_addr = ring_base_value + (slot * cfg.desc_size);
-        descriptor_bytes = new[0];
-        if (tail > head)
-            mem.read_mem(slot_addr, cfg.desc_size, descriptor_bytes,
-                         `__FILE__, `__LINE__);
+        diagnostic_slot = int'(diagnostic_head % diagnostic_depth);
         descriptor_hex = "";
         foreach (descriptor_bytes[i]) begin
             if (i != 0)
@@ -449,24 +478,271 @@ class gq_queue_engine extends uvm_component;
             descriptor_hex = "<none>";
         return $sformatf(
             "role=%s queue_id=%0d head=%0d tail=%0d slot=%0d phase=%0d ring_addr=0x%016h slot_addr=0x%016h descriptor=%s",
-            cfg.role == GQ_TX ? "TX" : "RX", cfg.queue_id, head, tail,
-            slot, gq_phase(head, cfg.depth), ring_base_value, slot_addr,
-            descriptor_hex);
+            diagnostic_role == GQ_TX ? "TX" : "RX",
+            diagnostic_queue_id, diagnostic_head, diagnostic_tail,
+            diagnostic_slot,
+            gq_phase(diagnostic_head, diagnostic_depth),
+            diagnostic_ring_base, diagnostic_slot_addr, descriptor_hex);
     endfunction
 
+    // Caller holds completion_commit_boundary, but never state_lock. A submit
+    // may extend the tail while the public memory callback runs, so retry the
+    // read until the formatted head/tail/ring snapshot is stable.
+    protected task capture_completion_diagnostic_state(
+        input longint unsigned diagnostic_epoch,
+        input gq_logical_seq_t diagnostic_head,
+        input bit require_timeout_reservation,
+        output bit diagnostic_current,
+        output string diagnostic_state);
+        gq_role_e diagnostic_role;
+        int unsigned diagnostic_queue_id;
+        int unsigned diagnostic_depth;
+        int unsigned diagnostic_desc_size;
+        gq_logical_seq_t diagnostic_tail;
+        gq_addr_t diagnostic_ring_base;
+        gq_addr_t diagnostic_slot_addr;
+        int unsigned diagnostic_slot;
+        byte descriptor_bytes[];
+        bit base_current;
+        bit tail_changed;
+
+        diagnostic_current = 0;
+        diagnostic_state = "";
+        forever begin
+            state_lock.get(1);
+            diagnostic_current = ready_value && !reset_requested_value &&
+                                 !shutdown_requested && allocated &&
+                                 reset_epoch_value == diagnostic_epoch &&
+                                 logical_head_seq == diagnostic_head &&
+                                 logical_tail_seq > diagnostic_head &&
+                                 (!require_timeout_reservation ||
+                                  (oldest_timeout_reported &&
+                                   outstanding_since.exists(
+                                       diagnostic_head) &&
+                                   outstanding_published.exists(
+                                       diagnostic_head) &&
+                                   outstanding_published[
+                                       diagnostic_head]));
+            if (diagnostic_current) begin
+                diagnostic_role = cfg.role;
+                diagnostic_queue_id = cfg.queue_id;
+                diagnostic_depth = cfg.depth;
+                diagnostic_desc_size = cfg.desc_size;
+                diagnostic_tail = logical_tail_seq;
+                diagnostic_ring_base = ring_base_value;
+                diagnostic_slot = int'(
+                    diagnostic_head % diagnostic_depth);
+                diagnostic_slot_addr = diagnostic_ring_base +
+                    (diagnostic_slot * diagnostic_desc_size);
+            end
+            state_lock.put(1);
+            if (!diagnostic_current)
+                return;
+
+            descriptor_bytes = new[0];
+            mem.read_mem(diagnostic_slot_addr, diagnostic_desc_size,
+                         descriptor_bytes, `__FILE__, `__LINE__);
+
+            state_lock.get(1);
+            base_current = ready_value && !reset_requested_value &&
+                           !shutdown_requested && allocated &&
+                           reset_epoch_value == diagnostic_epoch &&
+                           logical_head_seq == diagnostic_head &&
+                           ring_base_value == diagnostic_ring_base &&
+                           cfg.role == diagnostic_role &&
+                           cfg.queue_id == diagnostic_queue_id &&
+                           cfg.depth == diagnostic_depth &&
+                           cfg.desc_size == diagnostic_desc_size &&
+                           (!require_timeout_reservation ||
+                            (oldest_timeout_reported &&
+                             outstanding_since.exists(diagnostic_head) &&
+                             outstanding_published.exists(diagnostic_head) &&
+                             outstanding_published[diagnostic_head]));
+            tail_changed = base_current &&
+                           logical_tail_seq != diagnostic_tail;
+            diagnostic_current = base_current && !tail_changed;
+            state_lock.put(1);
+            if (tail_changed)
+                continue;
+            if (!diagnostic_current)
+                return;
+
+            diagnostic_state = format_completion_diagnostic_state(
+                diagnostic_role, diagnostic_queue_id, diagnostic_head,
+                diagnostic_tail, diagnostic_depth, diagnostic_ring_base,
+                diagnostic_slot_addr, descriptor_bytes);
+            return;
+        end
+    endtask
+
+    // The final deadline is engine-owned and independent of completion-query
+    // validity or progress. Reserving under the lifecycle commit boundary
+    // gives one report per oldest published logical sequence.
+    protected task check_completion_deadline();
+        bit deadline_violation;
+        bit deadline_candidate;
+        bit diagnostic_current;
+        bit retry_deadline;
+        bit settle_deadline;
+        bit reservation_match;
+        longint unsigned diagnostic_epoch;
+        gq_logical_seq_t diagnostic_head;
+        time diagnostic_timeout;
+        string diagnostic_state;
+        bit final_query_valid;
+        int unsigned final_retired_count;
+
+        forever begin
+            deadline_violation = 0;
+            retry_deadline = 0;
+            settle_deadline = 0;
+            reservation_match = 0;
+            completion_commit_boundary.get(1);
+            state_lock.get(1);
+            deadline_candidate = ready_value && !reset_requested_value &&
+                                 !shutdown_requested && allocated &&
+                                 cfg.completion_timeout != 0 &&
+                                 logical_tail_seq > logical_head_seq &&
+                                 outstanding_since.exists(logical_head_seq) &&
+                                 outstanding_published.exists(
+                                     logical_head_seq) &&
+                                 outstanding_published[logical_head_seq] &&
+                                 !oldest_timeout_reported &&
+                                 $time >=
+                                     outstanding_since[logical_head_seq];
+            if (deadline_candidate) begin
+                reservation_match = settlement_reserved &&
+                                    settlement_reserved_epoch == reset_epoch_value &&
+                                    settlement_reserved_head == logical_head_seq;
+                settle_deadline =
+                    ($time - outstanding_since[logical_head_seq]) ==
+                        cfg.completion_timeout &&
+                    (!settlement_reserved ||
+                     settlement_reserved_epoch != reset_epoch_value ||
+                     settlement_reserved_head != logical_head_seq);
+                deadline_violation =
+                    ($time - outstanding_since[logical_head_seq]) >=
+                        cfg.completion_timeout && !reservation_match;
+                if (settle_deadline) begin
+                    settlement_reserved = 1;
+                    settlement_reserved_epoch = reset_epoch_value;
+                    settlement_reserved_head = logical_head_seq;
+                end
+            end
+            if (deadline_violation && !settle_deadline) begin
+                oldest_timeout_reported = 1;
+                diagnostic_epoch = reset_epoch_value;
+                diagnostic_head = logical_head_seq;
+                diagnostic_timeout = cfg.completion_timeout;
+            end
+            state_lock.put(1);
+
+            // Give post-NBA completion writes in the inclusive deadline slot
+            // a deterministic chance to drain without advancing simulation
+            // time. The producer crosses one NBA barrier before committing,
+            // so the checker crosses a second barrier before re-evaluating.
+            // Remembering the exact epoch/head candidate bounds this zero-time
+            // settlement to one pass; a lifecycle or head change earns a new
+            // pass because it represents different outstanding work.
+            if (settle_deadline) begin
+                completion_commit_boundary.put(1);
+                deadline_settlement_selected();
+                uvm_wait_for_nba_region();
+                uvm_wait_for_nba_region();
+                drain_completed_once(final_query_valid,
+                                     final_retired_count, 0);
+
+                // The inclusive deadline candidate gets exactly one final,
+                // serialized query after NBA settlement. Revalidate the same
+                // epoch/head under the lifecycle boundary before reserving a
+                // timeout; retirement, reset, or cleanup wins cleanly.
+                completion_commit_boundary.get(1);
+                state_lock.get(1);
+                deadline_violation = ready_value &&
+                                     !reset_requested_value &&
+                                     !shutdown_requested && allocated &&
+                                     reset_epoch_value == settlement_reserved_epoch &&
+                                     logical_head_seq == settlement_reserved_head &&
+                                     cfg.completion_timeout != 0 &&
+                                     logical_tail_seq > logical_head_seq &&
+                                     outstanding_since.exists(
+                                         logical_head_seq) &&
+                                     outstanding_published.exists(
+                                         logical_head_seq) &&
+                                     outstanding_published[
+                                         logical_head_seq] &&
+                                     !oldest_timeout_reported &&
+                                     ($time - outstanding_since[
+                                         logical_head_seq]) >=
+                                         cfg.completion_timeout;
+                if (deadline_violation) begin
+                    oldest_timeout_reported = 1;
+                    diagnostic_epoch = reset_epoch_value;
+                    diagnostic_head = logical_head_seq;
+                    diagnostic_timeout = cfg.completion_timeout;
+                end
+                state_lock.put(1);
+                if (!deadline_violation) begin
+                    completion_commit_boundary.put(1);
+                    return;
+                end
+            end
+
+            if (deadline_violation) begin
+                capture_completion_diagnostic_state(
+                    diagnostic_epoch, diagnostic_head, 1,
+                    diagnostic_current, diagnostic_state);
+                if (diagnostic_current)
+                    `uvm_error("GQ_COMPLETION_TIMEOUT", $sformatf(
+                        "oldest outstanding completion exceeded timeout=%0t; %s",
+                        diagnostic_timeout, diagnostic_state))
+                else begin
+                    state_lock.get(1);
+                    if (ready_value && !reset_requested_value &&
+                        !shutdown_requested &&
+                        reset_epoch_value == diagnostic_epoch &&
+                        logical_head_seq == diagnostic_head &&
+                        oldest_timeout_reported) begin
+                        oldest_timeout_reported = 0;
+                        retry_deadline = 1;
+                    end
+                    state_lock.put(1);
+                end
+            end
+            completion_commit_boundary.put(1);
+            if (retry_deadline)
+                completion_deadline_state_event.trigger();
+            return;
+        end
+    endtask
+
     task drain_completed();
+        bit query_valid;
+        int unsigned retired_count;
+
+        drain_completed_once(query_valid, retired_count, 1);
+    endtask
+
+    protected task drain_completed_once(
+        output bit query_valid,
+        output int unsigned retired_count,
+        input bit check_deadline_after);
         gq_desc_base pending[$];
         gq_desc_base desc;
         gq_logical_seq_t query_head;
         gq_logical_seq_t current_outstanding;
+        gq_addr_t query_ring_base;
+        gq_addr_t query_status_addr;
         int unsigned count;
-        int unsigned retired_count;
+        bit diagnostic_current;
         bit protocol_violation;
-        bit timeout_violation;
         bit stale_completion;
         longint unsigned query_epoch;
+        gq_logical_seq_t diagnostic_head;
         string diagnostic_state;
 
+        query_valid = 0;
+        retired_count = 0;
         completion_serialization.get(1);
         state_lock.get(1);
         if (!ready_value) begin
@@ -476,24 +752,17 @@ class gq_queue_engine extends uvm_component;
         end
         query_head = logical_head_seq;
         query_epoch = reset_epoch_value;
+        query_ring_base = ring_base_value;
+        query_status_addr = status_addr_value;
         for (gq_logical_seq_t seq = logical_head_seq;
              seq < logical_tail_seq; seq++)
             pending.push_back(outstanding[seq]);
         state_lock.put(1);
 
-        count = cfg.completion_source.completed_count(
-            mem, ring_base_value, status_addr_value, cfg.depth, cfg.desc_size,
-            query_head, pending);
+        cfg.completion_source.query_completed(
+            mem, adapter, query_ring_base, query_status_addr, cfg.depth,
+            cfg.desc_size, query_head, pending, query_valid, count);
         completion_query_returned();
-        state_lock.get(1);
-        stale_completion = !ready_value || reset_requested_value ||
-                           shutdown_requested ||
-                           reset_epoch_value != query_epoch;
-        state_lock.put(1);
-        if (stale_completion) begin
-            completion_serialization.put(1);
-            return;
-        end
 
         // Diagnostics and retirement share the lifecycle commit boundary.
         // Reset or cleanup may win while the external completion query is in
@@ -507,33 +776,34 @@ class gq_queue_engine extends uvm_component;
                            shutdown_requested ||
                            reset_epoch_value != query_epoch;
         protocol_violation = !stale_completion &&
+                             query_valid &&
                              (query_head != logical_head_seq ||
                               count > pending.size() ||
                               count > current_outstanding);
-        diagnostic_state = "";
-        timeout_violation = !stale_completion && !protocol_violation &&
-                            count == 0 && current_outstanding != 0 &&
-                            outstanding_since.exists(logical_head_seq) &&
-                            outstanding_published.exists(logical_head_seq) &&
-                            outstanding_published[logical_head_seq] &&
-                            !oldest_timeout_reported &&
-                            ($time - outstanding_since[logical_head_seq]) >=
-                                cfg.completion_timeout;
-        if (timeout_violation) begin
-            oldest_timeout_reported = 1;
-            diagnostic_state = completion_diagnostic_state(
-                logical_head_seq, logical_tail_seq);
-        end else if (protocol_violation) begin
-            diagnostic_state = completion_diagnostic_state(
-                logical_head_seq, logical_tail_seq);
-        end
+        diagnostic_head = logical_head_seq;
         state_lock.put(1);
         if (stale_completion) begin
+            query_valid = 0;
             completion_commit_boundary.put(1);
             completion_serialization.put(1);
             return;
         end
+        if (!query_valid) begin
+            `uvm_warning("GQ_COMPLETION_QUERY",
+                         "completion source returned an invalid query")
+            completion_commit_boundary.put(1);
+            completion_serialization.put(1);
+            if (check_deadline_after)
+                check_completion_deadline();
+            return;
+        end
         if (protocol_violation) begin
+            query_valid = 0;
+            capture_completion_diagnostic_state(
+                query_epoch, diagnostic_head, 0,
+                diagnostic_current, diagnostic_state);
+            if (!diagnostic_current)
+                diagnostic_state = "no current outstanding descriptor context";
             `uvm_error("GQ_COMPLETION_PROTOCOL", $sformatf(
                 "completion count %0d exceeds pending=%0d/outstanding=%0d or query head changed; %s",
                 count, pending.size(), current_outstanding,
@@ -542,12 +812,7 @@ class gq_queue_engine extends uvm_component;
             completion_serialization.put(1);
             return;
         end
-        if (timeout_violation)
-            `uvm_error("GQ_COMPLETION_TIMEOUT", $sformatf(
-                "oldest outstanding completion exceeded timeout=%0t; %s",
-                cfg.completion_timeout, diagnostic_state))
 
-        retired_count = 0;
         for (int unsigned i = 0; i < count; i++) begin
             desc = pending[i];
             if (!desc.parse_completion()) begin
@@ -574,7 +839,11 @@ class gq_queue_engine extends uvm_component;
         completion_commit_boundary.put(1);
         completion_serialization.put(1);
         if (retired_count != 0)
-            refill_after_progress();
+            completion_deadline_state_event.trigger();
+        if (retired_count != 0)
+            refill_after_progress(retired_count);
+        if (check_deadline_after)
+            check_completion_deadline();
     endtask
 
     // Protected synchronization seam for completion sources that need to
@@ -588,12 +857,20 @@ class gq_queue_engine extends uvm_component;
     protected virtual task completion_commit_entered();
     endtask
 
+    // Protected zero-time synchronization seam. Production behavior is a
+    // no-op; tests may pause after a deadline candidate has been reserved and
+    // the lifecycle boundary has been released.
+    protected virtual task deadline_settlement_selected();
+    endtask
+
     task wait_and_drain_once();
         bit ready_snapshot;
-        bit completion_wakeup;
         bit wait_registered;
         bit ack_required;
+        bit query_valid;
+        int unsigned retired_count;
         longint unsigned wait_epoch;
+        gq_wakeup_e wakeup;
         uvm_event wait_cancel;
         uvm_event wait_done;
         uvm_event ack_done;
@@ -631,23 +908,30 @@ class gq_queue_engine extends uvm_component;
             conflicting_done.wait_on();
             return;
         end
-        completion_wakeup = 0;
-        // Run the race from an isolated child process so disable fork cannot
-        // terminate waits belonging to another engine invocation.
-        fork
-            begin
-                fork
-                    begin
-                        wait_policy.wait_for_wakeup(cfg, adapter,
-                                                    completion_wakeup);
-                    end
-                    begin
-                        wait_cancel.wait_on();
-                    end
-                join_any
-                disable fork;
-            end
-        join
+        wakeup = GQ_WAKE_CANCELLED;
+        if (new_work_event.is_on()) begin
+            // Consume work published before this waiter armed without first
+            // entering an adapter wait that is immediately discarded.
+            wakeup = GQ_WAKE_NEW_WORK;
+        end else begin
+            // Run the race from an isolated child process so disable fork
+            // cannot terminate waits belonging to another engine invocation.
+            fork
+                begin
+                    fork
+                        begin
+                            wait_policy.wait_for_wakeup(
+                                cfg, adapter, wait_cancel, new_work_event,
+                                wakeup);
+                        end
+                        begin
+                            wait_cancel.wait_on();
+                        end
+                    join_any
+                    disable fork;
+                end
+            join
+        end
         completion_commit_boundary.get(1);
         state_lock.get(1);
         if (active_completion_wait_cancel == wait_cancel &&
@@ -658,24 +942,28 @@ class gq_queue_engine extends uvm_component;
         ready_snapshot = ready_value && !reset_requested_value &&
                          !shutdown_requested &&
                          reset_epoch_value == wait_epoch;
-        ack_required = ready_snapshot && completion_wakeup &&
-                       cfg.wait_mode == GQ_IRQ;
+        ack_required = ready_snapshot && wakeup == GQ_WAKE_IRQ;
         if (ack_required)
             active_completion_ack_done = ack_done;
         state_lock.put(1);
         completion_commit_boundary.put(1);
         wait_done.trigger();
+        if (wakeup == GQ_WAKE_NEW_WORK)
+            new_work_event.reset();
         if (!ready_snapshot)
             return;
-        if (!completion_wakeup) begin
-            // An IRQ watchdog expiry still checks ordered completion state so
-            // the shared oldest-outstanding timeout diagnostic is not starved
-            // by a missing interrupt. Reset/cleanup cancellation is excluded
-            // by the epoch/readiness check above and never reaches this drain.
-            if (cfg.wait_mode == GQ_IRQ)
-                drain_completed();
+        if (wakeup == GQ_WAKE_CANCELLED)
+            return;
+        if (wakeup == GQ_WAKE_NEW_WORK) begin
+            // The worker loop immediately begins another wait at the restored
+            // minimum interval. New work never bypasses that interval with an
+            // immediate completion query.
+            wait_policy.note_progress();
             return;
         end
+        if (wakeup != GQ_WAKE_IRQ && wakeup != GQ_WAKE_WATCHDOG &&
+            wakeup != GQ_WAKE_POLL)
+            return;
 
         if (ack_required) begin
             // ACK ownership was committed under the reset boundary, but the
@@ -694,7 +982,11 @@ class gq_queue_engine extends uvm_component;
             if (!ready_snapshot)
                 return;
         end
-        drain_completed();
+        drain_completed_once(query_valid, retired_count, 1);
+        if (retired_count != 0)
+            wait_policy.note_progress();
+        else if (query_valid)
+            wait_policy.note_idle();
     endtask
 
     // Lifecycle control captures these persistent handles with the state
@@ -712,35 +1004,133 @@ class gq_queue_engine extends uvm_component;
             ack_done.wait_on();
     endtask
 
-    task run_completion_monitor();
-        forever begin
-            bit worker_active;
+    protected task run_completion_deadline_monitor();
+        bit deadline_active;
+        bit deadline_expired;
+        bit shutdown_snapshot;
+        time deadline_at;
+        time remaining;
 
-            wait_for_worker_ready(worker_active);
-            if (!worker_active)
+        forever begin
+            // Reset and snapshot under the same state exclusion used by every
+            // producer. A producer that has updated state but not yet
+            // triggered the event may cause one redundant wake, never a lost
+            // wake.
+            state_lock.get(1);
+            completion_deadline_state_event.reset();
+            shutdown_snapshot = shutdown_requested;
+            deadline_active = !shutdown_snapshot && ready_value &&
+                              !reset_requested_value &&
+                              cfg.completion_timeout != 0 &&
+                              logical_tail_seq > logical_head_seq &&
+                              outstanding_since.exists(logical_head_seq) &&
+                              outstanding_published.exists(
+                                  logical_head_seq) &&
+                              outstanding_published[logical_head_seq] &&
+                              !oldest_timeout_reported;
+            if (deadline_active)
+                deadline_at = outstanding_since[logical_head_seq] +
+                              cfg.completion_timeout;
+            state_lock.put(1);
+
+            if (shutdown_snapshot)
                 return;
-            wait_and_drain_once();
+            if (!deadline_active) begin
+                completion_deadline_state_event.wait_on();
+                continue;
+            end
+            if ($time >= deadline_at) begin
+                check_completion_deadline();
+                continue;
+            end
+
+            remaining = deadline_at - $time;
+            deadline_expired = 0;
+            // Isolate disable fork so it cannot terminate a completion query,
+            // adapter wait, or another monitor invocation.
+            fork
+                begin
+                    fork
+                        begin
+                            #(remaining);
+                            deadline_expired = 1;
+                        end
+                        begin
+                            completion_deadline_state_event.wait_on();
+                        end
+                    join_any
+                    disable fork;
+                end
+            join
+            if (deadline_expired)
+                check_completion_deadline();
         end
+    endtask
+
+    task run_completion_monitor();
+        fork
+            begin
+                forever begin
+                    bit worker_active;
+
+                    wait_for_worker_ready(worker_active);
+                    if (!worker_active)
+                        break;
+                    wait_and_drain_once();
+                end
+            end
+            begin
+                run_completion_deadline_monitor();
+            end
+        join
     endtask
 
     protected task wait_for_worker_ready(output bit worker_active);
         bit ready_snapshot;
         bit shutdown_snapshot;
+        bit published_snapshot;
+        bit progress_feedback_snapshot;
 
         worker_active = 0;
         forever begin
             state_lock.get(1);
             ready_snapshot    = ready_value;
             shutdown_snapshot = shutdown_requested;
+            published_snapshot = cfg.role != GQ_TX ||
+                (logical_tail_seq != logical_head_seq &&
+                 outstanding_published.exists(logical_head_seq) &&
+                 outstanding_published[logical_head_seq]);
             state_lock.put(1);
             if (shutdown_snapshot)
                 return;
-            if (ready_snapshot) begin
+            if (ready_snapshot && published_snapshot) begin
                 worker_active = 1;
                 return;
             end
-            worker_state_event.wait_on();
-            worker_state_event.reset();
+            if (ready_snapshot) begin
+                // A TX queue without hardware-visible work has nothing to
+                // query or acknowledge. The persistent event closes the
+                // publish-versus-wait race without a zero-time retry loop.
+                new_work_event.wait_on();
+                new_work_event.reset();
+                state_lock.get(1);
+                progress_feedback_snapshot =
+                    ready_value && !reset_requested_value &&
+                    !shutdown_requested &&
+                    logical_tail_seq != logical_head_seq &&
+                    outstanding_published.exists(logical_head_seq) &&
+                    outstanding_published[logical_head_seq];
+                state_lock.put(1);
+                if (progress_feedback_snapshot)
+                    // The idle gate consumed the real publish wake, so it owns
+                    // the same minimum-interval feedback as NEW_WORK returned
+                    // by the active policy wait. Lifecycle-only wakes fail the
+                    // locked readiness/published check and preserve backoff.
+                    wait_policy.note_progress();
+            end else begin
+                worker_state_event.wait_on();
+                worker_state_event.reset();
+            end
         end
     endtask
 
@@ -765,9 +1155,13 @@ class gq_queue_engine extends uvm_component;
         gq_logical_seq_t old_tail;
         gq_logical_seq_t new_tail;
         gq_logical_seq_t seq;
+        gq_addr_t submit_ring_base;
         gq_addr_t slot_addr;
+        gq_raw_ptr_t encoded_tail;
+        gq_ptr_codec publish_codec;
         byte packed_data[];
         bit seen_ids[int];
+        bit reservation_current;
         bit stale_request;
 
         capacity_wait_required = 0;
@@ -813,6 +1207,8 @@ class gq_queue_engine extends uvm_component;
             return;
         end
         old_tail = logical_tail_seq;
+        submit_ring_base = ring_base_value;
+        publish_codec = cfg.ptr_codec;
         state_lock.put(1);
 
         new_tail        = old_tail + batch_size;
@@ -823,30 +1219,66 @@ class gq_queue_engine extends uvm_component;
             descs[i].attach_mem(mem);
             if (!descs[i].prepare()) begin
                 release_attempted(descs, attempted_count);
+                if (activate_rx && cfg.role == GQ_RX &&
+                    cfg.rx_slot_mode == GQ_RX_AUTO_RECYCLE)
+                    `uvm_error("GQ_RX_AUTO_RECYCLE_ALLOC", $sformatf(
+                        "queue_id=%0d could not prepare auto-recycle descriptor at logical sequence %0d",
+                        cfg.queue_id, seq))
+                return;
+            end
+            if (activate_rx && cfg.role == GQ_RX &&
+                cfg.rx_slot_mode == GQ_RX_AUTO_RECYCLE &&
+                descs[i].owned_allocation_count() != 0) begin
+                release_attempted(descs, attempted_count);
+                `uvm_error("GQ_RX_AUTO_RECYCLE_ALLOC", $sformatf(
+                    "queue_id=%0d auto-recycle descriptor at logical sequence %0d owns a separate allocation",
+                    cfg.queue_id, seq))
                 return;
             end
             descs[i].mark_available(gq_phase(seq, cfg.depth));
-            packed_data = new[0];
-            descs[i].pack(packed_data);
-            if (packed_data.size() != cfg.desc_size) begin
-                release_attempted(descs, attempted_count);
-                `uvm_fatal("GQ_PACK_SIZE", $sformatf(
-                    "role=%s queue_id=%0d logical_seq=%0d expected=%0d actual=%0d",
-                    cfg.role == GQ_TX ? "TX" : "RX", cfg.queue_id, seq,
-                    cfg.desc_size, packed_data.size()))
-                return;
+            if (activate_rx && cfg.role == GQ_RX &&
+                cfg.rx_slot_mode == GQ_RX_AUTO_RECYCLE) begin
+                packed_data = new[cfg.desc_size];
+            end else begin
+                packed_data = new[0];
+                descs[i].pack(packed_data);
+                if (packed_data.size() != cfg.desc_size) begin
+                    release_attempted(descs, attempted_count);
+                    `uvm_fatal("GQ_PACK_SIZE", $sformatf(
+                        "role=%s queue_id=%0d logical_seq=%0d expected=%0d actual=%0d",
+                        cfg.role == GQ_TX ? "TX" : "RX", cfg.queue_id,
+                        seq, cfg.desc_size, packed_data.size()))
+                    return;
+                end
             end
-            slot_addr = ring_base_value + ((seq % cfg.depth) * cfg.desc_size);
+            slot_addr = submit_ring_base +
+                        ((seq % cfg.depth) * cfg.desc_size);
             mem.write_mem(slot_addr, packed_data, `__FILE__, `__LINE__);
         end
+
+        encoded_tail = publish_codec.encode_publish(
+            old_tail, new_tail, cfg.depth);
 
         state_lock.get(1);
         stale_request = shutdown_requested ||
                         reset_epoch_value != request_epoch ||
                         (reset_requested_value && !allow_during_reset) ||
                         (!ready_value && !allow_during_reset);
-        if (stale_request) begin
-            abort_response_by_reset(response);
+        reservation_current = !stale_request && allocated && configured &&
+                              ring_base_value == submit_ring_base &&
+                              logical_tail_seq == old_tail &&
+                              cfg.ptr_codec == publish_codec &&
+                              !publish_in_progress &&
+                              (logical_tail_seq - logical_head_seq) +
+                                  batch_size <= cfg.depth;
+        foreach (descs[i]) begin
+            if (reservation_current &&
+                outstanding_ids.exists(descs[i].get_inst_id()))
+                reservation_current = 0;
+        end
+        if (!reservation_current) begin
+            if (stale_request)
+                abort_response_by_reset(response);
             state_lock.put(1);
             release_attempted(descs, attempted_count);
             return;
@@ -862,8 +1294,7 @@ class gq_queue_engine extends uvm_component;
         publish_op = new($sformatf("%s_publish_%0d", get_name(), old_tail));
         publish_op.old_tail = old_tail;
         publish_op.new_tail = new_tail;
-        publish_op.raw_tail = cfg.ptr_codec.encode_publish(
-            old_tail, new_tail, cfg.depth);
+        publish_op.raw_tail = encoded_tail;
         publish_op.request_epoch = request_epoch;
         publish_op.allow_during_reset = allow_during_reset;
         publish_in_progress = 1;
@@ -878,9 +1309,11 @@ class gq_queue_engine extends uvm_component;
         gq_logical_seq_t seq;
         bit operation_current;
         bit lifecycle_current;
+        bit published_work;
 
         if (publish_op == null)
             return;
+        published_work = 0;
 
         state_lock.get(1);
         operation_current = publish_in_progress &&
@@ -931,6 +1364,7 @@ class gq_queue_engine extends uvm_component;
             response.committed_count = int'(publish_op.new_tail -
                                              publish_op.old_tail);
             response.reset_epoch     = publish_op.request_epoch;
+            published_work = 1;
         end else
             abort_response_by_reset(response);
         if (operation_current) begin
@@ -939,6 +1373,10 @@ class gq_queue_engine extends uvm_component;
                 active_publish_done = null;
         end
         state_lock.put(1);
+        if (published_work) begin
+            new_work_event.trigger();
+            completion_deadline_state_event.trigger();
+        end
         publish_op.done.trigger();
     endtask
 
@@ -1057,12 +1495,26 @@ class gq_queue_engine extends uvm_component;
             user_request_ordering.put(1);
             return;
         end
+        if (cfg.rx_slot_mode == GQ_RX_AUTO_RECYCLE &&
+            cloned_profile.initial_post_count != cfg.depth - 1) begin
+            `uvm_error("GQ_RX_AUTO_RECYCLE_ALLOC", $sformatf(
+                "queue_id=%0d auto-recycle initial post count %0d must equal depth minus one (%0d)",
+                cfg.queue_id, cloned_profile.initial_post_count,
+                cfg.depth - 1))
+            submit_serialization.put(1);
+            user_request_ordering.put(1);
+            return;
+        end
 
         for (int unsigned i = 0;
              i < cloned_profile.initial_post_count; i++) begin
             desc = cloned_profile.create_desc(cfg.queue_id, first_seq + i);
             if (desc == null) begin
                 release_generated(generated_descs);
+                if (cfg.rx_slot_mode == GQ_RX_AUTO_RECYCLE)
+                    `uvm_error("GQ_RX_AUTO_RECYCLE_ALLOC", $sformatf(
+                        "queue_id=%0d could not create auto-recycle descriptor at logical sequence %0d",
+                        cfg.queue_id, first_seq + i))
                 submit_serialization.put(1);
                 user_request_ordering.put(1);
                 return;
@@ -1104,10 +1556,109 @@ class gq_queue_engine extends uvm_component;
             release_generated(generated_descs);
     endtask
 
+    // Auto-recycle preserves the hardware ring and published tail. Each fresh
+    // logical descriptor is prepared without the state lock, then installed as
+    // hardware-visible only after lifecycle and tail revalidation.
+    protected task recycle_after_progress(input int unsigned retired_count);
+        gq_refill_profile active_profile;
+        gq_desc_base desc;
+        gq_logical_seq_t install_seq;
+        longint unsigned recycle_epoch;
+        bit recycle_active;
+        bit duplicate_desc;
+        bit recycled_work;
+
+        if (retired_count == 0)
+            return;
+
+        recycled_work = 0;
+        submit_serialization.get(1);
+        state_lock.get(1);
+        active_profile = refill_profile;
+        recycle_epoch = reset_epoch_value;
+        recycle_active = cfg.role == GQ_RX &&
+                         cfg.rx_slot_mode == GQ_RX_AUTO_RECYCLE &&
+                         ready_value && rx_started &&
+                         active_profile != null &&
+                         !reset_requested_value && !shutdown_requested;
+        state_lock.put(1);
+
+        for (int unsigned i = 0;
+             recycle_active && i < retired_count; i++) begin
+            state_lock.get(1);
+            recycle_active = cfg.role == GQ_RX &&
+                             cfg.rx_slot_mode == GQ_RX_AUTO_RECYCLE &&
+                             ready_value && rx_started &&
+                             refill_profile == active_profile &&
+                             reset_epoch_value == recycle_epoch &&
+                             !reset_requested_value && !shutdown_requested;
+            install_seq = logical_tail_seq;
+            state_lock.put(1);
+            if (!recycle_active)
+                break;
+
+            desc = active_profile.create_desc(cfg.queue_id, install_seq);
+            if (desc == null) begin
+                `uvm_error("GQ_RX_AUTO_RECYCLE_ALLOC", $sformatf(
+                    "queue_id=%0d could not create auto-recycle descriptor at logical sequence %0d",
+                    cfg.queue_id, install_seq))
+                break;
+            end
+            desc.attach_mem(mem);
+            if (!desc.prepare()) begin
+                desc.release_owned();
+                `uvm_error("GQ_RX_AUTO_RECYCLE_ALLOC", $sformatf(
+                    "queue_id=%0d could not prepare auto-recycle descriptor at logical sequence %0d",
+                    cfg.queue_id, install_seq))
+                break;
+            end
+            if (desc.owned_allocation_count() != 0) begin
+                desc.release_owned();
+                `uvm_error("GQ_RX_AUTO_RECYCLE_ALLOC", $sformatf(
+                    "queue_id=%0d auto-recycle descriptor at logical sequence %0d owns a separate allocation",
+                    cfg.queue_id, install_seq))
+                break;
+            end
+            desc.mark_available(gq_phase(install_seq, cfg.depth));
+
+            state_lock.get(1);
+            recycle_active = ready_value && rx_started &&
+                             refill_profile == active_profile &&
+                             reset_epoch_value == recycle_epoch &&
+                             !reset_requested_value && !shutdown_requested &&
+                             logical_tail_seq == install_seq;
+            duplicate_desc = recycle_active &&
+                             outstanding_ids.exists(desc.get_inst_id());
+            if (recycle_active && !duplicate_desc) begin
+                install_outstanding(install_seq, desc);
+                outstanding_published[install_seq] = 1;
+                logical_tail_seq++;
+                recycled_work = 1;
+                check_state_invariants("auto-recycle commit");
+            end
+            state_lock.put(1);
+
+            if (!recycle_active) begin
+                desc.release_owned();
+                break;
+            end
+            if (duplicate_desc) begin
+                desc.release_owned();
+                `uvm_error("GQ_RX_AUTO_RECYCLE_ALLOC", $sformatf(
+                    "queue_id=%0d returned a duplicate auto-recycle descriptor at logical sequence %0d",
+                    cfg.queue_id, install_seq))
+                break;
+            end
+        end
+        submit_serialization.put(1);
+        if (recycled_work)
+            completion_deadline_state_event.trigger();
+    endtask
+
     // Called only after at least one descriptor was actually retired. It
     // deliberately acquires neither completion_serialization nor state_lock
     // across descriptor creation, preparation, or publication.
-    protected task refill_after_progress();
+    protected task refill_after_progress(input int unsigned retired_count);
         gq_refill_profile active_profile;
         gq_desc_base generated_descs[$];
         gq_desc_base desc;
@@ -1120,9 +1671,15 @@ class gq_queue_engine extends uvm_component;
         bit capacity_wait_required;
         bit publish_wait_required;
         bit refill_active;
+        bit refill_triggered;
         bit should_refill;
         bit ownership_transferred;
         longint unsigned refill_epoch;
+
+        if (cfg.rx_slot_mode == GQ_RX_AUTO_RECYCLE) begin
+            recycle_after_progress(retired_count);
+            return;
+        end
 
         state_lock.get(1);
         refill_active = cfg.role == GQ_RX && ready_value && rx_started &&
@@ -1132,6 +1689,7 @@ class gq_queue_engine extends uvm_component;
         state_lock.put(1);
         if (!refill_active)
             return;
+        refill_triggered = 0;
 
         forever begin
             generated_descs.delete();
@@ -1151,10 +1709,20 @@ class gq_queue_engine extends uvm_component;
             if (should_refill && wait_publish_done == null) begin
                 posted        = logical_tail_seq - logical_head_seq;
                 first_seq     = logical_tail_seq;
-                should_refill = posted <= active_profile.low_watermark;
-                if (should_refill)
+                if (refill_triggered)
+                    should_refill = posted < active_profile.high_watermark;
+                else
+                    should_refill = posted <= active_profile.low_watermark;
+                if (should_refill &&
+                    posted < active_profile.high_watermark) begin
+                    refill_triggered = 1;
                     refill_count = int'(
                         active_profile.high_watermark - posted);
+                    if (active_profile.max_refill_batch != 0 &&
+                        refill_count > active_profile.max_refill_batch)
+                        refill_count = active_profile.max_refill_batch;
+                end else
+                    should_refill = 0;
             end
             state_lock.put(1);
 
@@ -1216,7 +1784,8 @@ class gq_queue_engine extends uvm_component;
                         "role=RX queue_id=%0d failed to publish %0d refill descriptors after DUT progress",
                         cfg.queue_id, refill_count))
             end
-            return;
+            if (response.status != GQ_OK)
+                return;
         end
     endtask
 
@@ -1248,8 +1817,9 @@ class gq_queue_engine extends uvm_component;
         outstanding_since.delete();
         outstanding_published.delete();
         oldest_timeout_reported = 0;
-        logical_head_seq = 0;
-        logical_tail_seq = 0;
+        settlement_reserved = 0;
+        logical_head_seq = cfg.initial_logical_seq;
+        logical_tail_seq = cfg.initial_logical_seq;
         if (preserve_restart_profile && cfg.role == GQ_RX &&
             refill_profile != null && refill_profile.restart_after_reset)
             preserved_profile = refill_profile;
@@ -1270,6 +1840,7 @@ class gq_queue_engine extends uvm_component;
         state_lock.put(1);
         completion_serialization.put(1);
         submit_serialization.put(1);
+        completion_deadline_state_event.trigger();
 
         // Timed adapter work retains no engine lock. The queue remains
         // externally owned until disable completes, so descriptor and ring
@@ -1297,6 +1868,7 @@ class gq_queue_engine extends uvm_component;
             reset_requested_value = 1;
             ready_value           = 0;
             reset_epoch_value++;
+            settlement_reserved = 0;
             ready_event.reset();
             wait_cancel = active_completion_wait_cancel;
             reset_completion_wait_cancel = wait_cancel;
@@ -1314,8 +1886,10 @@ class gq_queue_engine extends uvm_component;
         // persistent wake makes it retry, observe the new epoch, and abort.
         space_available.trigger();
         worker_state_event.trigger();
+        completion_deadline_state_event.trigger();
         if (wait_cancel != null)
             wait_cancel.trigger();
+        new_work_event.trigger();
     endtask
 
     task finish_reset();
@@ -1413,7 +1987,7 @@ class gq_queue_engine extends uvm_component;
             for (int unsigned i = 0;
                  i < recovery_profile.initial_post_count; i++) begin
                 desc = recovery_profile.create_desc(cfg.queue_id,
-                                                     gq_logical_seq_t'(i));
+                    cfg.initial_logical_seq + gq_logical_seq_t'(i));
                 if (desc == null) begin
                     release_generated(generated_descs);
                     generated_descs.delete();
@@ -1473,6 +2047,7 @@ class gq_queue_engine extends uvm_component;
         if (release_allowed)
             ready_event.trigger();
         worker_state_event.trigger();
+        completion_deadline_state_event.trigger();
         release_done.trigger();
     endtask
 
@@ -1507,6 +2082,7 @@ class gq_queue_engine extends uvm_component;
                 cleanup_owner = 1;
                 if (!shutdown_requested)
                     reset_epoch_value++;
+                settlement_reserved = 0;
                 shutdown_requested    = 1;
                 reset_requested_value = 1;
                 ready_value           = 0;
@@ -1535,6 +2111,10 @@ class gq_queue_engine extends uvm_component;
 
         space_available.trigger();
         worker_state_event.trigger();
+        completion_deadline_state_event.trigger();
+        if (wait_cancel != null)
+            wait_cancel.trigger();
+        new_work_event.trigger();
         quiesce_completion_activity(wait_cancel, wait_done, ack_done);
         if (reset_teardown_done != null)
             reset_teardown_done.wait_on();

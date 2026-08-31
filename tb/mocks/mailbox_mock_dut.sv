@@ -17,13 +17,11 @@ class mailbox_mock_dut extends uvm_object;
                                 int unsigned desc_size);
         byte packed_data[];
         gq_addr_t slot_addr;
-        bit phase;
 
         slot_addr = engine.ring_base() +
                     ((logical_seq % depth) * desc_size);
         mem.read_mem(slot_addr, desc_size, packed_data, `__FILE__, `__LINE__);
-        phase = gq_phase(logical_seq, depth);
-        packed_data[0][1] = phase;
+        packed_data[0][1] = 1'b1;
         mem.write_mem(slot_addr, packed_data, `__FILE__, `__LINE__);
     endfunction
 

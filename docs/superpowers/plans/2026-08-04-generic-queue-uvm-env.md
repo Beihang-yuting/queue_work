@@ -401,8 +401,9 @@ Define virtual `prepare`, `mark_available`, `pack`, `unpack`,
 
 Use `bit [511:0] raw` and copy `raw[i*8 +: 8]` into `data[i]`. Constrain
 `data_len<=44`. Allocate/write external randomized data only when
-`buf_len!=0`. Set `avail=phase` and `used=!phase`. Completion is
-`used==phase`.
+`buf_len!=0`. Mailbox publishes fixed `avail=1, used=0` ownership flags on
+every traversal and completes when `used==1`; the generic phase argument is
+ignored by mailbox descriptors.
 
 - [ ] **Step 4: Implement mailbox RX**
 
@@ -460,7 +461,7 @@ Create a minimal `gq_queue_agent` that owns one `gq_queue_engine`; submission
 driver/sequencer support is added in Task 5. Require a non-null pointer codec
 before creating the engine.
 `mailbox_env_cfg.add_tx` forces 64-byte descriptors; `add_rx` forces 16-byte
-descriptors. Reject IDs above 4095 and depths outside inclusive 32..65536 or
+descriptors. Reject IDs above 4095 and depths outside inclusive 32..32768 or
 not power-of-two.
 
 - [ ] **Step 4: Allocate exact ring capacity**

@@ -7,6 +7,8 @@ package mailbox_pkg;
     import gq_pkg::*;
     `include "uvm_macros.svh"
 
+    `include "mailbox_ptr_codec.sv"
+    `include "mailbox_reg_adapter.sv"
     `include "mailbox_tx_desc.sv"
     `include "mailbox_rx_desc.sv"
     `include "mailbox_completion.sv"

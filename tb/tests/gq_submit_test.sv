@@ -196,7 +196,8 @@ class gq_submit_test extends uvm_test;
         cfg.alignment          = 64;
         cfg.status_area_size   = 0;
         cfg.wait_mode          = GQ_POLL;
-        cfg.poll_interval      = 10ns;
+        cfg.poll_min_interval  = 10ns;
+        cfg.poll_max_interval  = 10ns;
         cfg.completion_timeout = 1us;
         cfg.ptr_codec          = ptr_codec;
         cfg.completion_source  = mailbox_completion::type_id::create(
@@ -238,9 +239,10 @@ class gq_submit_test extends uvm_test;
             if (decoded.data[i] !== expected.data[i])
                 `uvm_fatal("SUBMIT_SLOT", $sformatf("slot %0d data[%0d] mismatch", seq, i))
         end
-        if (decoded.flags[0] !== gq_phase(seq, 32) ||
-            decoded.flags[1] !== !gq_phase(seq, 32))
-            `uvm_fatal("SUBMIT_PHASE", $sformatf("slot %0d phase mismatch", seq))
+        if (decoded.flags !== 16'h0001)
+            `uvm_fatal("SUBMIT_OWNERSHIP", $sformatf(
+                "slot %0d flags 0x%04h, expected AVAIL=1 USED=0",
+                seq, decoded.flags))
     endfunction
 
     function void expect_resource_error(string check_name, gq_response response);

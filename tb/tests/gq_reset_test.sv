@@ -180,6 +180,34 @@ class gq_reset_irq_adapter extends mailbox_mock_adapter;
     endtask
 endclass
 
+class gq_reset_counting_completion extends mailbox_completion;
+    `uvm_object_utils(gq_reset_counting_completion)
+
+    int unsigned query_calls;
+
+    function new(string name = "gq_reset_counting_completion");
+        super.new(name);
+        query_calls = 0;
+    endfunction
+
+    virtual task query_completed(
+        host_mem_api mem,
+        gq_hw_adapter adapter,
+        gq_addr_t ring_base,
+        gq_addr_t status_addr,
+        int unsigned depth,
+        int unsigned desc_size,
+        gq_logical_seq_t logical_head,
+        input gq_desc_base pending[$],
+        output bit valid,
+        output int unsigned completed_count);
+        query_calls++;
+        super.query_completed(mem, adapter, ring_base, status_addr, depth,
+                              desc_size, logical_head, pending, valid,
+                              completed_count);
+    endtask
+endclass
+
 class gq_reset_lifecycle_adapter extends mailbox_mock_adapter;
     `uvm_object_utils(gq_reset_lifecycle_adapter)
 
@@ -275,6 +303,7 @@ class gq_reset_test extends uvm_test;
     gq_completion_collector collector;
     host_mem_manager      irq_mem;
     gq_reset_irq_adapter  irq_adapter;
+    gq_reset_counting_completion irq_completion;
     mailbox_mock_dut      irq_dut;
     gq_queue_cfg          irq_cfg;
     gq_queue_engine       irq_engine;
@@ -408,6 +437,8 @@ class gq_reset_test extends uvm_test;
         irq_mem.init_region(64'h0000_0001_7100_0000,
                             64'h0000_0001_71ff_ffff, MODE_LINEAR, 16);
         irq_adapter = gq_reset_irq_adapter::type_id::create("irq_adapter");
+        irq_completion = gq_reset_counting_completion::type_id::create(
+            "irq_completion");
         irq_dut = mailbox_mock_dut::type_id::create("irq_dut");
         irq_dut.mem     = irq_mem;
         irq_dut.adapter = irq_adapter;
@@ -419,11 +450,11 @@ class gq_reset_test extends uvm_test;
         irq_cfg.alignment          = 64;
         irq_cfg.status_area_size   = 0;
         irq_cfg.wait_mode          = GQ_IRQ;
-        irq_cfg.poll_interval      = 1ns;
+        irq_cfg.poll_min_interval  = 1ns;
+        irq_cfg.poll_max_interval  = 1ns;
         irq_cfg.completion_timeout = 20ns;
         irq_cfg.ptr_codec          = ptr_codec;
-        irq_cfg.completion_source  = mailbox_completion::type_id::create(
-            "irq_completion");
+        irq_cfg.completion_source  = irq_completion;
         uvm_config_db#(gq_queue_cfg)::set(this, "irq_engine", "cfg", irq_cfg);
         uvm_config_db#(host_mem_api)::set(this, "irq_engine", "mem", irq_mem);
         uvm_config_db#(gq_hw_adapter)::set(this, "irq_engine", "adapter",
@@ -448,7 +479,8 @@ class gq_reset_test extends uvm_test;
         stale_cfg.alignment          = 64;
         stale_cfg.status_area_size   = 0;
         stale_cfg.wait_mode          = GQ_POLL;
-        stale_cfg.poll_interval      = 1ns;
+        stale_cfg.poll_min_interval  = 1ns;
+        stale_cfg.poll_max_interval  = 1ns;
         stale_cfg.completion_timeout = 20ns;
         stale_cfg.ptr_codec          = ptr_codec;
         stale_cfg.completion_source  = mailbox_completion::type_id::create(
@@ -474,11 +506,13 @@ class gq_reset_test extends uvm_test;
         repost_cfg.queue_id           = 22;
         repost_cfg.role               = GQ_RX;
         repost_cfg.depth              = 32;
+        repost_cfg.initial_logical_seq = 9;
         repost_cfg.desc_size          = 16;
         repost_cfg.alignment          = 64;
         repost_cfg.status_area_size   = 0;
         repost_cfg.wait_mode          = GQ_POLL;
-        repost_cfg.poll_interval      = 1ns;
+        repost_cfg.poll_min_interval  = 1ns;
+        repost_cfg.poll_max_interval  = 1ns;
         repost_cfg.completion_timeout = 20ns;
         repost_cfg.ptr_codec          = ptr_codec;
         repost_cfg.completion_source  = mailbox_completion::type_id::create(
@@ -508,7 +542,8 @@ class gq_reset_test extends uvm_test;
         publish_reset_cfg.alignment          = 64;
         publish_reset_cfg.status_area_size   = 0;
         publish_reset_cfg.wait_mode          = GQ_POLL;
-        publish_reset_cfg.poll_interval      = 1ns;
+        publish_reset_cfg.poll_min_interval  = 1ns;
+        publish_reset_cfg.poll_max_interval  = 1ns;
         publish_reset_cfg.completion_timeout = 20ns;
         publish_reset_cfg.ptr_codec          = ptr_codec;
         publish_reset_cfg.completion_source =
@@ -611,6 +646,12 @@ class gq_reset_test extends uvm_test;
         bit repost_configuration_done;
         int unsigned repost_publish_count_before;
         int unsigned repost_disable_count_before;
+        int unsigned repost_start_publish_count_before;
+        gq_deterministic_refill_profile nonzero_restart_profile;
+        gq_request nonzero_restart_request;
+        gq_response nonzero_restart_response;
+        mailbox_rx_desc nonzero_first_desc;
+        mailbox_rx_desc nonzero_second_desc;
         gq_request publish_reset_request;
         gq_response publish_reset_response;
         bit publish_reset_submit_returned;
@@ -1113,6 +1154,14 @@ class gq_reset_test extends uvm_test;
         mem.leak_check(`__FILE__, `__LINE__);
 
         irq_engine.initialize();
+        irq_desc = make_tx("irq_reset_pending_desc", 12);
+        irq_request = gq_request::type_id::create("irq_reset_pending_request");
+        irq_request.add_desc(irq_desc);
+        irq_response = gq_response::type_id::create(
+            "irq_reset_pending_response");
+        irq_engine.submit_batch(irq_request, irq_response);
+        if (irq_response.status != GQ_OK || irq_response.reset_epoch != 0)
+            `uvm_fatal("RESET_IRQ", "pre-reset IRQ submit failed")
         irq_worker_returned = 0;
         fork : blocked_irq_worker
             begin
@@ -1135,8 +1184,10 @@ class gq_reset_test extends uvm_test;
         if (irq_worker_returned || irq_engine.is_ready() ||
             irq_engine.reset_epoch() != 1)
             `uvm_fatal("RESET_IRQ", "IRQ worker did not wait across reset")
-        if (irq_adapter.ack_irq_calls != 0)
-            `uvm_fatal("RESET_IRQ", "reset IRQ cancellation was acknowledged")
+        if (irq_adapter.ack_irq_calls != 0 ||
+            irq_completion.query_calls != 0)
+            `uvm_fatal("RESET_IRQ",
+                       "reset IRQ cancellation was queried or acknowledged")
 
         // Release before the old epoch's bounded wait can time out. A new
         // completion/IRQ must be consumed only by a new-epoch waiter; an old
@@ -1166,15 +1217,6 @@ class gq_reset_test extends uvm_test;
         if (irq_collector.retired_srcids[0] != 16'h700d ||
             irq_adapter.ack_irq_calls != 1)
             `uvm_fatal("RESET_IRQ", "post-reset IRQ was not acknowledged exactly once")
-        for (int unsigned poll = 0; poll < 40; poll++) begin
-            #1ns;
-            if (irq_adapter.wait_irq_calls >= 2)
-                break;
-        end
-        if (irq_adapter.wait_irq_calls < 2)
-            `uvm_fatal("RESET_IRQ_ACK_GATE",
-                       "IRQ worker did not arm before delayed ACK test")
-
         // Once ACK ownership wins the completion boundary, reset must publish
         // its new epoch immediately without disabling/freeing resources until
         // the external ACK has returned.
@@ -1188,6 +1230,14 @@ class gq_reset_test extends uvm_test;
         irq_engine.submit_batch(irq_request, irq_response);
         if (irq_response.status != GQ_OK || irq_response.reset_epoch != 1)
             `uvm_fatal("RESET_IRQ_ACK_GATE", "delayed ACK submit failed")
+        for (int unsigned poll = 0; poll < 40; poll++) begin
+            #1ns;
+            if (irq_adapter.wait_irq_calls >= 3)
+                break;
+        end
+        if (irq_adapter.wait_irq_calls < 3)
+            `uvm_fatal("RESET_IRQ_ACK_GATE",
+                       "IRQ worker did not arm for delayed ACK work")
         irq_dut.complete_slot(irq_engine, 1, 32, 64);
         disable_calls_before_delayed_ack = irq_adapter.disable_calls;
         irq_adapter.trigger_irq(GQ_TX, 19);
@@ -1223,6 +1273,7 @@ class gq_reset_test extends uvm_test;
         if (!delayed_ack_reset_returned || irq_adapter.ack_irq_calls != 2 ||
             irq_adapter.disable_calls !=
                 disable_calls_before_delayed_ack + 1 ||
+            irq_completion.query_calls != 1 ||
             irq_engine.outstanding_count() != 0 ||
             irq_engine.ring_base() != 0 ||
             irq_collector.retired_srcids.size() != 1)
@@ -1561,8 +1612,65 @@ class gq_reset_test extends uvm_test;
         stale_adapter.disable_delay = 0;
         stale_mem.leak_check(`__FILE__, `__LINE__);
 
+        // Reset restart must recreate RX descriptors from the configured
+        // absolute logical origin, not from a relative zero-based index.
+        repost_engine.initialize();
+        nonzero_restart_profile =
+            gq_deterministic_refill_profile::type_id::create(
+                "nonzero_restart_profile");
+        nonzero_restart_profile.initial_post_count  = 2;
+        nonzero_restart_profile.low_watermark       = 0;
+        nonzero_restart_profile.high_watermark      = 2;
+        nonzero_restart_profile.restart_after_reset = 1;
+        nonzero_restart_profile.base_len            = 300;
+        nonzero_restart_request = gq_request::type_id::create(
+            "nonzero_restart_request");
+        nonzero_restart_request.kind = GQ_START_RX;
+        nonzero_restart_request.set_refill_profile(
+            nonzero_restart_profile);
+        nonzero_restart_response = gq_response::type_id::create(
+            "nonzero_restart_response");
+        repost_engine.start_rx(nonzero_restart_request,
+                               nonzero_restart_response);
+        if (nonzero_restart_response.status != GQ_OK ||
+            repost_engine.head_seq() != 9 || repost_engine.tail_seq() != 11 ||
+            repost_engine.outstanding_count() != 2 ||
+            !$cast(nonzero_first_desc, repost_engine.get_outstanding(9)) ||
+            !$cast(nonzero_second_desc, repost_engine.get_outstanding(10)) ||
+            nonzero_first_desc.get_name() != "rx_22_desc_9" ||
+            nonzero_second_desc.get_name() != "rx_22_desc_10" ||
+            nonzero_first_desc.buf_len != 309 ||
+            nonzero_second_desc.buf_len != 310)
+            `uvm_fatal("RESET_RX_ABSOLUTE_START",
+                       "nonzero-origin RX startup did not use absolute sequences")
+        repost_engine.assert_reset();
+        if (repost_engine.head_seq() != 9 || repost_engine.tail_seq() != 9 ||
+            repost_engine.outstanding_count() != 0 ||
+            repost_engine.ring_base() != 0)
+            `uvm_fatal("RESET_RX_ABSOLUTE_ASSERT",
+                       "nonzero-origin reset did not clear queue ownership")
+        repost_engine.release_reset();
+        if (repost_engine.head_seq() != 9 || repost_engine.tail_seq() != 11 ||
+            repost_engine.outstanding_count() != 2 ||
+            !$cast(nonzero_first_desc, repost_engine.get_outstanding(9)) ||
+            !$cast(nonzero_second_desc, repost_engine.get_outstanding(10)) ||
+            nonzero_first_desc.get_name() != "rx_22_desc_9" ||
+            nonzero_second_desc.get_name() != "rx_22_desc_10" ||
+            nonzero_first_desc.buf_len != 309 ||
+            nonzero_second_desc.buf_len != 310)
+            `uvm_fatal("RESET_RX_ABSOLUTE_RESTART",
+                       "RX reset restart passed relative logical sequences")
+        repost_engine.cleanup();
+        if (repost_engine.ring_base() != 0 ||
+            repost_engine.outstanding_count() != 0)
+            `uvm_fatal("RESET_RX_ABSOLUTE_CLEANUP",
+                       "nonzero-origin RX cleanup retained resources")
+        repost_mem.leak_check(`__FILE__, `__LINE__);
+
         // Cleanup must cancel a reset-release RX repost without returning
         // before release_reset has committed its final lifecycle state.
+        repost_start_publish_count_before = repost_adapter.publish_count[
+            "rx_22"];
         repost_engine.initialize();
         repost_profile = gq_deterministic_refill_profile::type_id::create(
             "repost_profile");
@@ -1579,7 +1687,8 @@ class gq_reset_test extends uvm_test;
             "repost_start_response");
         repost_engine.start_rx(repost_start_request, repost_start_response);
         if (repost_start_response.status != GQ_OK ||
-            repost_adapter.publish_count["rx_22"] != 1)
+            repost_adapter.publish_count["rx_22"] !=
+                repost_start_publish_count_before + 1)
             `uvm_fatal("RESET_REPOST_CLEANUP",
                        "standalone RX startup did not publish")
         repost_engine.assert_reset();

@@ -39,14 +39,17 @@ class gq_tail_mem_completion extends gq_completion_source;
         return 1;
     endfunction
 
-    virtual function int unsigned completed_count(
+    virtual task query_completed(
         host_mem_api mem,
+        gq_hw_adapter adapter,
         gq_addr_t ring_base,
         gq_addr_t status_addr,
         int unsigned depth,
         int unsigned desc_size,
         gq_logical_seq_t logical_head,
-        input gq_desc_base pending[$]);
+        input gq_desc_base pending[$],
+        output bit valid,
+        output int unsigned completed_count);
         byte raw_bytes[];
         gq_raw_ptr_t raw;
         gq_logical_seq_t completed_tail;
@@ -54,25 +57,27 @@ class gq_tail_mem_completion extends gq_completion_source;
         gq_addr_t read_addr;
         gq_addr_t max_addr;
 
+        valid = 0;
+        completed_count = 0;
         if (mem == null || ptr_codec == null)
-            return 0;
+            return;
         max_addr = '1;
         if (status_addr > (max_addr - status_byte_offset)) begin
             `uvm_error("GQ_COMPLETION_ADDR", $sformatf(
                 "status base 0x%016h plus offset %0d overflows",
                 status_addr, status_byte_offset))
-            return 0;
+            return;
         end
         read_addr = status_addr + status_byte_offset;
         if (read_addr > (max_addr - 3)) begin
             `uvm_error("GQ_COMPLETION_ADDR", $sformatf(
                 "four-byte status read at 0x%016h overflows", read_addr))
-            return 0;
+            return;
         end
         mem.read_mem(read_addr, 4, raw_bytes,
                      `__FILE__, `__LINE__);
         if (raw_bytes.size() != 4)
-            return 0;
+            return;
 
         raw = '0;
         for (int unsigned i = 0; i < 4; i++) begin
@@ -83,14 +88,15 @@ class gq_tail_mem_completion extends gq_completion_source;
         end
         if (!ptr_codec.decode_completion(raw, logical_head, depth,
                                          completed_tail))
-            return 0;
+            return;
         if (completed_tail < logical_head)
-            return 0;
+            return;
         delta = completed_tail - logical_head;
         if (delta > 32'hffff_ffff)
-            return 0;
-        return int'(delta);
-    endfunction
+            return;
+        valid = 1;
+        completed_count = int'(delta);
+    endtask
 endclass
 
 `endif

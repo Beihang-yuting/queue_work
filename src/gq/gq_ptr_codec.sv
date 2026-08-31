@@ -6,6 +6,11 @@ virtual class gq_ptr_codec extends uvm_object;
         super.new(name);
     endfunction
 
+    virtual function bit validate(int unsigned depth, output string reason);
+        reason = "";
+        return 1;
+    endfunction
+
     pure virtual function gq_raw_ptr_t encode_publish(
         gq_logical_seq_t old_tail,
         gq_logical_seq_t new_tail,

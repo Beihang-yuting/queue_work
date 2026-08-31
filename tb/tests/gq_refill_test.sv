@@ -336,7 +336,8 @@ class gq_refill_test extends uvm_test;
         race_cfg.alignment          = 64;
         race_cfg.status_area_size   = 0;
         race_cfg.wait_mode          = GQ_POLL;
-        race_cfg.poll_interval      = 1ns;
+        race_cfg.poll_min_interval  = 1ns;
+        race_cfg.poll_max_interval  = 1ns;
         race_cfg.completion_timeout = 20ns;
         race_cfg.ptr_codec          = ptr_codec;
         race_cfg.completion_source  = mailbox_completion::type_id::create(

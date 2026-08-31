@@ -123,7 +123,11 @@ class gq_agent_test extends uvm_test;
         irq_cfg.alignment          = 64;
         irq_cfg.status_area_size   = 0;
         irq_cfg.wait_mode          = GQ_IRQ;
-        irq_cfg.poll_interval      = 10ns;
+        irq_cfg.poll_policy        = GQ_POLL_FIXED;
+        irq_cfg.poll_min_interval  = 10ns;
+        irq_cfg.poll_max_interval  = 10ns;
+        irq_cfg.poll_backoff_factor = 2;
+        irq_cfg.irq_watchdog_interval = 100ns;
         irq_cfg.completion_timeout = 1us;
         irq_cfg.ptr_codec          = codec;
         irq_cfg.completion_source  = mailbox_completion::type_id::create(

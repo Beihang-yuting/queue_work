@@ -8,7 +8,7 @@ class mailbox_env_cfg extends gq_env_cfg;
 
     function new(string name = "mailbox_env_cfg");
         super.new(name);
-        ptr_codec = null;
+        ptr_codec = mailbox_ptr_codec::type_id::create({name, "_ptr_codec"});
     endfunction
 
     virtual function bit validate(output string reason);
@@ -26,10 +26,10 @@ class mailbox_env_cfg extends gq_env_cfg;
                                        key, queues[key].queue_id);
                     return 0;
                 end
-                if (queues[key].depth < 32 || queues[key].depth > 65536 ||
+                if (queues[key].depth < 32 || queues[key].depth > 32768 ||
                     !gq_is_pow2(queues[key].depth)) begin
                     reason = $sformatf(
-                        "mailbox queue %s depth %0d must be a power of two in 32..65536",
+                        "mailbox queue %s depth %0d must be a power of two in 32..32768",
                         key, queues[key].depth);
                     return 0;
                 end
@@ -74,8 +74,8 @@ class mailbox_env_cfg extends gq_env_cfg;
             reason = $sformatf("mailbox queue ID %0d is outside 0..4095", queue_id);
             return 0;
         end
-        if (depth < 32 || depth > 65536 || !gq_is_pow2(depth)) begin
-            reason = $sformatf("mailbox depth %0d must be a power of two in 32..65536",
+        if (depth < 32 || depth > 32768 || !gq_is_pow2(depth)) begin
+            reason = $sformatf("mailbox depth %0d must be a power of two in 32..32768",
                                depth);
             return 0;
         end
@@ -89,7 +89,8 @@ class mailbox_env_cfg extends gq_env_cfg;
         queue_cfg.alignment          = 64;
         queue_cfg.status_area_size   = 0;
         queue_cfg.wait_mode          = GQ_POLL;
-        queue_cfg.poll_interval      = 10ns;
+        queue_cfg.poll_min_interval  = 10ns;
+        queue_cfg.poll_max_interval  = 10ns;
         queue_cfg.completion_timeout = 1us;
         queue_cfg.ptr_codec          = ptr_codec;
         queue_cfg.completion_source  = mailbox_completion::type_id::create(

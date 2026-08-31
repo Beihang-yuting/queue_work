@@ -11,20 +11,24 @@ class gq_regression_zero_completion extends gq_completion_source;
         forced_count = 0;
     endfunction
 
-    virtual function int unsigned completed_count(
+    virtual task query_completed(
         host_mem_api mem,
+        gq_hw_adapter adapter,
         gq_addr_t ring_base,
         gq_addr_t status_addr,
         int unsigned depth,
         int unsigned desc_size,
         gq_logical_seq_t logical_head,
-        input gq_desc_base pending[$]);
+        input gq_desc_base pending[$],
+        output bit valid,
+        output int unsigned completed_count);
         int unsigned result;
 
         result = forced_count;
         forced_count = 0;
-        return result;
-    endfunction
+        valid = 1;
+        completed_count = result;
+    endtask
 endclass
 
 class gq_regression_overcount_completion extends gq_completion_source;
@@ -34,16 +38,20 @@ class gq_regression_overcount_completion extends gq_completion_source;
         super.new(name);
     endfunction
 
-    virtual function int unsigned completed_count(
+    virtual task query_completed(
         host_mem_api mem,
+        gq_hw_adapter adapter,
         gq_addr_t ring_base,
         gq_addr_t status_addr,
         int unsigned depth,
         int unsigned desc_size,
         gq_logical_seq_t logical_head,
-        input gq_desc_base pending[$]);
-        return pending.size() + 1;
-    endfunction
+        input gq_desc_base pending[$],
+        output bit valid,
+        output int unsigned completed_count);
+        valid = 1;
+        completed_count = pending.size() + 1;
+    endtask
 endclass
 
 class gq_regression_diagnostic_catcher extends uvm_report_catcher;
@@ -202,7 +210,8 @@ class gq_regression_test extends uvm_test;
         queue_cfg.alignment          = 64;
         queue_cfg.status_area_size   = 0;
         queue_cfg.wait_mode          = wait_mode;
-        queue_cfg.poll_interval      = 10ns;
+        queue_cfg.poll_min_interval  = 10ns;
+        queue_cfg.poll_max_interval  = 10ns;
         queue_cfg.completion_timeout = 100us;
         queue_cfg.ptr_codec          = ptr_codec;
         queue_cfg.completion_source  = mailbox_completion::type_id::create(
@@ -353,7 +362,8 @@ class gq_regression_test extends uvm_test;
         timeout_cfg.alignment          = 64;
         timeout_cfg.status_area_size   = 0;
         timeout_cfg.wait_mode          = GQ_POLL;
-        timeout_cfg.poll_interval      = 10ns;
+        timeout_cfg.poll_min_interval  = 10ns;
+        timeout_cfg.poll_max_interval  = 10ns;
         timeout_cfg.completion_timeout = 50ns;
         timeout_cfg.ptr_codec          = ptr_codec;
         timeout_source = gq_regression_zero_completion::type_id::create(
@@ -375,7 +385,8 @@ class gq_regression_test extends uvm_test;
         protocol_cfg.alignment          = 64;
         protocol_cfg.status_area_size   = 0;
         protocol_cfg.wait_mode          = GQ_POLL;
-        protocol_cfg.poll_interval      = 10ns;
+        protocol_cfg.poll_min_interval  = 10ns;
+        protocol_cfg.poll_max_interval  = 10ns;
         protocol_cfg.completion_timeout = 50ns;
         protocol_cfg.ptr_codec          = ptr_codec;
         protocol_cfg.completion_source  =
@@ -397,7 +408,9 @@ class gq_regression_test extends uvm_test;
         irq_timeout_cfg.alignment          = 64;
         irq_timeout_cfg.status_area_size   = 0;
         irq_timeout_cfg.wait_mode          = GQ_IRQ;
-        irq_timeout_cfg.poll_interval      = 10ns;
+        irq_timeout_cfg.poll_min_interval  = 10ns;
+        irq_timeout_cfg.poll_max_interval  = 10ns;
+        irq_timeout_cfg.irq_watchdog_interval = 50ns;
         irq_timeout_cfg.completion_timeout = 50ns;
         irq_timeout_cfg.ptr_codec          = ptr_codec;
         irq_timeout_cfg.completion_source  =
@@ -517,7 +530,7 @@ class gq_regression_test extends uvm_test;
             `uvm_fatal("REG_IRQ", "TX IRQ completion was not acknowledged")
 
         // Fill and drain through the last slot, then reuse slot zero with the
-        // opposite phase at logical sequence 32.
+        // same fixed mailbox ownership flags at logical sequence 32.
         tx_sequence = mailbox_tx_sequence::type_id::create(
             "wrap_fill_sequence");
         for (int unsigned i = 1; i < 32; i++)
@@ -537,9 +550,9 @@ class gq_regression_test extends uvm_test;
         tx_sequence.start(tx_1_sequencer);
         regression_mem.read_mem(tx_1.ring_base(), 64, slot_bytes,
                                 `__FILE__, `__LINE__);
-        if (slot_bytes[0][0] != gq_phase(32, 32) ||
-            slot_bytes[0][1] != !gq_phase(32, 32))
-            `uvm_fatal("REG_PHASE", "slot-zero phase did not toggle on wrap")
+        if (slot_bytes[0] !== 8'h01 || slot_bytes[1] !== 8'h00)
+            `uvm_fatal("REG_PHASE",
+                       "slot-zero ownership flags changed on wrap")
         regression_dut.complete_slot(tx_1, 32, 32, 64);
         wait_for_state(tx_1, 33, 33, "phase-wrap reuse completion");
 
@@ -892,6 +905,9 @@ class gq_regression_test extends uvm_test;
         // Separately cover the normal cleanup-cancellation path while a
         // completion wait is active. Cleanup must make the engine stale before
         // the poll interval can enter the drain path.
+        // Consume the earlier RX publish wake so the fork below enters the
+        // configured poll wait instead of returning through GQ_WAKE_NEW_WORK.
+        protocol_engine.wait_and_drain_once();
         cleanup_wait_returned = 0;
         fork : cleanup_wait_cancellation
             begin
@@ -900,6 +916,9 @@ class gq_regression_test extends uvm_test;
             end
         join_none
         #1ns;
+        if (cleanup_wait_returned)
+            `uvm_fatal("REG_DIAG_STALE",
+                       "completion wait returned before cleanup cancellation")
         protocol_engine.cleanup();
         for (int unsigned poll = 0; poll < 20; poll++) begin
             #1ns;

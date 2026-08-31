@@ -1,0 +1,228 @@
+`ifndef DMAQ_MOCK_DUT_SV
+`define DMAQ_MOCK_DUT_SV
+
+class dmaq_driver_mem extends host_mem_manager;
+    int unsigned allocation_calls;
+    int unsigned free_calls;
+    int unsigned free_counts[gq_addr_t];
+    int unsigned borrowed_free_attempts;
+    bit borrowed_addresses[gq_addr_t];
+
+    function new(string name = "dmaq_driver_mem");
+        super.new(name);
+        allocation_calls = 0;
+        free_calls = 0;
+        borrowed_free_attempts = 0;
+    endfunction
+
+    function void register_borrowed(gq_addr_t address);
+        borrowed_addresses[address] = 1;
+    endfunction
+
+    virtual function bit [63:0] alloc(int unsigned size,
+                                      int unsigned align = 1,
+                                      string file = "", int line = 0);
+        allocation_calls++;
+        return super.alloc(size, align, file, line);
+    endfunction
+
+    virtual function void free(bit [63:0] addr, string file = "",
+                               int line = 0);
+        free_calls++;
+        free_counts[addr]++;
+        if (borrowed_addresses.exists(addr)) begin
+            borrowed_free_attempts++;
+            return;
+        end
+        super.free(addr, file, line);
+    endfunction
+
+    function int unsigned free_count(gq_addr_t address);
+        if (!free_counts.exists(address))
+            return 0;
+        return free_counts[address];
+    endfunction
+endclass
+
+class dmaq_mock_completion extends dmaq_completion;
+    `uvm_object_utils(dmaq_mock_completion)
+
+    time query_times[$];
+    int unsigned ack_counts_at_query[$];
+    int unsigned queue_id;
+    uvm_event query_event;
+    uvm_event query_blocked;
+    uvm_event query_release;
+    bit block_next_query_value;
+    time settlement_deadline_time;
+    gq_logical_seq_t settlement_head;
+    longint unsigned settlement_epoch;
+    bit settlement_observation_armed;
+    int unsigned settlement_query_count;
+    int unsigned deadline_slot_query_count;
+    int unsigned final_settlement_query_count;
+    int unsigned normal_settlement_query_count;
+    int unsigned blocked_query_count;
+
+    function new(string name = "dmaq_mock_completion");
+        super.new(name);
+        queue_id = 0;
+        query_event = new({name, "_query"});
+        query_blocked = new({name, "_query_blocked"});
+        query_release = new({name, "_query_release"});
+        block_next_query_value = 0;
+        settlement_deadline_time = 0;
+        settlement_head = 0;
+        settlement_epoch = 0;
+        settlement_observation_armed = 0;
+        settlement_query_count = 0;
+        deadline_slot_query_count = 0;
+        final_settlement_query_count = 0;
+        normal_settlement_query_count = 0;
+        blocked_query_count = 0;
+    endfunction
+
+    function void arm_settlement_observation(time deadline_time,
+                                             gq_logical_seq_t head,
+                                             longint unsigned epoch);
+        settlement_deadline_time = deadline_time;
+        settlement_head = head;
+        settlement_epoch = epoch;
+        settlement_observation_armed = 1;
+        settlement_query_count = 0;
+        deadline_slot_query_count = 0;
+        final_settlement_query_count = 0;
+        normal_settlement_query_count = 0;
+        blocked_query_count = 0;
+    endfunction
+
+    function void block_next_query();
+        block_next_query_value = 1;
+        query_blocked.reset();
+        query_release.reset();
+    endfunction
+
+    function void release_query();
+        query_release.trigger();
+    endfunction
+
+    virtual task query_completed(
+        host_mem_api mem,
+        gq_hw_adapter adapter,
+        gq_addr_t ring_base,
+        gq_addr_t status_addr,
+        int unsigned depth,
+        int unsigned desc_size,
+        gq_logical_seq_t logical_head,
+        input gq_desc_base pending[$],
+        output bit valid,
+        output int unsigned completed_count);
+        dmaq_mock_adapter dmaq_adapter;
+        bit block_this_query;
+        bit settlement_query;
+        bit sampled_valid;
+        int unsigned sampled_count;
+
+        query_times.push_back($time);
+        if (settlement_observation_armed &&
+            $time == settlement_deadline_time)
+            deadline_slot_query_count++;
+        settlement_query = settlement_observation_armed &&
+                           $time == settlement_deadline_time &&
+                           logical_head == settlement_head;
+        if (settlement_query) begin
+            settlement_query_count++;
+        end
+        if ($cast(dmaq_adapter, adapter) &&
+            dmaq_adapter.ack_irq_count.exists(queue_id))
+            ack_counts_at_query.push_back(
+                dmaq_adapter.ack_irq_count[queue_id]);
+        else
+            ack_counts_at_query.push_back(0);
+        block_this_query = block_next_query_value;
+        if (block_this_query)
+            block_next_query_value = 0;
+        if (settlement_query) begin
+            if (block_this_query)
+                normal_settlement_query_count++;
+            else
+                final_settlement_query_count++;
+        end
+        super.query_completed(mem, adapter, ring_base, status_addr,
+                              depth, desc_size, logical_head, pending,
+                              sampled_valid, sampled_count);
+        if (block_this_query) begin
+            blocked_query_count++;
+            query_blocked.trigger();
+            query_release.wait_on();
+        end
+        valid = sampled_valid;
+        completed_count = sampled_count;
+        query_event.trigger();
+    endtask
+endclass
+
+class dmaq_mock_dut extends uvm_object;
+    `uvm_object_utils(dmaq_mock_dut)
+
+    host_mem_api mem;
+    dmaq_mock_adapter adapters[int unsigned];
+    int unsigned completion_write_count;
+
+    function new(string name = "dmaq_mock_dut");
+        super.new(name);
+        mem = null;
+        completion_write_count = 0;
+    endfunction
+
+    function void read_slot(gq_queue_engine engine,
+                            gq_logical_seq_t logical_seq,
+                            int unsigned depth,
+                            ref byte raw[]);
+        gq_addr_t slot_addr;
+
+        raw = new[0];
+        if (mem == null || engine == null || engine.ring_base() == 0 ||
+            depth == 0)
+            return;
+        slot_addr = engine.ring_base() +
+                    ((logical_seq % depth) * DMAQ_DESC_BYTES);
+        mem.read_mem(slot_addr, DMAQ_DESC_BYTES, raw,
+                     `__FILE__, `__LINE__);
+    endfunction
+
+    function bit complete_slot(gq_queue_engine engine,
+                               gq_logical_seq_t logical_seq,
+                               int unsigned depth,
+                               int stable_corrupt_offset = -1);
+        byte raw[];
+        gq_addr_t slot_addr;
+
+        if (mem == null || engine == null || engine.ring_base() == 0 ||
+            depth == 0)
+            return 0;
+        if (stable_corrupt_offset != -1 &&
+            (stable_corrupt_offset < 2 ||
+             stable_corrupt_offset >= DMAQ_DESC_BYTES))
+            return 0;
+        read_slot(engine, logical_seq, depth, raw);
+        if (raw.size() != DMAQ_DESC_BYTES)
+            return 0;
+        raw[0] = byte'(DMAQ_DESC_AVAIL | DMAQ_DESC_USED);
+        raw[1] = 8'h00;
+        if (stable_corrupt_offset != -1)
+            raw[stable_corrupt_offset] ^= 8'h01;
+        slot_addr = engine.ring_base() +
+                    ((logical_seq % depth) * DMAQ_DESC_BYTES);
+        mem.write_mem(slot_addr, raw, `__FILE__, `__LINE__);
+        completion_write_count++;
+        return 1;
+    endfunction
+
+    function void trigger_irq(int unsigned queue_id);
+        if (adapters.exists(queue_id) && adapters[queue_id] != null)
+            adapters[queue_id].trigger_irq(queue_id);
+    endfunction
+endclass
+
+`endif

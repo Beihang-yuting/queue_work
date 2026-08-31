@@ -55,8 +55,7 @@ class mailbox_rx_desc extends gq_desc_base;
     endfunction
 
     virtual function void mark_available(bit phase);
-        flags[0] = phase;
-        flags[1] = !phase;
+        flags = 16'h0001;
     endfunction
 
     virtual function void pack(ref byte packed_data[]);
@@ -107,7 +106,7 @@ class mailbox_rx_desc extends gq_desc_base;
     endfunction
 
     virtual function bit is_complete(bit phase);
-        return flags[1] == phase;
+        return flags[1] == 1'b1;
     endfunction
 
     virtual function bit parse_completion();

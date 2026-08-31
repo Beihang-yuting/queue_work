@@ -167,12 +167,13 @@ class mailbox_desc_test extends uvm_test;
         if (!tx_copy.is_complete(1'b1))
             `uvm_fatal("TX_PHASE", "phase-one completion not detected")
         tx_copy.mark_available(1'b0);
-        if (tx_copy.flags[0] != 1'b0 || tx_copy.flags[1] != 1'b1 ||
-            tx_copy.is_complete(1'b0))
-            `uvm_fatal("TX_PHASE", "phase-zero initial flags are incorrect")
-        tx_copy.flags[1] = 1'b0;
+        if (tx_copy.flags != 16'h0001 || tx_copy.is_complete(1'b0))
+            `uvm_fatal("TX_OWNERSHIP",
+                       "second-lap TX must publish with AVAIL=1 and USED=0")
+        tx_copy.flags[1] = 1'b1;
         if (!tx_copy.is_complete(1'b0))
-            `uvm_fatal("TX_PHASE", "phase-zero completion not detected")
+            `uvm_fatal("TX_OWNERSHIP",
+                       "second-lap TX completion must use fixed USED=1")
 
         wrong_tx_bytes = new[63];
         tx_copy.srcid = 16'hbeef;
@@ -271,12 +272,13 @@ class mailbox_desc_test extends uvm_test;
         if (!rx_copy.is_complete(1'b1))
             `uvm_fatal("RX_PHASE", "phase-one completion not detected")
         rx_copy.mark_available(1'b0);
-        if (rx_copy.flags[0] != 1'b0 || rx_copy.flags[1] != 1'b1 ||
-            rx_copy.is_complete(1'b0))
-            `uvm_fatal("RX_PHASE", "phase-zero initial flags are incorrect")
-        rx_copy.flags[1] = 1'b0;
+        if (rx_copy.flags != 16'h0001 || rx_copy.is_complete(1'b0))
+            `uvm_fatal("RX_OWNERSHIP",
+                       "second-lap RX must publish with AVAIL=1 and USED=0")
+        rx_copy.flags[1] = 1'b1;
         if (!rx_copy.is_complete(1'b0))
-            `uvm_fatal("RX_PHASE", "phase-zero completion not detected")
+            `uvm_fatal("RX_OWNERSHIP",
+                       "second-lap RX completion must use fixed USED=1")
 
         rx_expected = new[rx.buf_len];
         foreach (rx_expected[i])

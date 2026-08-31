@@ -8,16 +8,20 @@ class gq_overcount_completion extends gq_completion_source;
         super.new(name);
     endfunction
 
-    virtual function int unsigned completed_count(
+    virtual task query_completed(
         host_mem_api mem,
+        gq_hw_adapter adapter,
         gq_addr_t ring_base,
         gq_addr_t status_addr,
         int unsigned depth,
         int unsigned desc_size,
         gq_logical_seq_t logical_head,
-        input gq_desc_base pending[$]);
-        return pending.size() + 1;
-    endfunction
+        input gq_desc_base pending[$],
+        output bit valid,
+        output int unsigned completed_count);
+        valid = 1;
+        completed_count = pending.size() + 1;
+    endtask
 endclass
 
 class gq_counting_completion extends gq_completion_source;
@@ -30,17 +34,21 @@ class gq_counting_completion extends gq_completion_source;
         query_calls = 0;
     endfunction
 
-    virtual function int unsigned completed_count(
+    virtual task query_completed(
         host_mem_api mem,
+        gq_hw_adapter adapter,
         gq_addr_t ring_base,
         gq_addr_t status_addr,
         int unsigned depth,
         int unsigned desc_size,
         gq_logical_seq_t logical_head,
-        input gq_desc_base pending[$]);
+        input gq_desc_base pending[$],
+        output bit valid,
+        output int unsigned completed_count);
         query_calls++;
-        return 0;
-    endfunction
+        valid = 1;
+        completed_count = 0;
+    endtask
 endclass
 
 class gq_completion_read_guard_mem extends host_mem_manager;
@@ -287,7 +295,8 @@ class gq_completion_test extends uvm_test;
         cfg.alignment          = 64;
         cfg.status_area_size   = 0;
         cfg.wait_mode          = GQ_POLL;
-        cfg.poll_interval      = 10ns;
+        cfg.poll_min_interval  = 10ns;
+        cfg.poll_max_interval  = 10ns;
         cfg.completion_timeout = 1us;
         cfg.ptr_codec          = ptr_codec;
         cfg.completion_source  = mailbox_completion::type_id::create(
@@ -308,7 +317,8 @@ class gq_completion_test extends uvm_test;
         tail_cfg.alignment          = 64;
         tail_cfg.status_area_size   = 8;
         tail_cfg.wait_mode          = GQ_POLL;
-        tail_cfg.poll_interval      = 10ns;
+        tail_cfg.poll_min_interval  = 10ns;
+        tail_cfg.poll_max_interval  = 10ns;
         tail_cfg.completion_timeout = 1us;
         tail_cfg.ptr_codec          = ptr_codec;
         tail_source = new("tail_source", ptr_codec, 4, GQ_LITTLE_ENDIAN);
@@ -334,7 +344,8 @@ class gq_completion_test extends uvm_test;
         protocol_cfg.alignment          = 64;
         protocol_cfg.status_area_size   = 0;
         protocol_cfg.wait_mode          = GQ_POLL;
-        protocol_cfg.poll_interval      = 10ns;
+        protocol_cfg.poll_min_interval  = 10ns;
+        protocol_cfg.poll_max_interval  = 10ns;
         protocol_cfg.completion_timeout = 1us;
         protocol_cfg.ptr_codec          = ptr_codec;
         protocol_cfg.completion_source  =
@@ -360,7 +371,8 @@ class gq_completion_test extends uvm_test;
         poll_cfg.alignment          = 64;
         poll_cfg.status_area_size   = 0;
         poll_cfg.wait_mode          = GQ_POLL;
-        poll_cfg.poll_interval      = 10ns;
+        poll_cfg.poll_min_interval  = 10ns;
+        poll_cfg.poll_max_interval  = 10ns;
         poll_cfg.completion_timeout = 1us;
         poll_cfg.ptr_codec          = ptr_codec;
         poll_cfg.completion_source  = mailbox_completion::type_id::create(
@@ -385,7 +397,8 @@ class gq_completion_test extends uvm_test;
         irq_cfg.alignment          = 64;
         irq_cfg.status_area_size   = 0;
         irq_cfg.wait_mode          = GQ_IRQ;
-        irq_cfg.poll_interval      = 10ns;
+        irq_cfg.poll_min_interval  = 10ns;
+        irq_cfg.poll_max_interval  = 10ns;
         irq_cfg.completion_timeout = 1us;
         irq_cfg.ptr_codec          = ptr_codec;
         irq_cfg.completion_source  = mailbox_completion::type_id::create(
@@ -428,7 +441,8 @@ class gq_completion_test extends uvm_test;
         rx_cfg.alignment          = 64;
         rx_cfg.status_area_size   = 0;
         rx_cfg.wait_mode          = GQ_POLL;
-        rx_cfg.poll_interval      = 10ns;
+        rx_cfg.poll_min_interval  = 10ns;
+        rx_cfg.poll_max_interval  = 10ns;
         rx_cfg.completion_timeout = 1us;
         rx_cfg.ptr_codec          = ptr_codec;
         rx_cfg.completion_source  = mailbox_completion::type_id::create(
@@ -458,7 +472,8 @@ class gq_completion_test extends uvm_test;
         cleanup_cfg.alignment          = 64;
         cleanup_cfg.status_area_size   = 4;
         cleanup_cfg.wait_mode          = GQ_POLL;
-        cleanup_cfg.poll_interval      = 10ns;
+        cleanup_cfg.poll_min_interval  = 10ns;
+        cleanup_cfg.poll_max_interval  = 10ns;
         cleanup_cfg.completion_timeout = 1us;
         cleanup_cfg.ptr_codec          = ptr_codec;
         cleanup_cfg.completion_source  = cleanup_source;
@@ -515,7 +530,7 @@ class gq_completion_test extends uvm_test;
                 null_bind_count, rebind_count, same_bind_count))
     endfunction
 
-    function void check_tail_memory_endian();
+    task check_tail_memory_endian();
         gq_tail_mem_completion little_source;
         gq_tail_mem_completion big_source;
         gq_tail_mem_completion zero_offset_source;
@@ -526,6 +541,7 @@ class gq_completion_test extends uvm_test;
         gq_raw_ptr_t raw;
         gq_addr_t status_base;
         byte raw_bytes[];
+        bit valid;
         int unsigned count;
 
         status_base = mem.alloc(16, 4, `__FILE__, `__LINE__);
@@ -544,9 +560,9 @@ class gq_completion_test extends uvm_test;
         for (int unsigned i = 0; i < 4; i++)
             raw_bytes[i] = byte'(raw >> (8 * i));
         mem.write_mem(status_base + 4, raw_bytes, `__FILE__, `__LINE__);
-        count = little_source.completed_count(mem, 0, status_base, 32, 64,
-                                              7, pending);
-        if (count != 3)
+        little_source.query_completed(mem, adapter, 0, status_base, 32, 64,
+                                      7, pending, valid, count);
+        if (!valid || count != 3)
             `uvm_fatal("TAIL_ENDIAN", $sformatf(
                 "little-endian count got %0d expected 3", count))
 
@@ -554,9 +570,9 @@ class gq_completion_test extends uvm_test;
         for (int unsigned i = 0; i < 4; i++)
             raw_bytes[i] = byte'(raw >> (8 * (3 - i)));
         mem.write_mem(status_base + 8, raw_bytes, `__FILE__, `__LINE__);
-        count = big_source.completed_count(mem, 0, status_base, 32, 64,
-                                           7, pending);
-        if (count != 3)
+        big_source.query_completed(mem, adapter, 0, status_base, 32, 64,
+                                   7, pending, valid, count);
+        if (!valid || count != 3)
             `uvm_fatal("TAIL_ENDIAN", $sformatf(
                 "big-endian count got %0d expected 3", count))
 
@@ -564,26 +580,26 @@ class gq_completion_test extends uvm_test;
         for (int unsigned i = 0; i < 4; i++)
             raw_bytes[i] = byte'(raw >> (8 * i));
         mem.write_mem(status_base + 4, raw_bytes, `__FILE__, `__LINE__);
-        count = little_source.completed_count(mem, 0, status_base, 32, 64,
-                                              7, pending);
-        if (count != 0)
+        little_source.query_completed(mem, adapter, 0, status_base, 32, 64,
+                                      7, pending, valid, count);
+        if (valid || count != 0)
             `uvm_fatal("TAIL_DECODE", "decode failure did not return zero")
 
         raw = ptr_codec.encode_publish(65534, 65538, 32);
         for (int unsigned i = 0; i < 4; i++)
             raw_bytes[i] = byte'(raw >> (8 * i));
         mem.write_mem(status_base + 4, raw_bytes, `__FILE__, `__LINE__);
-        count = little_source.completed_count(mem, 0, status_base, 32, 64,
-                                              65534, pending);
-        if (count != 4)
+        little_source.query_completed(mem, adapter, 0, status_base, 32, 64,
+                                      65534, pending, valid, count);
+        if (!valid || count != 4)
             `uvm_fatal("TAIL_WRAP", $sformatf(
                 "little-endian 16-bit wrap count got %0d expected 4", count))
         for (int unsigned i = 0; i < 4; i++)
             raw_bytes[i] = byte'(raw >> (8 * (3 - i)));
         mem.write_mem(status_base + 8, raw_bytes, `__FILE__, `__LINE__);
-        count = big_source.completed_count(mem, 0, status_base, 32, 64,
-                                           65534, pending);
-        if (count != 4)
+        big_source.query_completed(mem, adapter, 0, status_base, 32, 64,
+                                   65534, pending, valid, count);
+        if (!valid || count != 4)
             `uvm_fatal("TAIL_WRAP", $sformatf(
                 "big-endian 16-bit wrap count got %0d expected 4", count))
 
@@ -592,13 +608,15 @@ class gq_completion_test extends uvm_test;
                                  GQ_LITTLE_ENDIAN);
         addr_catcher = new("addr_catcher");
         uvm_report_cb::add(null, addr_catcher);
-        count = little_source.completed_count(
-            guard_mem, 0, 64'hffff_ffff_ffff_fffe, 32, 64, 0, pending);
-        if (count != 0)
+        little_source.query_completed(
+            guard_mem, adapter, 0, 64'hffff_ffff_ffff_fffe, 32, 64, 0,
+            pending, valid, count);
+        if (valid || count != 0)
             `uvm_fatal("TAIL_ADDR", "status base plus offset overflow was accepted")
-        count = zero_offset_source.completed_count(
-            guard_mem, 0, 64'hffff_ffff_ffff_fffe, 32, 64, 0, pending);
-        if (count != 0)
+        zero_offset_source.query_completed(
+            guard_mem, adapter, 0, 64'hffff_ffff_ffff_fffe, 32, 64, 0,
+            pending, valid, count);
+        if (valid || count != 0)
             `uvm_fatal("TAIL_ADDR", "four-byte status read overflow was accepted")
         uvm_report_cb::delete(null, addr_catcher);
         if (addr_catcher.caught_addr_errors != 2 || guard_mem.read_calls != 0)
@@ -607,7 +625,7 @@ class gq_completion_test extends uvm_test;
                 addr_catcher.caught_addr_errors, guard_mem.read_calls))
 
         mem.free(status_base, `__FILE__, `__LINE__);
-    endfunction
+    endtask
 
     function void check_completion_validation();
         gq_queue_cfg missing_source_cfg;
@@ -626,7 +644,8 @@ class gq_completion_test extends uvm_test;
         missing_source_cfg.desc_size          = 64;
         missing_source_cfg.alignment          = 64;
         missing_source_cfg.wait_mode          = GQ_POLL;
-        missing_source_cfg.poll_interval      = 10ns;
+        missing_source_cfg.poll_min_interval  = 10ns;
+        missing_source_cfg.poll_max_interval  = 10ns;
         missing_source_cfg.completion_timeout = 1us;
         missing_source_cfg.ptr_codec          = ptr_codec;
         missing_source_cfg.completion_source  = null;
@@ -644,7 +663,8 @@ class gq_completion_test extends uvm_test;
         tail_validation_cfg.alignment          = 64;
         tail_validation_cfg.status_area_size   = 7;
         tail_validation_cfg.wait_mode          = GQ_POLL;
-        tail_validation_cfg.poll_interval      = 10ns;
+        tail_validation_cfg.poll_min_interval  = 10ns;
+        tail_validation_cfg.poll_max_interval  = 10ns;
         tail_validation_cfg.completion_timeout = 1us;
         tail_validation_cfg.ptr_codec          = ptr_codec;
         validation_source = new("short_tail_source", ptr_codec, 4,
@@ -687,7 +707,8 @@ class gq_completion_test extends uvm_test;
         generic_mailbox_queue.desc_size          = 64;
         generic_mailbox_queue.alignment          = 64;
         generic_mailbox_queue.wait_mode          = GQ_POLL;
-        generic_mailbox_queue.poll_interval      = 10ns;
+        generic_mailbox_queue.poll_min_interval  = 10ns;
+        generic_mailbox_queue.poll_max_interval  = 10ns;
         generic_mailbox_queue.completion_timeout = 1us;
         generic_mailbox_queue.ptr_codec          = ptr_codec;
         generic_mailbox_queue.completion_source  = null;
@@ -772,6 +793,26 @@ class gq_completion_test extends uvm_test;
         protocol_mem.leak_check(`__FILE__, `__LINE__);
     endtask
 
+    task check_empty_window_overcount_protocol();
+        gq_completion_protocol_catcher catcher;
+
+        protocol_engine.initialize();
+        catcher = new("empty_window_protocol_catcher");
+        uvm_report_cb::add(null, catcher);
+        protocol_engine.drain_completed();
+        uvm_report_cb::delete(null, catcher);
+        if (!catcher.caught_protocol_error)
+            `uvm_fatal("EMPTY_WINDOW_PROTOCOL",
+                       "empty-window over-count did not report a protocol error")
+        if (protocol_engine.head_seq() != 0 ||
+            protocol_engine.tail_seq() != 0 ||
+            protocol_engine.outstanding_count() != 0)
+            `uvm_fatal("EMPTY_WINDOW_PROTOCOL",
+                       "empty-window over-count changed engine state")
+        protocol_engine.cleanup();
+        protocol_mem.leak_check(`__FILE__, `__LINE__);
+    endtask
+
     task wait_for_irq_completion_or_timeout();
         irq_wait_timed_out = 0;
         fork : flag_or_timeout
@@ -803,8 +844,12 @@ class gq_completion_test extends uvm_test;
         gq_irq_wait_policy policy_b;
         bit returned_a;
         bit returned_b;
-        bit wake_a;
-        bit wake_b;
+        gq_wakeup_e wake_a;
+        gq_wakeup_e wake_b;
+        uvm_event cancel_a;
+        uvm_event cancel_b;
+        uvm_event new_work_a;
+        uvm_event new_work_b;
 
         cfg_a = gq_queue_cfg::type_id::create("parallel_irq_cfg_a");
         cfg_b = gq_queue_cfg::type_id::create("parallel_irq_cfg_b");
@@ -822,21 +867,27 @@ class gq_completion_test extends uvm_test;
             "parallel_irq_policy_b");
         returned_a = 0;
         returned_b = 0;
-        wake_a = 0;
-        wake_b = 0;
+        wake_a = GQ_WAKE_CANCELLED;
+        wake_b = GQ_WAKE_CANCELLED;
+        cancel_a = new("parallel_irq_cancel_a");
+        cancel_b = new("parallel_irq_cancel_b");
+        new_work_a = new("parallel_irq_new_work_a");
+        new_work_b = new("parallel_irq_new_work_b");
 
         fork
             begin
-                policy_a.wait_for_wakeup(cfg_a, shared_adapter, wake_a);
+                policy_a.wait_for_wakeup(cfg_a, shared_adapter, cancel_a,
+                                         new_work_a, wake_a);
                 returned_a = 1;
             end
             begin
-                policy_b.wait_for_wakeup(cfg_b, shared_adapter, wake_b);
+                policy_b.wait_for_wakeup(cfg_b, shared_adapter, cancel_b,
+                                         new_work_b, wake_b);
                 returned_b = 1;
             end
         join_none
         for (int unsigned poll = 0; poll < 20; poll++) begin
-            #1ns;
+            #10ns;
             if (shared_adapter.wait_irq_calls == 2)
                 break;
         end
@@ -844,16 +895,16 @@ class gq_completion_test extends uvm_test;
             `uvm_fatal("IRQ_PARALLEL", "parallel IRQ waits did not arm")
 
         shared_adapter.trigger_irq(GQ_TX, cfg_a.queue_id);
-        #1ns;
-        if (!returned_a || !wake_a)
+        #10ns;
+        if (!returned_a || wake_a != GQ_WAKE_IRQ)
             `uvm_fatal("IRQ_PARALLEL", "first parallel IRQ wait did not wake")
-        if (returned_b || wake_b)
+        if (returned_b || wake_b == GQ_WAKE_IRQ)
             `uvm_fatal("IRQ_PARALLEL",
                        "first IRQ wake cancelled an unrelated queue wait")
 
         shared_adapter.trigger_irq(GQ_TX, cfg_b.queue_id);
-        #1ns;
-        if (!returned_b || !wake_b)
+        #10ns;
+        if (!returned_b || wake_b != GQ_WAKE_IRQ)
             `uvm_fatal("IRQ_PARALLEL", "second parallel IRQ wait did not wake")
     endtask
 
@@ -885,14 +936,17 @@ class gq_completion_test extends uvm_test;
         target_engine.submit_batch(request, response);
         if (response.status != GQ_OK)
             `uvm_fatal("WAIT_SUBMIT", "wait-mode setup submit failed")
+        // A direct caller consumes the publish wake exactly as one outer
+        // completion-worker iteration would before beginning the timed wait.
+        target_engine.wait_and_drain_once();
 
         target_dut.complete_slot(target_engine, 0, 32, 64);
         target_dut.complete_slot(target_engine, 2, 32, 64);
         if (target_cfg.wait_mode == GQ_POLL) begin
             wait_start = $time;
             target_engine.wait_and_drain_once();
-            if (($time - wait_start) < target_cfg.poll_interval)
-                `uvm_fatal("WAIT_POLL", "poll wake did not wait poll_interval")
+            if (($time - wait_start) < target_cfg.poll_min_interval)
+                `uvm_fatal("WAIT_POLL", "poll wake did not wait the configured minimum")
         end else begin
             irq_wait_returned = 0;
             irq_wait_timeout  = target_cfg.completion_timeout;
@@ -1021,10 +1075,10 @@ class gq_completion_test extends uvm_test;
         mem.read_mem(engine.ring_base(), 64, packed_data,
                      `__FILE__, `__LINE__);
         decoded = mailbox_tx_desc::type_id::create("tx_wrapped_decoded");
-        if (!decoded.unpack(packed_data) || decoded.flags[0] != 0 ||
-            decoded.flags[1] != 1 || wrapped_desc.flags[0] != 0 ||
-            wrapped_desc.flags[1] != 1)
-            `uvm_fatal("TX_WRAP", "wrapped TX pending phase flags are incorrect")
+        if (!decoded.unpack(packed_data) || decoded.flags !== 16'h0001 ||
+            wrapped_desc.flags !== 16'h0001)
+            `uvm_fatal("TX_WRAP",
+                       "wrapped TX pending ownership flags are incorrect")
         dut.complete_slot(engine, 32, 32, 64);
         engine.drain_completed();
         if (engine.head_seq() != 33 || collector.retired_srcids.size() != 33 ||
@@ -1085,10 +1139,10 @@ class gq_completion_test extends uvm_test;
         rx_mem.read_mem(rx_engine.ring_base(), 16, packed_data,
                         `__FILE__, `__LINE__);
         decoded = mailbox_rx_desc::type_id::create("rx_wrapped_decoded");
-        if (!decoded.unpack(packed_data) || decoded.flags[0] != 0 ||
-            decoded.flags[1] != 1 || wrapped_desc.flags[0] != 0 ||
-            wrapped_desc.flags[1] != 1)
-            `uvm_fatal("RX_WRAP", "wrapped RX pending phase flags are incorrect")
+        if (!decoded.unpack(packed_data) || decoded.flags !== 16'h0001 ||
+            wrapped_desc.flags !== 16'h0001)
+            `uvm_fatal("RX_WRAP",
+                       "wrapped RX pending ownership flags are incorrect")
         foreach (payload[j])
             payload[j] = byte'(8'ha5 + j);
         rx_mem.write_mem(wrapped_desc.buf_addr, payload,
@@ -1117,7 +1171,7 @@ class gq_completion_test extends uvm_test;
         join_none
         #1ns;
         cleanup_engine.cleanup();
-        #(cleanup_cfg.poll_interval + 1ns);
+        #(cleanup_cfg.poll_min_interval + 1ns);
         if (!worker_returned)
             `uvm_fatal("CLEANUP_WORKER", "poll worker did not stop after cleanup")
         if (cleanup_source.query_calls != 0)
@@ -1138,6 +1192,7 @@ class gq_completion_test extends uvm_test;
         check_tail_memory_endian();
         check_tail_engine_integration();
         check_overcount_protocol();
+        check_empty_window_overcount_protocol();
         check_irq_wait_watchdog();
         check_parallel_irq_waiters();
         run_wait_mode(poll_engine, poll_cfg, poll_mem, poll_adapter,

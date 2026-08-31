@@ -56,6 +56,10 @@ virtual class gq_desc_base extends uvm_sequence_item;
         released = 1;
     endfunction
 
+    function int unsigned owned_allocation_count();
+        return owned_allocations.size();
+    endfunction
+
     virtual function bit prepare();
         return 1;
     endfunction

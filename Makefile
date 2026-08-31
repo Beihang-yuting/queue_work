@@ -3,13 +3,61 @@ TEST ?= gq_smoke_test
 BUILD_DIR ?= build
 SIMV := $(BUILD_DIR)/simv
 
+LIBS ?= mailbox
+comma := ,
+LIB_LIST := $(subst $(comma), ,$(LIBS))
+LIB_SOURCE_mailbox := src/mailbox/mailbox_pkg.sv
+LIB_SOURCE_msgq := src/msgq/msgq_pkg.sv
+LIB_SOURCE_cmdq := src/cmdq/cmdq_pkg.sv
+LIB_SOURCE_tlpq := src/tlpq/tlpq_pkg.sv
+LIB_SOURCE_dmaq := src/dmaq/dmaq_pkg.sv
+LIB_SOURCES := $(foreach lib,$(LIB_LIST),$(LIB_SOURCE_$(lib)))
+LIB_INCDIRS := $(foreach lib,$(LIB_LIST),+incdir+src/$(lib))
+ifneq ($(filter tlpq,$(LIB_LIST)),)
+PCIE_ROOT := pcie_work/pcie_tl_vip
+PCIE_INCDIRS := +incdir+$(PCIE_ROOT)/src \
+  +incdir+$(PCIE_ROOT)/src/types +incdir+$(PCIE_ROOT)/src/shared \
+  +incdir+$(PCIE_ROOT)/src/agent +incdir+$(PCIE_ROOT)/src/env \
+  +incdir+$(PCIE_ROOT)/src/adapter +incdir+$(PCIE_ROOT)/src/switch \
+  +incdir+$(PCIE_ROOT)/src/topology \
+  +incdir+$(PCIE_ROOT)/src/seq/base \
+  +incdir+$(PCIE_ROOT)/src/seq/constraints \
+  +incdir+$(PCIE_ROOT)/src/seq/scenario \
+  +incdir+$(PCIE_ROOT)/src/seq/virtual
+PCIE_SOURCES := $(PCIE_ROOT)/src/pcie_tl_if.sv \
+  $(PCIE_ROOT)/src/shared/pcie_tl_bdf_utils_pkg.sv \
+  $(PCIE_ROOT)/src/shared/pcie_tl_device_profile_pkg.sv \
+  $(PCIE_ROOT)/src/topology/pcie_topology_pkg.sv \
+  $(PCIE_ROOT)/src/pcie_tl_pkg.sv
+endif
+TEST_SUITE ?= gq
+TEST_PACKAGE_gq := tb/gq_test_pkg.sv
+TEST_PACKAGE_msgq := tb/msgq_test_pkg.sv
+TEST_PACKAGE_cmdq := tb/cmdq_test_pkg.sv
+TEST_PACKAGE_tlpq := tb/tlpq_test_pkg.sv
+TEST_PACKAGE_dmaq := tb/dmaq_test_pkg.sv
+TEST_DEFINE_gq := +define+QUEUE_TEST_GQ
+TEST_DEFINE_msgq := +define+QUEUE_TEST_MSGQ
+TEST_DEFINE_cmdq := +define+QUEUE_TEST_CMDQ
+TEST_DEFINE_tlpq := +define+QUEUE_TEST_TLPQ
+TEST_DEFINE_dmaq := +define+QUEUE_TEST_DMAQ
+TEST_PACKAGE_SOURCE := $(TEST_PACKAGE_$(TEST_SUITE))
+UNKNOWN_LIBS := $(foreach lib,$(LIB_LIST),\
+                  $(if $(LIB_SOURCE_$(lib)),,$(lib)))
+
+ifneq ($(strip $(UNKNOWN_LIBS)),)
+$(error unknown LIBS entries: $(UNKNOWN_LIBS))
+endif
+ifeq ($(strip $(TEST_PACKAGE_SOURCE)),)
+$(error unknown TEST_SUITE: $(TEST_SUITE))
+endif
+
 VCS_FLAGS := -full64 -sverilog -ntb_opts uvm-1.2 -timescale=1ns/1ps
-INCDIRS := +incdir+host_mem/src +incdir+src/gq +incdir+src/mailbox +incdir+tb
-SOURCES := host_mem/src/host_mem_pkg.sv \
-           src/gq/gq_pkg.sv \
-           src/mailbox/mailbox_pkg.sv \
-           tb/gq_test_pkg.sv \
-           tb/tb_top.sv
+INCDIRS := +incdir+host_mem/src $(PCIE_INCDIRS) +incdir+src/gq \
+           $(LIB_INCDIRS) +incdir+tb
+SOURCES := host_mem/src/host_mem_pkg.sv $(PCIE_SOURCES) src/gq/gq_pkg.sv \
+           $(LIB_SOURCES) $(TEST_PACKAGE_SOURCE) tb/tb_top.sv
+VCS_FLAGS += $(TEST_DEFINE_$(TEST_SUITE))
 
 .PHONY: build vcs run check-layout
 
@@ -17,10 +65,12 @@ build: vcs
 
 vcs:
 	mkdir -p $(BUILD_DIR)
-	$(VCS) $(VCS_FLAGS) $(INCDIRS) $(SOURCES) -o $(SIMV)
+	env -u LIBS -u MAKEFLAGS -u MFLAGS \
+		$(VCS) $(VCS_FLAGS) $(INCDIRS) $(SOURCES) -o $(SIMV)
 
 check-layout:
 	./scripts/check_sv_layout.sh
+	./scripts/check_sv_layout_test.sh
 
 run: vcs
 	$(SIMV) +UVM_TESTNAME=$(TEST)
