@@ -1,6 +1,16 @@
 `ifndef DMAQ_DRIVER_CONFORMANCE_TEST_SV
 `define DMAQ_DRIVER_CONFORMANCE_TEST_SV
 
+class dmaq_test_engine extends gq_queue_engine;
+    `uvm_component_utils(dmaq_test_engine)
+    function new(string name = "dmaq_test_engine", uvm_component parent = null);
+        super.new(name, parent);
+    endfunction
+    task invoke_deadline_check();
+        check_completion_deadline();
+    endtask
+endclass
+
 class dmaq_driver_observation extends uvm_object;
     `uvm_object_utils(dmaq_driver_observation)
 
@@ -337,6 +347,7 @@ class dmaq_driver_conformance_test extends uvm_test;
         string collector_name;
 
         super.build_phase(phase);
+        gq_queue_engine::type_id::set_type_override(dmaq_test_engine::get_type());
         dmaq_completion::type_id::set_type_override(
             dmaq_mock_completion::get_type());
         mem = new("mem");
@@ -845,6 +856,7 @@ class dmaq_driver_conformance_test extends uvm_test;
         byte raw[];
         dmaq_transfer_sequence transfer_seq;
         dmaq_tx_desc pending_desc;
+        dmaq_test_engine test_engine;
         uvm_event sequence_done;
         uvm_event allow_late_completion;
         uvm_event completion_injected;
@@ -853,6 +865,8 @@ class dmaq_driver_conformance_test extends uvm_test;
         int unsigned timeout_before;
 
         initialize_queue(queue_id);
+        if (!$cast(test_engine, engines[queue_id]))
+            `uvm_fatal("DMAQ_DRIVER_ENGINE", "test engine override missing")
         select_literal_transfer(0, operation, source, destination,
                                 transfer_length, expected);
         transfer_seq = make_sequence({label, "_sequence"}, operation,
@@ -890,6 +904,10 @@ class dmaq_driver_conformance_test extends uvm_test;
                                        {label, " scheduled completion was rejected"})
                         completions[queue_id].release_query();
                         completion_injected.trigger();
+                        fork
+                            test_engine.invoke_deadline_check();
+                            test_engine.invoke_deadline_check();
+                        join_none
                     end
                     default: begin
                         #500ns;
