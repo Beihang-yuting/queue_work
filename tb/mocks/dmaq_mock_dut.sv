@@ -59,6 +59,7 @@ class dmaq_mock_completion extends dmaq_completion;
     longint unsigned settlement_epoch;
     bit settlement_observation_armed;
     int unsigned settlement_query_count;
+    int unsigned deadline_slot_query_count;
     int unsigned final_settlement_query_count;
     int unsigned normal_settlement_query_count;
     int unsigned blocked_query_count;
@@ -75,6 +76,7 @@ class dmaq_mock_completion extends dmaq_completion;
         settlement_epoch = 0;
         settlement_observation_armed = 0;
         settlement_query_count = 0;
+        deadline_slot_query_count = 0;
         final_settlement_query_count = 0;
         normal_settlement_query_count = 0;
         blocked_query_count = 0;
@@ -88,6 +90,7 @@ class dmaq_mock_completion extends dmaq_completion;
         settlement_epoch = epoch;
         settlement_observation_armed = 1;
         settlement_query_count = 0;
+        deadline_slot_query_count = 0;
         final_settlement_query_count = 0;
         normal_settlement_query_count = 0;
         blocked_query_count = 0;
@@ -116,13 +119,18 @@ class dmaq_mock_completion extends dmaq_completion;
         output int unsigned completed_count);
         dmaq_mock_adapter dmaq_adapter;
         bit block_this_query;
+        bit settlement_query;
         bit sampled_valid;
         int unsigned sampled_count;
 
         query_times.push_back($time);
         if (settlement_observation_armed &&
-            $time == settlement_deadline_time &&
-            logical_head == settlement_head) begin
+            $time == settlement_deadline_time)
+            deadline_slot_query_count++;
+        settlement_query = settlement_observation_armed &&
+                           $time == settlement_deadline_time &&
+                           logical_head == settlement_head;
+        if (settlement_query) begin
             settlement_query_count++;
         end
         if ($cast(dmaq_adapter, adapter) &&
@@ -134,9 +142,7 @@ class dmaq_mock_completion extends dmaq_completion;
         block_this_query = block_next_query_value;
         if (block_this_query)
             block_next_query_value = 0;
-        if (settlement_observation_armed &&
-            $time == settlement_deadline_time &&
-            logical_head == settlement_head) begin
+        if (settlement_query) begin
             if (block_this_query)
                 normal_settlement_query_count++;
             else

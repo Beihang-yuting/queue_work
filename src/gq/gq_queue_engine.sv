@@ -628,6 +628,7 @@ class gq_queue_engine extends uvm_component;
             // pass because it represents different outstanding work.
             if (settle_deadline) begin
                 completion_commit_boundary.put(1);
+                deadline_settlement_selected();
                 uvm_wait_for_nba_region();
                 uvm_wait_for_nba_region();
                 drain_completed_once(final_query_valid,
@@ -835,6 +836,12 @@ class gq_queue_engine extends uvm_component;
     // Protected zero-time boundary seam. Overrides may pause before the final
     // epoch validation; mutable engine state remains inaccessible.
     protected virtual task completion_commit_entered();
+    endtask
+
+    // Protected zero-time synchronization seam. Production behavior is a
+    // no-op; tests may pause after a deadline candidate has been reserved and
+    // the lifecycle boundary has been released.
+    protected virtual task deadline_settlement_selected();
     endtask
 
     task wait_and_drain_once();

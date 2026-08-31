@@ -3,9 +3,35 @@
 
 class dmaq_test_engine extends gq_queue_engine;
     `uvm_component_utils(dmaq_test_engine)
+    uvm_event settlement_selected;
+    uvm_event settlement_release;
+    bit hold_settlement_selection;
+
     function new(string name = "dmaq_test_engine", uvm_component parent = null);
         super.new(name, parent);
+        settlement_selected = new({name, "_settlement_selected"});
+        settlement_release = new({name, "_settlement_release"});
+        hold_settlement_selection = 0;
     endfunction
+
+    function void hold_next_settlement_selection();
+        hold_settlement_selection = 1;
+        settlement_selected.reset();
+        settlement_release.reset();
+    endfunction
+
+    function void release_settlement_selection();
+        settlement_release.trigger();
+    endfunction
+
+    protected virtual task deadline_settlement_selected();
+        if (hold_settlement_selection) begin
+            hold_settlement_selection = 0;
+            settlement_selected.trigger();
+            settlement_release.wait_on();
+        end
+    endtask
+
     task invoke_deadline_check();
         check_completion_deadline();
     endtask
@@ -397,8 +423,9 @@ class dmaq_driver_conformance_test extends uvm_test;
                 sequencer_name, this);
             drivers[queue_id] = gq_driver::type_id::create(
                 driver_name, this);
-            workers[queue_id] = gq_completion_worker::type_id::create(
-                worker_name, this);
+            if (queue_id != TIME_AT_Q)
+                workers[queue_id] = gq_completion_worker::type_id::create(
+                    worker_name, this);
             collectors[queue_id] = dmaq_driver_collector::type_id::create(
                 collector_name, this);
         end
@@ -415,7 +442,8 @@ class dmaq_driver_conformance_test extends uvm_test;
             drivers[queue_id].engine = engines[queue_id];
             drivers[queue_id].seq_item_port.connect(
                 sequencers[queue_id].seq_item_export);
-            workers[queue_id].engine = engines[queue_id];
+            if (workers.exists(queue_id))
+                workers[queue_id].engine = engines[queue_id];
         end
     endfunction
 
@@ -865,9 +893,9 @@ class dmaq_driver_conformance_test extends uvm_test;
         int unsigned free_before;
         int unsigned timeout_before;
 
-        initialize_queue(queue_id);
         if (!$cast(test_engine, engines[queue_id]))
             `uvm_fatal("DMAQ_DRIVER_ENGINE", "test engine override missing")
+        initialize_queue(queue_id);
         select_literal_transfer(0, operation, source, destination,
                                 transfer_length, expected);
         transfer_seq = make_sequence({label, "_sequence"}, operation,
@@ -905,8 +933,12 @@ class dmaq_driver_conformance_test extends uvm_test;
                         if (!dut.complete_slot(engines[queue_id], 31, 32))
                             `uvm_fatal("DMAQ_DRIVER_DUT",
                                        {label, " scheduled completion was rejected"})
+                        test_engine.hold_next_settlement_selection();
                         fork
                             begin test_engine.invoke_deadline_check(); deadline_check_done[0].trigger(); end
+                        join_none
+                        test_engine.settlement_selected.wait_on();
+                        fork
                             begin test_engine.invoke_deadline_check(); deadline_check_done[1].trigger(); end
                         join_none
                         #0;
@@ -914,8 +946,9 @@ class dmaq_driver_conformance_test extends uvm_test;
                         uvm_wait_for_nba_region();
                         completions[queue_id].release_query();
                         completion_injected.trigger();
-                        deadline_check_done[0].wait_on();
                         deadline_check_done[1].wait_on();
+                        test_engine.release_settlement_selection();
+                        deadline_check_done[0].wait_on();
                     end
                     default: begin
                         #500ns;
@@ -942,6 +975,10 @@ class dmaq_driver_conformance_test extends uvm_test;
                 engines[queue_id].reset_epoch());
         if (timing_case == 1)
             completions[queue_id].block_next_query();
+        if (timing_case == 1)
+            fork
+                engines[queue_id].drain_completed();
+            join_none
         dut.read_slot(engines[queue_id], 31, 32, raw);
         if (!bytes_equal(raw, expected) ||
             adapters[queue_id].published_tails[queue_id][0] != 16'h8000)
@@ -1001,16 +1038,18 @@ class dmaq_driver_conformance_test extends uvm_test;
                            {label, " did not honor the inclusive deadline"})
             if (timing_case == 1 &&
                 (completions[queue_id].blocked_query_count != 1 ||
+                 completions[queue_id].deadline_slot_query_count != 1 ||
                  completions[queue_id].final_settlement_query_count != 1))
                 `uvm_fatal("DMAQ_DRIVER_DEADLINE_QUERY_CARDINALITY",
-                           $sformatf("%s expected one final settlement query after one normal Poll query at epoch=%0d head=%0d; observed deadline_queries=%0d final_queries=%0d", label,
+                           $sformatf("%s expected one final settlement query after one blocked normal Poll query at epoch=%0d head=%0d; observed blocked_queries=%0d deadline_slot_queries=%0d final_queries=%0d", label,
                                      completions[queue_id].settlement_epoch,
                                      completions[queue_id].settlement_head,
                                      completions[queue_id].blocked_query_count,
+                                     completions[queue_id].deadline_slot_query_count,
                                      completions[queue_id].final_settlement_query_count))
             else if (timing_case == 1)
                 `uvm_info("DMAQ_DRIVER_DEADLINE_QUERY_CARDINALITY",
-                          $sformatf("normal_queries=%0d final_queries=%0d", completions[queue_id].normal_settlement_query_count, completions[queue_id].final_settlement_query_count), UVM_LOW)
+                          $sformatf("normal_queries=%0d deadline_slot_queries=%0d final_queries=%0d", completions[queue_id].normal_settlement_query_count, completions[queue_id].deadline_slot_query_count, completions[queue_id].final_settlement_query_count), UVM_LOW)
         end
         if (mem.allocation_calls != allocation_before ||
             mem.free_calls != free_before)
