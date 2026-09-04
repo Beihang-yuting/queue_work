@@ -1,3 +1,4 @@
+// tb/mocks/mailbox_mock_dut.sv: 向仿真主机内存写入完成数据的 Mailbox 模拟 DUT 辅助对象。
 `ifndef MAILBOX_MOCK_DUT_SV
 `define MAILBOX_MOCK_DUT_SV
 

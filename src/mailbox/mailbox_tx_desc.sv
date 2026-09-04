@@ -1,3 +1,4 @@
+// src/mailbox/mailbox_tx_desc.sv: Mailbox 发送描述符打包、载荷所有权和稳定字段检查。
 `ifndef MAILBOX_TX_DESC_SV
 `define MAILBOX_TX_DESC_SV
 
@@ -23,6 +24,7 @@ class mailbox_tx_desc extends gq_desc_base;
         data_len <= 44;
     }
 
+    // 描述符保存 44 字节内嵌载荷，也可以根据 buf_len 引用一块自有外部缓存。
     function new(string name = "mailbox_tx_desc");
         super.new(name);
         flags    = 0;
@@ -42,6 +44,7 @@ class mailbox_tx_desc extends gq_desc_base;
     endfunction
 
     virtual function bit prepare();
+        // 准备后的描述符冻结缓存地址/长度，供引擎持有分配期间检查稳定字段。
         if (prepared)
             return 0;
 
@@ -112,6 +115,8 @@ class mailbox_tx_desc extends gq_desc_base;
         bit [15:0] decoded_data_len;
         byte decoded_data[44];
 
+        // 接受硬件 flags 前比较所有稳定字段和内嵌字节，防止已发布 TX 请求被
+        // 静默修改。
         if (packed_data.size() != 64)
             return 0;
 

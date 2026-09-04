@@ -1,3 +1,4 @@
+// tb/mocks/msgq_mock_adapter.sv: 记录寄存器操作并可编程推进当前指针的 MSGQ 模拟适配器。
 `ifndef MSGQ_MOCK_ADAPTER_SV
 `define MSGQ_MOCK_ADAPTER_SV
 

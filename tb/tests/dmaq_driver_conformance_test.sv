@@ -1,3 +1,4 @@
+// tb/tests/dmaq_driver_conformance_test.sv: UVM 测试 dmaq_driver_conformance_test：验证对应队列组件的定向行为和接口契约。
 `ifndef DMAQ_DRIVER_CONFORMANCE_TEST_SV
 `define DMAQ_DRIVER_CONFORMANCE_TEST_SV
 

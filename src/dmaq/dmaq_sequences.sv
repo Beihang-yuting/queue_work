@@ -1,3 +1,4 @@
+// src/dmaq/dmaq_sequences.sv: 带独立完成截止时间处理的同步 DMAQ 传输序列。
 `ifndef DMAQ_SEQUENCES_SV
 `define DMAQ_SEQUENCES_SV
 
@@ -11,6 +12,7 @@ class dmaq_transfer_sequence extends uvm_sequence #(gq_request, gq_response);
     time completion_timeout;
     dmaq_result_status_e result_status;
 
+    // 序列超时独立于引擎诊断超时，因此调用者停止等待时不会放弃描述符所有权。
     function new(string name = "dmaq_transfer_sequence");
         super.new(name);
         operation = DMAQ_AF_TO_HOST;

@@ -1,3 +1,4 @@
+// tb/msgq_test_pkg.sv: 包含 MSGQ 条目、配置和一致性回归测试的测试包。
 `ifndef MSGQ_TEST_PKG_SV
 `define MSGQ_TEST_PKG_SV
 

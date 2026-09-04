@@ -1,3 +1,4 @@
+// src/msgq/msgq_env.sv: MSGQ 环境注册、配置校验和队列配置。
 `ifndef MSGQ_ENV_SV
 `define MSGQ_ENV_SV
 
@@ -7,6 +8,8 @@ class msgq_env_cfg extends gq_env_cfg;
     msgq_ptr_codec ptr_codec;
     protected msgq_refill_profile refill_profiles[int unsigned];
 
+    // MSGQ 使用 RX 当前指针完成源并自动回收配置的环；原始类型只保留调用者提供
+    // 的字节级条目工厂。
     function new(string name = "msgq_env_cfg");
         super.new(name);
         ptr_codec = msgq_ptr_codec::type_id::create({name, "_ptr_codec"});
@@ -29,6 +32,7 @@ class msgq_env_cfg extends gq_env_cfg;
         int unsigned depth;
         int unsigned entry_size;
 
+        // 先推导标准几何参数；原始类型必须提供完整几何参数和工厂后才能注册队列。
         case (kind)
             MSGQ_MAC_AGE: begin
                 depth      = MSGQ_MAC_AGE_DEPTH;

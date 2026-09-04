@@ -1,3 +1,4 @@
+// tb/tests/msgq_completion_test.sv: UVM 测试 msgq_completion_test：验证对应队列组件的定向行为和接口契约。
 `ifndef MSGQ_COMPLETION_TEST_SV
 `define MSGQ_COMPLETION_TEST_SV
 

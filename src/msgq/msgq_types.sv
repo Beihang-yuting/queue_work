@@ -1,3 +1,4 @@
+// src/msgq/msgq_types.sv: MSGQ 类型和格式配置枚举以及 EMP 几何参数常量。
 `ifndef MSGQ_TYPES_SV
 `define MSGQ_TYPES_SV
 

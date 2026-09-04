@@ -1,3 +1,4 @@
+// src/gq/gq_pkg.sv: 通用队列包的导入和源码包含顺序。
 `ifndef GQ_PKG_SV
 `define GQ_PKG_SV
 

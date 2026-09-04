@@ -1,3 +1,4 @@
+// tb/mocks/tlpq_mock_tx_adapter.sv: 记录分块回调、ready 等待和控制标志的 TLPQ 发送模拟适配器。
 `ifndef TLPQ_MOCK_TX_ADAPTER_SV
 `define TLPQ_MOCK_TX_ADAPTER_SV
 

@@ -1,3 +1,4 @@
+// src/tlpq/tlpq_pkg.sv: TLPQ 包的导入、PCIe 依赖和源码包含顺序。
 `ifndef TLPQ_PKG_SV
 `define TLPQ_PKG_SV
 package tlpq_pkg;

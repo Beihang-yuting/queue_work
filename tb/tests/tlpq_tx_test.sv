@@ -1,3 +1,4 @@
+// tb/tests/tlpq_tx_test.sv: UVM 测试 tlpq_tx_test：验证对应队列组件的定向行为和接口契约。
 `ifndef TLPQ_TX_TEST_SV
 `define TLPQ_TX_TEST_SV
 

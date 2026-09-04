@@ -1,3 +1,4 @@
+// tb/mocks/tlpq_mock_dut.sv: 用于接收描述符完成和缓存回收的 TLPQ 模拟 DUT/内存辅助对象。
 `ifndef TLPQ_MOCK_DUT_SV
 `define TLPQ_MOCK_DUT_SV
 

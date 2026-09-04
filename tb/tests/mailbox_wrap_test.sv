@@ -1,3 +1,4 @@
+// tb/tests/mailbox_wrap_test.sv: UVM 测试 mailbox_wrap_test：验证对应队列组件的定向行为和接口契约。
 `ifndef MAILBOX_WRAP_TEST_SV
 `define MAILBOX_WRAP_TEST_SV
 

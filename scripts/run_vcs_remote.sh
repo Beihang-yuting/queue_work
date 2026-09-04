@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# scripts/run_vcs_remote.sh: 将工作树复制到 10.11.10.53 并运行指定的 VCS 测试套件。
 set -euo pipefail
 
 if [[ $# -lt 1 || $# -gt 3 || ! $1 =~ ^[A-Za-z0-9_]+$ ]]; then

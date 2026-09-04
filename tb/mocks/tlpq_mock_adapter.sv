@@ -1,3 +1,4 @@
+// tb/mocks/tlpq_mock_adapter.sv: 记录各通道生命周期、尾指针、IRQ 和看门狗等待的 TLPQ 接收模拟适配器。
 `ifndef TLPQ_MOCK_ADAPTER_SV
 `define TLPQ_MOCK_ADAPTER_SV
 

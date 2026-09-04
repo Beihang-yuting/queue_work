@@ -1,3 +1,4 @@
+// tb/tb_top.sv: 按编译期选择一个队列库测试包的 UVM 顶层测试平台。
 `timescale 1ns/1ps
 
 module tb_top;

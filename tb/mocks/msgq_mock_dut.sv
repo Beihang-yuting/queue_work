@@ -1,3 +1,4 @@
+// tb/mocks/msgq_mock_dut.sv: 用于条目写入、指针更新和原始完成数据的 MSGQ 模拟 DUT 辅助对象。
 `ifndef MSGQ_MOCK_DUT_SV
 `define MSGQ_MOCK_DUT_SV
 

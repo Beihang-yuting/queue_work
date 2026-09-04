@@ -1,3 +1,4 @@
+// src/cmdq/cmdq_completion.sv: 通用描述符写回完成源的 CMDQ 特化实现。
 `ifndef CMDQ_COMPLETION_SV
 `define CMDQ_COMPLETION_SV
 

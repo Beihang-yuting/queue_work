@@ -1,3 +1,4 @@
+// src/gq/gq_desc_writeback_completion.sv: 从主机内存读取描述符标志和写回内容的完成源。
 `ifndef GQ_DESC_WRITEBACK_COMPLETION_SV
 `define GQ_DESC_WRITEBACK_COMPLETION_SV
 
@@ -19,6 +20,8 @@ class gq_desc_writeback_completion extends gq_completion_source;
         input gq_desc_base pending[$],
         output bit valid,
         output int unsigned completed_count);
+        // 只遍历连续的待完成前缀；第一个格式错误或未完成的槽会阻止后续槽按序
+        // 退休。
         gq_logical_seq_t seq;
         gq_addr_t slot_addr;
         byte packed_data[];

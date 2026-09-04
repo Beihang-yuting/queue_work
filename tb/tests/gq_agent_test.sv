@@ -1,3 +1,4 @@
+// tb/tests/gq_agent_test.sv: UVM 测试 gq_agent_test：验证对应队列组件的定向行为和接口契约。
 `ifndef GQ_AGENT_TEST_SV
 `define GQ_AGENT_TEST_SV
 

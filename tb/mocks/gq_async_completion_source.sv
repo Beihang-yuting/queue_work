@@ -1,3 +1,4 @@
+// tb/mocks/gq_async_completion_source.sv: 用于覆盖引擎查询竞争的可控异步完成源。
 `ifndef GQ_ASYNC_COMPLETION_SOURCE_SV
 `define GQ_ASYNC_COMPLETION_SOURCE_SV
 

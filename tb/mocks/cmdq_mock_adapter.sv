@@ -1,3 +1,4 @@
+// tb/mocks/cmdq_mock_adapter.sv: 记录配置、命令完成、IRQ 和禁用活动的 CMDQ 模拟适配器。
 `ifndef CMDQ_MOCK_ADAPTER_SV
 `define CMDQ_MOCK_ADAPTER_SV
 

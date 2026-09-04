@@ -1,3 +1,4 @@
+// tb/mocks/dmaq_mock_dut.sv: 用于端点传输和完成时序的 DMAQ 模拟 DUT/内存辅助对象。
 `ifndef DMAQ_MOCK_DUT_SV
 `define DMAQ_MOCK_DUT_SV
 

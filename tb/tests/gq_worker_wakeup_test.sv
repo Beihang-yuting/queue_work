@@ -1,3 +1,4 @@
+// tb/tests/gq_worker_wakeup_test.sv: UVM 测试 gq_worker_wakeup_test：验证对应队列组件的定向行为和接口契约。
 `ifndef GQ_WORKER_WAKEUP_TEST_SV
 `define GQ_WORKER_WAKEUP_TEST_SV
 

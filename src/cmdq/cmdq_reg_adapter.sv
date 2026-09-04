@@ -1,3 +1,4 @@
+// src/cmdq/cmdq_reg_adapter.sv: 由用户或 DUT 集成实现的 CMDQ 语义寄存器/IRQ 适配器接口。
 `ifndef CMDQ_REG_ADAPTER_SV
 `define CMDQ_REG_ADAPTER_SV
 
@@ -10,6 +11,8 @@ virtual class cmdq_reg_adapter extends gq_hw_adapter;
         this.hw_cfg = hw_cfg;
     endfunction
 
+    // 具体适配器将这些语义回调转换为 CSR、RAL 或 backdoor 访问；CMDQ 本身
+    // 不嵌入任何寄存器地址。
     pure virtual task reset_cmdq(int unsigned queue_id);
 
     pure virtual task configure_cmdq_registers(
@@ -43,6 +46,7 @@ virtual class cmdq_reg_adapter extends gq_hw_adapter;
         gq_addr_t base,
         int unsigned depth,
         int unsigned desc_size);
+        // 通用引擎要求按复位、配置、使能的顺序完成，之后才允许发布描述符。
         if (!require_tx(role, queue_id, "configure_queue"))
             return;
         reset_cmdq(queue_id);

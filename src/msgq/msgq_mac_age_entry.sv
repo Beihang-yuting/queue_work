@@ -1,3 +1,4 @@
+// src/msgq/msgq_mac_age_entry.sv: MSGQ MAC-age 条目解析器及严格保留位校验。
 `ifndef MSGQ_MAC_AGE_ENTRY_SV
 `define MSGQ_MAC_AGE_ENTRY_SV
 
@@ -9,6 +10,7 @@ class msgq_mac_age_entry extends msgq_entry_base;
     bit [8:0]  mac_act_idx;
     bit        strict_reserved;
 
+    // 解析器重建小端 DWORD；启用严格校验时，任何保留字段非零都会被拒绝。
     function new(string name = "msgq_mac_age_entry");
         super.new(name);
         entry_size      = MSGQ_MAC_AGE_ENTRY_BYTES;

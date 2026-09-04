@@ -1,3 +1,4 @@
+// src/cmdq/cmdq_types.sv: CMDQ 常量、目的端 ID、结果状态和硬件元数据类型。
 `ifndef CMDQ_TYPES_SV
 `define CMDQ_TYPES_SV
 

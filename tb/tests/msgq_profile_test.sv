@@ -1,3 +1,4 @@
+// tb/tests/msgq_profile_test.sv: UVM 测试 msgq_profile_test：验证对应队列组件的定向行为和接口契约。
 `ifndef MSGQ_PROFILE_TEST_SV
 `define MSGQ_PROFILE_TEST_SV
 

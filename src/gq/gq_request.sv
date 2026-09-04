@@ -1,3 +1,4 @@
+// src/gq/gq_request.sv: agent 与队列引擎之间传递的类型化序列请求和响应对象。
 `ifndef GQ_REQUEST_SV
 `define GQ_REQUEST_SV
 

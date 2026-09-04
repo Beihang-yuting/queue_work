@@ -1,3 +1,4 @@
+# Makefile: 队列库的构建选择器、编译顺序以及本地/远程 VCS 目标。
 VCS ?= vcs
 TEST ?= gq_smoke_test
 BUILD_DIR ?= build

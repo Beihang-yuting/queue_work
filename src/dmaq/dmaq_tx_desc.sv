@@ -1,3 +1,4 @@
+// src/dmaq/dmaq_tx_desc.sv: DMAQ 借用缓存描述符的序列化、端点校验和完成解析。
 `ifndef DMAQ_TX_DESC_SV
 `define DMAQ_TX_DESC_SV
 
@@ -19,6 +20,8 @@ class dmaq_tx_desc extends gq_desc_base;
     protected bit [15:0]       prepared_wire_length;
     protected bit [15:0]       prepared_reserved;
 
+    // DMAQ 地址指向调用者借用的存储；prepare() 只保存描述符字段快照，从不
+    // 分配或释放传输缓存。
     function new(string name = "dmaq_tx_desc");
         super.new(name);
         operation = DMAQ_AF_TO_HOST;
@@ -53,6 +56,8 @@ class dmaq_tx_desc extends gq_desc_base;
     endfunction
 
     virtual function bit prepare();
+        // 准备过程只能执行一次；描述符进入通用引擎前必须先校验操作与端点角色
+        // 的组合。
         if (prepare_attempted)
             return 0;
         prepare_attempted = 1;
@@ -71,6 +76,8 @@ class dmaq_tx_desc extends gq_desc_base;
     endfunction
 
     virtual function void mark_available(bit phase);
+        // 环形 phase 由 dmaq_ptr_codec 编码；描述符 flags 只表示 AVAIL/USED
+        // 所有权状态。
         flags = DMAQ_DESC_AVAIL;
     endfunction
 
@@ -109,6 +116,7 @@ class dmaq_tx_desc extends gq_desc_base;
         bit [15:0] decoded_source_length;
         bit [15:0] decoded_reserved;
 
+        // 端点、长度和保留字段在发布后不可变；接受硬件 flags 前先拒绝任何修改。
         if (!prepared || packed_data.size() != DMAQ_DESC_BYTES)
             return 0;
 

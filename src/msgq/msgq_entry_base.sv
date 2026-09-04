@@ -1,3 +1,4 @@
+// src/msgq/msgq_entry_base.sv: MSGQ 基础条目，提供原始字节存储、逻辑序号跟踪和解析钩子。
 `ifndef MSGQ_ENTRY_BASE_SV
 `define MSGQ_ENTRY_BASE_SV
 
@@ -8,6 +9,8 @@ class msgq_entry_base extends gq_desc_base;
     gq_logical_seq_t logical_seq;
     byte raw_bytes[];
 
+    // 具体 MSGQ 格式覆盖 pack/parse_completion；raw_bytes 始终是交付给完成订阅
+    // 者的稳定快照。
     function new(string name = "msgq_entry_base");
         super.new(name);
         entry_size  = 0;

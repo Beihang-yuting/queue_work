@@ -1,3 +1,4 @@
+// src/msgq/msgq_refill_profile.sv: 选择具体条目或原始条目创建方式的 MSGQ 类型/配置工厂。
 `ifndef MSGQ_REFILL_PROFILE_SV
 `define MSGQ_REFILL_PROFILE_SV
 
@@ -20,6 +21,8 @@ class msgq_refill_profile extends gq_refill_profile;
     bit strict_reserved;
     msgq_entry_factory factory;
 
+    // MAC-age/1588 使用内置解析器；FSE/IACL/EACL/vDPA/notify 通过调用者提供的
+    // 原始条目工厂处理，不猜测载荷字段。
     function new(string name = "msgq_refill_profile");
         super.new(name);
         kind           = MSGQ_MAC_AGE;
@@ -89,6 +92,7 @@ class msgq_refill_profile extends gq_refill_profile;
         msgq_mac_age_entry mac_entry;
         msgq_1588_entry timestamp_entry;
 
+        // 选择类型专用对象后，再为返回条目设置逻辑序号和配置的条目大小。
         case (kind)
             MSGQ_MAC_AGE: begin
                 mac_entry = msgq_mac_age_entry::type_id::create(

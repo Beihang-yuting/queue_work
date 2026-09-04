@@ -1,3 +1,4 @@
+// src/tlpq/tlpq_tx_reg_adapter.sv: TLPQ 发送 ready/data/keep/TUSER/control 回调边界及通道级串行化。
 `ifndef TLPQ_TX_REG_ADAPTER_SV
 `define TLPQ_TX_REG_ADAPTER_SV
 
@@ -6,6 +7,7 @@ virtual class tlpq_tx_reg_adapter extends uvm_object;
     protected semaphore host_send_lock;
     protected semaphore switch_send_lock;
 
+    // Host 和 Switch 流相互独立；每把锁覆盖一次完整事务的编码及所有数据/控制回调。
     function new(string name = "tlpq_tx_reg_adapter");
         super.new(name);
         packet_bridge = tlpq_packet_bridge::type_id::create(
@@ -52,6 +54,8 @@ virtual class tlpq_tx_reg_adapter extends uvm_object;
         end
 
         source_index = 0;
+        // 硬件每个分块最多接受 16 个 DWORD；source_index 连续递增，而寄存器字索引
+        // 每个分块从零重新开始。
         while (source_index < dwords.size()) begin
             chunk_words = dwords.size() - source_index;
             if (chunk_words > 16)
@@ -110,9 +114,8 @@ virtual class tlpq_tx_reg_adapter extends uvm_object;
             return;
         end
 
-        // One channel's ready/data/keep/TUSER/control registers form one
-        // transaction stream.  Hold its lock from encode through the final
-        // control write, while the other channel remains independent.
+        // 一个通道的 ready/data/keep/TUSER/control 寄存器构成一条事务流。从编码到
+        // 最后一次 control 写入始终持有该通道锁，另一通道保持独立。
         send_lock.get(1);
         send_tlp_locked(channel, host_id, tlp, ready_timeout,
                         success, reason);

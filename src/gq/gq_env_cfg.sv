@@ -1,3 +1,4 @@
+// src/gq/gq_env_cfg.sv: 通用环境配置、队列注册以及持久化的复位边沿事件。
 `ifndef GQ_ENV_CFG_SV
 `define GQ_ENV_CFG_SV
 

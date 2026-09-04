@@ -1,3 +1,4 @@
+// tb/dmaq_test_pkg.sv: 包含 DMAQ 描述符、序列和一致性回归测试的测试包。
 `ifndef DMAQ_TEST_PKG_SV
 `define DMAQ_TEST_PKG_SV
 

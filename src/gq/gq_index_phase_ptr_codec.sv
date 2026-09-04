@@ -1,3 +1,4 @@
+// src/gq/gq_index_phase_ptr_codec.sv: 适用于定深环形队列的索引加 phase 指针编码策略。
 `ifndef GQ_INDEX_PHASE_PTR_CODEC_SV
 `define GQ_INDEX_PHASE_PTR_CODEC_SV
 
@@ -50,6 +51,8 @@ class gq_index_phase_ptr_codec extends gq_ptr_codec;
         return 1;
     endfunction
 
+    // 低位字段标识环形槽位；phase 每完整遍历一圈翻转一次，并放在独立的原始
+    // 指针位中。
     virtual function bit validate(int unsigned depth, output string reason);
         return validate_depth(depth, reason);
     endfunction
@@ -67,6 +70,7 @@ class gq_index_phase_ptr_codec extends gq_ptr_codec;
             return raw;
         end
 
+        // 写入 phase 前先清除非索引位，避免过期元数据泄漏到发布的硬件指针中。
         raw = gq_raw_ptr_t'(new_tail % depth);
         raw[phase_bit] = bit'((new_tail / depth) & 1);
         return raw;

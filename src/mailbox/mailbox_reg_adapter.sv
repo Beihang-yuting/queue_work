@@ -1,3 +1,4 @@
+// src/mailbox/mailbox_reg_adapter.sv: Mailbox 语义寄存器、尾指针、IRQ 和取消操作适配器接口。
 `ifndef MAILBOX_REG_ADAPTER_SV
 `define MAILBOX_REG_ADAPTER_SV
 

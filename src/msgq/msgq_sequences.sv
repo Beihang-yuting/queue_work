@@ -1,3 +1,4 @@
+// src/msgq/msgq_sequences.sv: 投递初始条目窗口的 MSGQ 接收启动序列。
 `ifndef MSGQ_SEQUENCES_SV
 `define MSGQ_SEQUENCES_SV
 

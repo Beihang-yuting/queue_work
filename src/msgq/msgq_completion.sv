@@ -1,3 +1,4 @@
+// src/msgq/msgq_completion.sv: 读取业务当前指针的 MSGQ 完成源。
 `ifndef MSGQ_COMPLETION_SV
 `define MSGQ_COMPLETION_SV
 
@@ -23,6 +24,7 @@ class msgq_completion extends gq_completion_source;
         input gq_desc_base pending[$],
         output bit valid,
         output int unsigned completed_count);
+        // 适配器当前指针是 MSGQ 的权威状态；引擎仍只退休已经投递的连续逻辑前缀。
         msgq_reg_adapter msgq_adapter;
         bit read_valid;
         bit [15:0] current_ptr;

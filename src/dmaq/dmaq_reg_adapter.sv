@@ -1,3 +1,4 @@
+// src/dmaq/dmaq_reg_adapter.sv: DMAQ 语义寄存器/IRQ 适配器接口及单队列绑定保护。
 `ifndef DMAQ_REG_ADAPTER_SV
 `define DMAQ_REG_ADAPTER_SV
 
@@ -6,6 +7,8 @@ virtual class dmaq_reg_adapter extends gq_hw_adapter;
     protected int unsigned bound_queue_id;
     protected dmaq_hw_cfg_t bound_hw_cfg;
 
+    // 绑定保护的是生命周期而不是硬件寄存器映射：它阻止两个逻辑队列修改同
+    // 一个适配器的队列索引元数据。
     function new(string name = "dmaq_reg_adapter");
         super.new(name);
         binding_valid = 0;

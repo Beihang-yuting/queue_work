@@ -1,3 +1,4 @@
+// src/tlpq/tlpq_refill_profile.sv: 投递 31 个初始描述符并逐个回收的 TLPQ 接收补充配置。
 `ifndef TLPQ_REFILL_PROFILE_SV
 `define TLPQ_REFILL_PROFILE_SV
 

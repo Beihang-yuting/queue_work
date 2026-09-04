@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# scripts/check_uvm_summary.sh: 校验 VCS/UVM 日志包含唯一且干净的最终摘要。
 set -euo pipefail
 
 if [[ $# -ne 1 ]]; then

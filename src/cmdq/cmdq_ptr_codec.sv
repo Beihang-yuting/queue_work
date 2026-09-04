@@ -1,3 +1,4 @@
+// src/cmdq/cmdq_ptr_codec.sv: 通用索引加 phase 指针编码器的 CMDQ 特化实现。
 `ifndef CMDQ_PTR_CODEC_SV
 `define CMDQ_PTR_CODEC_SV
 

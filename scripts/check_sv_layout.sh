@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# scripts/check_sv_layout.sh: 仓库自有 SystemVerilog 源码的布局和依赖隔离静态检查。
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)

@@ -1,3 +1,4 @@
+// src/gq/gq_wait_policy.sv: 支持可取消 IRQ/轮询、固定或自适应间隔及看门狗的等待策略。
 `ifndef GQ_WAIT_POLICY_SV
 `define GQ_WAIT_POLICY_SV
 

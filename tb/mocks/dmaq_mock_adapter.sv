@@ -1,3 +1,4 @@
+// tb/mocks/dmaq_mock_adapter.sv: 记录语义操作并检查借用缓存行为的 DMAQ 模拟适配器。
 `ifndef DMAQ_MOCK_ADAPTER_SV
 `define DMAQ_MOCK_ADAPTER_SV
 

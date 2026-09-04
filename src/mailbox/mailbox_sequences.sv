@@ -1,3 +1,4 @@
+// src/mailbox/mailbox_sequences.sv: 提交一个或多个已准备描述符的 Mailbox 发送序列。
 `ifndef MAILBOX_SEQUENCES_SV
 `define MAILBOX_SEQUENCES_SV
 

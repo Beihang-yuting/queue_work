@@ -1,3 +1,4 @@
+// src/gq/gq_desc_base.sv: 所有业务描述符共用的基础所有权和内存分配释放辅助逻辑。
 `ifndef GQ_DESC_BASE_SV
 `define GQ_DESC_BASE_SV
 

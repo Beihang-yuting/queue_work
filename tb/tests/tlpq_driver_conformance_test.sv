@@ -1,3 +1,4 @@
+// tb/tests/tlpq_driver_conformance_test.sv: UVM 测试 tlpq_driver_conformance_test：验证对应队列组件的定向行为和接口契约。
 `ifndef TLPQ_DRIVER_CONFORMANCE_TEST_SV
 `define TLPQ_DRIVER_CONFORMANCE_TEST_SV
 

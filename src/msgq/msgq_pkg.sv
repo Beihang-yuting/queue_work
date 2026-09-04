@@ -1,3 +1,4 @@
+// src/msgq/msgq_pkg.sv: MSGQ 包的导入和源码包含顺序。
 `ifndef MSGQ_PKG_SV
 `define MSGQ_PKG_SV
 

@@ -1,3 +1,4 @@
+// src/cmdq/cmdq_pkg.sv: CMDQ 包的导入和源码包含顺序。
 `ifndef CMDQ_PKG_SV
 `define CMDQ_PKG_SV
 

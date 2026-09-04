@@ -1,3 +1,4 @@
+// tb/mocks/cmdq_mock_dut.sv: 用于描述符完成和所有权断言的 CMDQ 模拟 DUT/内存辅助对象。
 `ifndef CMDQ_MOCK_DUT_SV
 `define CMDQ_MOCK_DUT_SV
 

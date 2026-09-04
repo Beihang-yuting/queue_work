@@ -1,3 +1,4 @@
+// src/gq/gq_agent.sv: 围绕单个通用队列引擎的 UVM sequencer、driver、monitor 和 agent 连接。
 `ifndef GQ_AGENT_SV
 `define GQ_AGENT_SV
 

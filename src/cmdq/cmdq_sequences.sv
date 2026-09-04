@@ -1,3 +1,4 @@
+// src/cmdq/cmdq_sequences.sv: 提交单个描述符并返回复制结果字节的同步 CMDQ 命令序列。
 `ifndef CMDQ_SEQUENCES_SV
 `define CMDQ_SEQUENCES_SV
 
@@ -10,6 +11,8 @@ class cmdq_command_sequence extends uvm_sequence #(gq_request, gq_response);
     byte result[];
     cmdq_result_status_e result_status;
 
+    // 公共字段构成简单的同步 API；body() 将其转换为一个通用请求，并且只
+    // 解析一次完成或超时结果。
     function new(string name = "cmdq_command_sequence");
         super.new(name);
         request_payload = new[0];

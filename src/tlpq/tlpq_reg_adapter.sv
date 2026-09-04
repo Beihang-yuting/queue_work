@@ -1,3 +1,4 @@
+// src/tlpq/tlpq_reg_adapter.sv: TLPQ 接收通道语义适配器，串行处理配置、禁用、尾指针、IRQ 和看门狗操作。
 `ifndef TLPQ_REG_ADAPTER_SV
 `define TLPQ_REG_ADAPTER_SV
 
@@ -21,6 +22,8 @@ virtual class tlpq_reg_adapter extends gq_hw_adapter;
     protected semaphore operation_lock[int unsigned];
     protected semaphore disable_lock[int unsigned];
 
+    // 队列 ID 映射到相互独立的 Host/Switch 通道；generation 计数器用于在禁用或
+    // 配置与发布竞争时使阻塞中的发布失效。
     function new(string name = "tlpq_reg_adapter");
         super.new(name);
     endfunction
@@ -126,6 +129,8 @@ virtual class tlpq_reg_adapter extends gq_hw_adapter;
         tlpq_rx_hw_cfg_t hw_cfg;
         longint unsigned configure_generation;
 
+        // 将复位/配置与发布串行化，同时通过 generation 检查允许 disable 取消
+        // 正在进行的适配器操作。
         if (!require_rx(role, queue_id, "configure_queue") ||
             !resolve_queue(queue_id, "configure_queue", channel, hw_cfg))
             return;
@@ -165,8 +170,7 @@ virtual class tlpq_reg_adapter extends gq_hw_adapter;
             !resolve_queue(queue_id, "disable_queue", channel, hw_cfg))
             return;
 
-        // Invalidate a blocked pre-disable publish before asking the derived
-        // adapter to cancel its bus operation.
+        // 在请求派生适配器取消总线操作前，先使阻塞中的禁用前发布失效。
         disable_lock[queue_id].get(1);
         configuration_generation[queue_id]++;
         enable_armed[queue_id] = 0;
@@ -222,8 +226,7 @@ virtual class tlpq_reg_adapter extends gq_hw_adapter;
             return;
         end
         if (enable_armed[queue_id]) begin
-            // Clear before the timed callback so another publish cannot
-            // observe the arm while enable_tlpq_rx() is in progress.
+            // 在带时延的回调前清除 armed，防止另一个 publish 在使能期间重复触发。
             enable_armed[queue_id] = 0;
             enable_tlpq_rx(channel);
             if (configuration_generation[queue_id] == publish_generation &&

@@ -1,3 +1,4 @@
+// src/tlpq/tlpq_sequences.sv: 对 TLP 编码并通过发送适配器分块传输的 TLPQ 发送序列。
 `ifndef TLPQ_SEQUENCES_SV
 `define TLPQ_SEQUENCES_SV
 
@@ -12,6 +13,8 @@ class tlpq_tx_sequence extends uvm_sequence;
     bit success;
     string reason;
 
+    // body() 执行一次编码和发送事务；通道串行化及每个分块的 ready 等待由适配器
+    // 负责。
     function new(string name = "tlpq_tx_sequence");
         super.new(name);
         tx_adapter = null;

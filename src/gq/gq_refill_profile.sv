@@ -1,3 +1,4 @@
+// src/gq/gq_refill_profile.sv: 定义初始投递、水位、批量大小和描述符创建方式的抽象接收补充配置。
 `ifndef GQ_REFILL_PROFILE_SV
 `define GQ_REFILL_PROFILE_SV
 
@@ -17,6 +18,8 @@ virtual class gq_refill_profile extends uvm_object;
         restart_after_reset = 0;
     endfunction
 
+    // 水位描述逻辑上的未完成条目数，而不是物理槽位；max_refill_batch 限制
+    // 一次回收过程中单次发布的数量。
     virtual function bit validate(int unsigned depth, output string reason);
         if (low_watermark >= high_watermark) begin
             reason = $sformatf(
@@ -61,6 +64,8 @@ virtual class gq_refill_profile extends uvm_object;
         return cloned_profile;
     endfunction
 
+    // 每个逻辑序号都获得新的描述符对象，避免回收槽位残留上一次使用的完成字节
+    // 或所有权。
     pure virtual function gq_desc_base create_desc(
         int unsigned queue_id, gq_logical_seq_t logical_seq);
 endclass

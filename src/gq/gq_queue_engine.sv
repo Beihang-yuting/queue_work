@@ -1,3 +1,4 @@
+// src/gq/gq_queue_engine.sv: 通用队列核心生命周期：提交、完成、补充、复位、超时和所有权结算。
 `ifndef GQ_QUEUE_ENGINE_SV
 `define GQ_QUEUE_ENGINE_SV
 

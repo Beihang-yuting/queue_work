@@ -1,3 +1,4 @@
+// tb/tests/tlpq_bridge_test.sv: UVM 测试 tlpq_bridge_test：验证对应队列组件的定向行为和接口契约。
 `ifndef TLPQ_BRIDGE_TEST_SV
 `define TLPQ_BRIDGE_TEST_SV
 

@@ -1,3 +1,4 @@
+// tb/tests/dmaq_desc_test.sv: UVM 测试 dmaq_desc_test：验证对应队列组件的定向行为和接口契约。
 `ifndef DMAQ_DESC_TEST_SV
 `define DMAQ_DESC_TEST_SV
 

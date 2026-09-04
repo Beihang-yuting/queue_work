@@ -1,3 +1,4 @@
+// src/mailbox/mailbox_pkg.sv: Mailbox 包的导入和源码包含顺序。
 `ifndef MAILBOX_PKG_SV
 `define MAILBOX_PKG_SV
 

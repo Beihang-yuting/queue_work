@@ -1,3 +1,4 @@
+// src/tlpq/tlpq_types.sv: TLPQ 通道、路由元数据、描述符、缓存和队列 ID 常量。
 `ifndef TLPQ_TYPES_SV
 `define TLPQ_TYPES_SV
 

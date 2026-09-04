@@ -1,3 +1,4 @@
+// tb/mocks/mailbox_mock_adapter.sv: 记录语义调用和已发布尾指针的 Mailbox 模拟硬件适配器。
 `ifndef MAILBOX_MOCK_ADAPTER_SV
 `define MAILBOX_MOCK_ADAPTER_SV
 

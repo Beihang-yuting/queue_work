@@ -1,3 +1,4 @@
+// src/dmaq/dmaq_env.sv: DMAQ 几何参数、时序、配置校验和单队列环境构造。
 `ifndef DMAQ_ENV_SV
 `define DMAQ_ENV_SV
 
@@ -9,6 +10,8 @@ class dmaq_env_cfg extends gq_env_cfg;
     time             poll_interval;
     time             completion_timeout;
 
+    // DMAQ 暴露几何参数和时序配置，同时保留 EMP 默认配置；每个环境仍只绑
+    // 定一个队列。
     function new(string name = "dmaq_env_cfg");
         super.new(name);
         depth = DMAQ_DEFAULT_DEPTH;
@@ -24,6 +27,8 @@ class dmaq_env_cfg extends gq_env_cfg;
         string key;
         string queue_reason;
 
+        // 在预留适配器元数据前校验所有公共覆盖项，使失败的 add_dmaq() 不会
+        // 修改环境状态。
         if (adapter == null || !$cast(installed_adapter, adapter)) begin
             reason = "DMAQ adapter must derive from dmaq_reg_adapter";
             return 0;

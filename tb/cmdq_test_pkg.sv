@@ -1,3 +1,4 @@
+// tb/cmdq_test_pkg.sv: 包含 CMDQ 描述符、序列和一致性回归测试的测试包。
 `ifndef CMDQ_TEST_PKG_SV
 `define CMDQ_TEST_PKG_SV
 

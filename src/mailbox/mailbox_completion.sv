@@ -1,3 +1,4 @@
+// src/mailbox/mailbox_completion.sv: 通用描述符写回完成源的 Mailbox 特化实现。
 `ifndef MAILBOX_COMPLETION_SV
 `define MAILBOX_COMPLETION_SV
 

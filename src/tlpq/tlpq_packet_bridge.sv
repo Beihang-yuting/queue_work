@@ -1,3 +1,4 @@
+// src/tlpq/tlpq_packet_bridge.sv: 带校验和失败关闭解码的 PCIe canonical TLP 到 DPU DWORD 桥接器。
 `ifndef TLPQ_PACKET_BRIDGE_SV
 `define TLPQ_PACKET_BRIDGE_SV
 
@@ -6,6 +7,8 @@ class tlpq_packet_bridge extends uvm_object;
 
     protected pcie_tl_codec codec;
 
+    // PCIe 编解码对象封装在桥接器后面，使 TLPQ 只负责 canonical 到 DPU 的布局
+    // 转换以及失败关闭校验。
     function new(string name = "tlpq_packet_bridge");
         super.new(name);
         codec = pcie_tl_codec::type_id::create({name, "_codec"});

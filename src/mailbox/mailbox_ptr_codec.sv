@@ -1,3 +1,4 @@
+// src/mailbox/mailbox_ptr_codec.sv: 通用索引加 phase 指针编码器的 Mailbox 特化实现。
 `ifndef MAILBOX_PTR_CODEC_SV
 `define MAILBOX_PTR_CODEC_SV
 

@@ -1,3 +1,4 @@
+// src/gq/gq_hw_adapter.sv: 通用引擎使用的语义硬件边界，负责配置、发布、等待和禁用操作。
 `ifndef GQ_HW_ADAPTER_SV
 `define GQ_HW_ADAPTER_SV
 

@@ -1,3 +1,4 @@
+// src/dmaq/dmaq_pkg.sv: DMAQ 包的导入和源码包含顺序。
 `ifndef DMAQ_PKG_SV
 `define DMAQ_PKG_SV
 

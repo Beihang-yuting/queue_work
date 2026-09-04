@@ -1,3 +1,4 @@
+// tb/mocks/gq_test_ptr_codec.sv: 供通用引擎单元测试使用的最小指针编码器测试替身。
 `ifndef GQ_TEST_PTR_CODEC_SV
 `define GQ_TEST_PTR_CODEC_SV
 

@@ -1,3 +1,4 @@
+// src/cmdq/cmdq_tx_desc.sv: CMDQ 32 字节发送描述符的序列化、主机缓存所有权和完成解析。
 `ifndef CMDQ_TX_DESC_SV
 `define CMDQ_TX_DESC_SV
 
@@ -26,6 +27,8 @@ class cmdq_tx_desc extends gq_desc_base;
     protected gq_addr_t  prepared_rx_buf_addr;
     protected bit [63:0] prepared_reserved;
 
+    // prepare() 保存线缆稳定字段的快照，防止硬件写回破坏它们；发布后只允许
+    // flags 和硬件报告的 RX 长度发生变化。
     function new(string name = "cmdq_tx_desc");
         super.new(name);
         request = new[0];
@@ -54,6 +57,8 @@ class cmdq_tx_desc extends gq_desc_base;
         byte tx_storage[];
         byte rx_storage[];
 
+        // 准备过程只能执行一次，因为描述符被提交路径接受后，缓存所有权即转
+        // 移给引擎。
         if (prepare_attempted)
             return 0;
         prepare_attempted = 1;
@@ -102,12 +107,15 @@ class cmdq_tx_desc extends gq_desc_base;
     endfunction
 
     virtual function void mark_available(bit phase);
+        // CMDQ 将 phase 放在已发布尾指针中，而不是描述符 flags 中。
         flags = CMDQ_DESC_AVAIL;
     endfunction
 
     virtual function void pack(ref byte packed_data[]);
         bit [255:0] raw;
 
+        // 优先使用 prepare() 保存的字段，避免 pack() 暴露调用者对已提交环项的
+        // 后续修改。
         raw = '0;
         raw[15:0]    = flags;
         raw[31:16]   = prepared ? prepared_tx_buf_len : tx_buf_len;
@@ -132,6 +140,7 @@ class cmdq_tx_desc extends gq_desc_base;
         gq_addr_t  decoded_rx_buf_addr;
         bit [63:0] decoded_reserved;
 
+        // 在接受硬件 flags 之前，先拒绝稳定字段被破坏的描述符。
         if (!prepared || packed_data.size() != CMDQ_DESC_BYTES)
             return 0;
 
@@ -166,6 +175,7 @@ class cmdq_tx_desc extends gq_desc_base;
     virtual function bit parse_completion();
         byte copied_result[];
 
+        // 在回收阶段 release_owned() 将 RX 缓存归还分配器前，先复制其内容。
         if (!prepared || (flags & CMDQ_DESC_USED) == 0)
             return 0;
         if (rx_buf_len > CMDQ_BUFFER_BYTES)

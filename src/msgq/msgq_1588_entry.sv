@@ -1,3 +1,4 @@
+// src/msgq/msgq_1588_entry.sv: 适配 EMP 和 Linux 布局的 MSGQ 1588 时间戳条目解析器。
 `ifndef MSGQ_1588_ENTRY_SV
 `define MSGQ_1588_ENTRY_SV
 
@@ -11,6 +12,7 @@ class msgq_1588_entry extends msgq_entry_base;
     msgq_format_profile_e format_profile;
     bit strict_reserved;
 
+    // format_profile 选择共享 64 位时间戳条目的 EMP-active 或 Linux-header 解释方式。
     function new(string name = "msgq_1588_entry",
                  msgq_format_profile_e profile = MSGQ_PROFILE_EMP_ACTIVE);
         super.new(name);

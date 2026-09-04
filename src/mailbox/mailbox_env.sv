@@ -1,3 +1,4 @@
+// src/mailbox/mailbox_env.sv: Mailbox 环境配置以及通用队列 agent 构造。
 `ifndef MAILBOX_ENV_SV
 `define MAILBOX_ENV_SV
 
@@ -6,6 +7,8 @@ class mailbox_env_cfg extends gq_env_cfg;
 
     gq_ptr_codec ptr_codec;
 
+    // Mailbox 按驱动契约固定 TX/RX 几何参数，同时允许调用者选择合法范围内的
+    // 队列 ID 和深度。
     function new(string name = "mailbox_env_cfg");
         super.new(name);
         ptr_codec = mailbox_ptr_codec::type_id::create({name, "_ptr_codec"});
@@ -70,6 +73,7 @@ class mailbox_env_cfg extends gq_env_cfg;
         output string reason);
         gq_queue_cfg queue_cfg;
 
+        // 创建注册表项前先检查硬件可见的 ID 和深度，使无效请求不会留下部分配置。
         if (queue_id > 4095) begin
             reason = $sformatf("mailbox queue ID %0d is outside 0..4095", queue_id);
             return 0;

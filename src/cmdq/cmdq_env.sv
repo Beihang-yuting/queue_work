@@ -1,9 +1,12 @@
+// src/cmdq/cmdq_env.sv: 基于通用引擎的 CMDQ 环境配置和单队列注册。
 `ifndef CMDQ_ENV_SV
 `define CMDQ_ENV_SV
 
 class cmdq_env_cfg extends gq_env_cfg;
     `uvm_object_utils(cmdq_env_cfg)
 
+    // 每个环境只承载一个 CMDQ TX 环；全部重复队列和几何参数检查通过后，
+    // 才会写入硬件元数据。
     function new(string name = "cmdq_env_cfg");
         super.new(name);
     endfunction

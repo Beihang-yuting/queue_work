@@ -1,3 +1,4 @@
+// tb/tests/cmdq_desc_test.sv: UVM 测试 cmdq_desc_test：验证对应队列组件的定向行为和接口契约。
 `ifndef CMDQ_DESC_TEST_SV
 `define CMDQ_DESC_TEST_SV
 

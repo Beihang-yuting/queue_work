@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# scripts/check_sv_layout_test.sh: 通过夹具验证 SystemVerilog 布局扫描器能够拒绝非法源码位置。
 set -uo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)

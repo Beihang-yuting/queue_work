@@ -1,3 +1,4 @@
+// tb/tests/mailbox_reg_adapter_test.sv: UVM 测试 mailbox_reg_adapter_test：验证对应队列组件的定向行为和接口契约。
 `ifndef MAILBOX_REG_ADAPTER_TEST_SV
 `define MAILBOX_REG_ADAPTER_TEST_SV
 

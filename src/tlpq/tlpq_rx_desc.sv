@@ -1,3 +1,4 @@
+// src/tlpq/tlpq_rx_desc.sv: TLPQ 接收描述符、接收缓存所有权、路由元数据和 TLP 快照。
 `ifndef TLPQ_RX_DESC_SV
 `define TLPQ_RX_DESC_SV
 
@@ -17,6 +18,8 @@ class tlpq_rx_desc extends gq_desc_base;
     protected host_mem_api prepared_mem;
     protected gq_addr_t prepared_buf_addr;
 
+    // dpu_bytes 是脱离环的完成快照；decoded_tlp 从该快照重建，订阅者不会持有环
+    // 所有的 RX 缓存。
     function new(string name = "tlpq_rx_desc");
         super.new(name);
         flags       = 0;
@@ -78,6 +81,8 @@ class tlpq_rx_desc extends gq_desc_base;
     endfunction
 
     virtual function bit prepare();
+        // 每个准备好的描述符获得一块清零的 128 字节缓存；退休或复位时由引擎而非
+        // 调用者释放它。
         gq_addr_t allocated;
         byte cleared_buffer[];
 

@@ -1,3 +1,4 @@
+// src/gq/gq_env.sv: 构造队列 agent 并协调复位和最终清理的通用 UVM 环境。
 `ifndef GQ_ENV_SV
 `define GQ_ENV_SV
 

@@ -1,3 +1,4 @@
+// src/mailbox/mailbox_refill_profile.sv: Mailbox 接收补充配置和用于初始投递/回收的描述符工厂。
 `ifndef MAILBOX_REFILL_PROFILE_SV
 `define MAILBOX_REFILL_PROFILE_SV
 
@@ -7,6 +8,8 @@ class mailbox_refill_profile extends gq_refill_profile;
     longint unsigned min_buf_len;
     longint unsigned max_buf_len;
 
+    // RX 缓存按逻辑描述符确定大小；配置只拥有策略，prepare() 创建的分配由各
+    // 描述符负责所有权。
     function new(string name = "mailbox_refill_profile");
         super.new(name);
         min_buf_len = 1;
@@ -40,6 +43,8 @@ class mailbox_refill_profile extends gq_refill_profile;
         int unsigned min_len;
         int unsigned max_len;
 
+        // 校验后再转换：公共配置允许较宽整数，而 Mailbox 描述符和分配器使用
+        // 32 位长度。
         min_len = int'(min_buf_len);
         max_len = int'(max_buf_len);
         return $urandom_range(max_len, min_len);

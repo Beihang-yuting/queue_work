@@ -1,3 +1,4 @@
+// src/msgq/msgq_reg_adapter.sv: MSGQ 语义寄存器、当前指针、IRQ 和尾通知适配器接口。
 `ifndef MSGQ_REG_ADAPTER_SV
 `define MSGQ_REG_ADAPTER_SV
 

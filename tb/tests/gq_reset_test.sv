@@ -1,3 +1,4 @@
+// tb/tests/gq_reset_test.sv: UVM 测试 gq_reset_test：验证对应队列组件的定向行为和接口契约。
 `ifndef GQ_RESET_TEST_SV
 `define GQ_RESET_TEST_SV
 

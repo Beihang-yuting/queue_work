@@ -1,3 +1,4 @@
+// src/tlpq/tlpq_env.sv: TLPQ Host/Switch 通道配置、队列注册和独立接收环境初始化。
 `ifndef TLPQ_ENV_SV
 `define TLPQ_ENV_SV
 
@@ -9,6 +10,8 @@ class tlpq_env_cfg extends gq_env_cfg;
     protected tlpq_rx_hw_cfg_t channel_hw_cfgs[int];
     protected tlpq_refill_profile refill_profiles[int];
 
+    // Host 和 Switch 各自拥有一个深度 32 的显式补充 RX 环，并分别维护指针/完成
+    // 策略及适配器元数据。
     function new(string name = "tlpq_env_cfg");
         super.new(name);
     endfunction
@@ -62,6 +65,8 @@ class tlpq_env_cfg extends gq_env_cfg;
         gq_queue_cfg queue_cfg;
         tlpq_refill_profile profile;
 
+        // 在注册适配器元数据前拒绝重复通道和队列 ID，使失败的 add 操作对调用者
+        // 保持原子性。
         if (adapter == null || !$cast(installed_adapter, adapter)) begin
             reason = "TLPQ adapter must derive from tlpq_reg_adapter";
             return 0;

@@ -1,3 +1,4 @@
+// tb/tlpq_test_pkg.sv: 包含 TLPQ 模拟器、桥接、接收、发送和 PCIe 编解码测试的测试包。
 `ifndef TLPQ_TEST_PKG_SV
 `define TLPQ_TEST_PKG_SV
 

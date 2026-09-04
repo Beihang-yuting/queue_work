@@ -1,3 +1,4 @@
+// src/gq/gq_reset_controller.sv: 串行处理复位断言、释放和引擎清理的复位边沿控制器。
 `ifndef GQ_RESET_CONTROLLER_SV
 `define GQ_RESET_CONTROLLER_SV
 

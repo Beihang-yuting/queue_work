@@ -1,3 +1,4 @@
+// src/gq/gq_queue_cfg.sv: 单个队列的几何参数、等待策略、完成方式、补充策略和生命周期配置。
 `ifndef GQ_QUEUE_CFG_SV
 `define GQ_QUEUE_CFG_SV
 
@@ -23,6 +24,7 @@ class gq_queue_cfg extends uvm_object;
     gq_ptr_codec         ptr_codec;
     gq_completion_source completion_source;
 
+    // 默认值面向仿真；业务配置在校验和安装队列前覆盖几何、完成和等待设置。
     function new(string name = "gq_queue_cfg");
         super.new(name);
         queue_id           = 0;
@@ -44,6 +46,7 @@ class gq_queue_cfg extends uvm_object;
         completion_source     = null;
     endfunction
 
+    // 校验刻意设计为无副作用，使调用者能在修改环境注册表前拒绝候选配置。
     function bit validate(output string reason);
         string completion_reason;
         string pointer_reason;

@@ -1,3 +1,4 @@
+// src/dmaq/dmaq_completion.sv: 通用描述符写回完成源的 DMAQ 特化实现。
 `ifndef DMAQ_COMPLETION_SV
 `define DMAQ_COMPLETION_SV
 

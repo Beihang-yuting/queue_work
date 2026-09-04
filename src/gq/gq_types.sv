@@ -1,3 +1,4 @@
+// src/gq/gq_types.sv: 共享的队列角色、操作类型、指针宽度和生命周期枚举。
 `ifndef GQ_TYPES_SV
 `define GQ_TYPES_SV
 
@@ -14,6 +15,8 @@ typedef enum int { GQ_OK, GQ_RESOURCE_ERROR, GQ_ABORTED_BY_RESET } gq_status_e;
 typedef enum int { GQ_WAKE_CANCELLED, GQ_WAKE_POLL, GQ_WAKE_IRQ,
                    GQ_WAKE_WATCHDOG, GQ_WAKE_NEW_WORK } gq_wakeup_e;
 
+// 队列几何参数使用逻辑序号表达；编码器负责将其映射为硬件的有限索引/phase
+// 表示。
 function automatic bit gq_is_pow2(int unsigned value);
     return value >= 2 && ((value & (value - 1)) == 0);
 endfunction

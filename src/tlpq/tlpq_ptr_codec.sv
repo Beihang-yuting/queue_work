@@ -1,3 +1,4 @@
+// src/tlpq/tlpq_ptr_codec.sv: 通用索引加 phase 指针编码器的 TLPQ 特化实现。
 `ifndef TLPQ_PTR_CODEC_SV
 `define TLPQ_PTR_CODEC_SV
 

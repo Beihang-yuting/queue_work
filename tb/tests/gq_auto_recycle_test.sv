@@ -1,3 +1,4 @@
+// tb/tests/gq_auto_recycle_test.sv: UVM 测试 gq_auto_recycle_test：验证对应队列组件的定向行为和接口契约。
 `ifndef GQ_AUTO_RECYCLE_TEST_SV
 `define GQ_AUTO_RECYCLE_TEST_SV
 

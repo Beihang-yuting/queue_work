@@ -1,3 +1,4 @@
+// src/mailbox/mailbox_rx_desc.sv: Mailbox 接收描述符打包、接收缓存所有权和写回校验。
 `ifndef MAILBOX_RX_DESC_SV
 `define MAILBOX_RX_DESC_SV
 
@@ -14,6 +15,8 @@ class mailbox_rx_desc extends gq_desc_base;
     protected gq_addr_t prepared_buf_addr;
     protected bit [31:0] prepared_buf_len;
 
+    // 零长度 RX 描述符是合法的无缓存哨兵；其他描述符一直持有分配的缓存，直到
+    // 引擎退休或复位。
     function new(string name = "mailbox_rx_desc");
         super.new(name);
         flags    = 0;
@@ -27,6 +30,7 @@ class mailbox_rx_desc extends gq_desc_base;
     endfunction
 
     virtual function bit prepare();
+        // prepare() 记录后续解析/释放所需的分配器；拒绝重复准备以避免重复所有权。
         if (prepared)
             return 0;
 
@@ -79,6 +83,7 @@ class mailbox_rx_desc extends gq_desc_base;
         bit [31:0] decoded_buf_len;
         gq_addr_t decoded_buf_addr;
 
+        // 准备后地址和容量不可变；未准备对象可用于检查外部提供的条目。
         if (packed_data.size() != 16)
             return 0;
 

@@ -1,3 +1,4 @@
+// tb/gq_test_pkg.sv: 包含 GQ/Mailbox 测试、模拟器和生命周期回归的测试包。
 `ifndef GQ_TEST_PKG_SV
 `define GQ_TEST_PKG_SV
 

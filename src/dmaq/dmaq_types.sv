@@ -1,3 +1,4 @@
+// src/dmaq/dmaq_types.sv: DMAQ 操作、端点、结果、描述符和 EMP 默认元数据类型。
 `ifndef DMAQ_TYPES_SV
 `define DMAQ_TYPES_SV
 

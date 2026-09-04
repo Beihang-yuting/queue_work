@@ -1,3 +1,4 @@
+// src/gq/gq_tail_mem_completion.sv: 从状态内存解码硬件维护尾指针的完成源。
 `ifndef GQ_TAIL_MEM_COMPLETION_SV
 `define GQ_TAIL_MEM_COMPLETION_SV
 
@@ -50,6 +51,8 @@ class gq_tail_mem_completion extends gq_completion_source;
         input gq_desc_base pending[$],
         output bit valid,
         output int unsigned completed_count);
+        // 只读取一次状态字，相对于 logical_head 解码，并在不触碰描述符所有权的
+        // 前提下返回完成数量。
         byte raw_bytes[];
         gq_raw_ptr_t raw;
         gq_logical_seq_t completed_tail;

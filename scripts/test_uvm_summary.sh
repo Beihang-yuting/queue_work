@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# scripts/test_uvm_summary.sh: 使用干净、告警、错误、致命和不完整日志测试 UVM 摘要检查器。
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
